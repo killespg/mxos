@@ -36,7 +36,44 @@ mod ipv4;
 pub mod soquete;
 mod tcp;
 mod udp;
+#[cfg(feature = "mxq")]
+mod meson_eth;
 mod virtio_net;
+
+/// Uma placa de rede: virtio-net (QEMU) ou o Ethernet da Amlogic (box).
+pub trait Placa {
+    fn mac(&self) -> [u8; 6];
+    fn receber(&mut self, destino: &mut [u8; virtio_net::MAX_QUADRO]) -> Option<usize>;
+    /// Junta os pedacos num quadro e manda. false = sem lugar agora.
+    fn enviar(&mut self, partes: &[&[u8]]) -> bool;
+    fn encerrar(self: alloc::boxed::Box<Self>);
+}
+
+impl Placa for virtio_net::VirtioNet {
+    fn mac(&self) -> [u8; 6] {
+        virtio_net::VirtioNet::mac(self)
+    }
+    fn receber(&mut self, destino: &mut [u8; virtio_net::MAX_QUADRO]) -> Option<usize> {
+        virtio_net::VirtioNet::receber(self, destino)
+    }
+    fn enviar(&mut self, partes: &[&[u8]]) -> bool {
+        virtio_net::VirtioNet::enviar(self, partes)
+    }
+    fn encerrar(self: alloc::boxed::Box<Self>) {
+        virtio_net::VirtioNet::encerrar(*self)
+    }
+}
+
+/// A primeira placa que ligar.
+fn achar_placa() -> Result<alloc::boxed::Box<dyn Placa>, ErroRede> {
+    match virtio_net::VirtioNet::iniciar() {
+        Ok(nic) => Ok(alloc::boxed::Box::new(nic)),
+        #[cfg(feature = "mxq")]
+        Err(_) => Ok(alloc::boxed::Box::new(meson_eth::MesonEth::iniciar()?)),
+        #[cfg(not(feature = "mxq"))]
+        Err(e) => Err(e),
+    }
+}
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -114,7 +151,7 @@ impl Resposta {
 /// Tudo que a pilha sabe. Cada camada acrescenta metodos a ela no proprio
 /// arquivo (impl Pilha em arp.rs, ipv4.rs, tcp.rs...).
 struct Pilha {
-    nic: virtio_net::VirtioNet,
+    nic: alloc::boxed::Box<dyn Placa>,
     mac: [u8; 6],
     ip: [u8; 4],
     mascara: [u8; 4],
@@ -144,7 +181,7 @@ struct Pilha {
 }
 
 impl Pilha {
-    fn nova(nic: virtio_net::VirtioNet) -> Pilha {
+    fn nova(nic: alloc::boxed::Box<dyn Placa>) -> Pilha {
         let semente = cpu::contador();
         Pilha {
             mac: nic.mac(),
@@ -264,7 +301,7 @@ pub fn iniciar() -> Result<InfoRede, ErroRede> {
     if let Ok(info) = info_ou_erro() {
         return Ok(info); // ja estava ligada
     }
-    let nic = virtio_net::VirtioNet::iniciar()?;
+    let nic = achar_placa()?;
     com_global(|global| *global = Some(Pilha::nova(nic)))?;
     if let Err(e) = dhcp::configurar() {
         if let Ok(Some(pilha)) = com_global(|global| global.take()) {
