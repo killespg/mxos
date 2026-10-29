@@ -105,7 +105,7 @@ impl Entrada {
                 Err(e) => ultimo_erro = e.descricao(),
             }
         }
-        #[cfg(feature = "mxq")]
+        #[cfg(any(feature = "mxq", feature = "rk322x"))]
         if crate::usb::tem_entrada() {
             fontes.push(Fonte { disp: None, moveu: false, adiados: Vec::new() });
         }
@@ -173,7 +173,7 @@ impl Entrada {
     fn ler_dispositivos(&mut self) {
         for i in 0..self.fontes.len() {
             if self.fontes[i].disp.is_none() {
-                #[cfg(feature = "mxq")]
+                #[cfg(any(feature = "mxq", feature = "rk322x"))]
                 for cru in crate::usb::colher_entrada() {
                     self.traduzir(i, cru);
                 }

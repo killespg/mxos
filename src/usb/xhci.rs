@@ -521,3 +521,35 @@ impl Xhci {
 fn alocar_temporario(tamanho: usize) -> Vec<u8> {
     vec![0u8; tamanho.max(1)]
 }
+
+impl super::Controlador for Xhci {
+    fn portas(&self) -> u8 {
+        Xhci::portas(self)
+    }
+    fn ligar_porta(&mut self, porta: u8) -> Option<(u8, u8)> {
+        Xhci::ligar_porta(self, porta)
+    }
+    fn ajustar_ep0(&mut self, disp: u8, pacote: u16) -> Result<(), &'static str> {
+        Xhci::ajustar_ep0(self, disp, pacote)
+    }
+    fn controle(&mut self, disp: u8, tipo: u8, pedido: u8, valor: u16, indice: u16, dados: &mut [u8]) -> Result<usize, &'static str> {
+        Xhci::controle(self, disp, tipo, pedido, valor, indice, dados)
+    }
+    fn abrir_endpoint(&mut self, disp: u8, velocidade: u8, endereco: u8, tipo: u8, pacote: u16, intervalo: u8) -> Result<super::Ep, &'static str> {
+        let e = Xhci::abrir_endpoint(self, disp, velocidade, endereco, tipo, pacote, intervalo)?;
+        Ok(super::Ep { id: e.dci as u32 | (e.pacote as u32) << 16, entrada: e.entrada })
+    }
+    fn bulk(&mut self, disp: u8, ep: &super::Ep, dados: &mut [u8]) -> Result<usize, &'static str> {
+        Xhci::bulk(self, disp, &endpoint(ep), dados)
+    }
+    fn pedir(&mut self, disp: u8, ep: &super::Ep, tamanho: usize) -> Result<(), &'static str> {
+        Xhci::pedir(self, disp, &endpoint(ep), tamanho)
+    }
+    fn colher(&mut self, disp: u8, ep: &super::Ep, destino: &mut [u8]) -> Option<usize> {
+        Xhci::colher(self, disp, &endpoint(ep), destino)
+    }
+}
+
+fn endpoint(ep: &super::Ep) -> Endpoint {
+    Endpoint { dci: ep.id as u8, entrada: ep.entrada, pacote: (ep.id >> 16) as u16 }
+}

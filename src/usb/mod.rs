@@ -1,5 +1,8 @@
-//! USB da TV box: o controlador xHCI (DWC3 da Amlogic GXL, em modo host)
-//! com os dispositivos ligados direto nas portas dele:
+//! USB da TV box. Os controladores falam pelo trait Controlador:
+//!   - Amlogic (mxq): xHCI do DWC3 em modo host
+//!   - Rockchip RK322x: EHCI (high speed) + OHCI (low/full speed) nas tres
+//!     portas host (cada EHCI passa para o OHCI o que nao e high speed)
+//! Os dispositivos ligados direto nas portas:
 //!
 //!   - pendrive (armazenamento em massa, SCSI por bulk-only): vira um Disco
 //!     (armazenamento/mod.rs monta o FAT32 dele em "/" ou o ext4 em /mnt)
@@ -11,11 +14,16 @@
 //! nao ve o cache da CPU: aneis, contextos e buffers sao limpos (dc civac)
 //! antes e depois. NUNCA TESTADO NO HARDWARE.
 //!
-//! O U-Boot ja ligou o PHY USB e pos o DWC3 em modo host (ele leu o MXOS do
-//! pendrive); aqui o controlador so e reiniciado (HCRST).
+//! O U-Boot ja ligou o PHY USB (na Amlogic ele leu o MXOS do pendrive);
+//! aqui os controladores so sao reiniciados.
 
 #![allow(dead_code)]
 
+#[cfg(feature = "rk322x")]
+mod ehci;
+#[cfg(feature = "rk322x")]
+mod ohci;
+#[cfg(not(feature = "rk322x"))]
 mod xhci;
 
 use alloc::boxed::Box;
@@ -27,35 +35,101 @@ use core::cell::UnsafeCell;
 
 use crate::armazenamento::{Disco, Erro};
 use crate::entrada::virtio_input::{EventoCru, EV_KEY, EV_REL, EV_SYN, REL_WHEEL, REL_X, REL_Y, SYN_REPORT, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
-use xhci::{Xhci, Endpoint};
-
 /// DWC3 do GXL: o xHCI comeca no inicio da regiao; GCTL diz host/device.
+#[cfg(not(feature = "rk322x"))]
 const BASE_XHCI: usize = 0xC900_0000;
+#[cfg(not(feature = "rk322x"))]
 const DWC3_GCTL: usize = 0xC900_C110;
+/// RK322x: (EHCI, OHCI) das tres portas host (rk322x.dtsi).
+#[cfg(feature = "rk322x")]
+const HOSTS_RK: [(usize, usize); 3] = [(0x3008_0000, 0x300A_0000), (0x300C_0000, 0x300E_0000), (0x3010_0000, 0x3012_0000)];
+
+/// Um endpoint aberto num controlador (o numero e dele).
+#[derive(Clone, Copy)]
+pub struct Ep {
+    pub id: u32,
+    pub entrada: bool,
+}
+
+/// O que o mod.rs precisa de um controlador host. `disp` e o numero que o
+/// controlador deu ao dispositivo (slot no xHCI, endereco USB no EHCI/OHCI);
+/// velocidade: 1 full, 2 low, 3 high, 4+ super.
+pub trait Controlador {
+    fn portas(&self) -> u8;
+    /// Reinicia a porta e da endereco ao que estiver nela: (disp, velocidade).
+    fn ligar_porta(&mut self, porta: u8) -> Option<(u8, u8)>;
+    fn ajustar_ep0(&mut self, disp: u8, pacote: u16) -> Result<(), &'static str>;
+    fn controle(&mut self, disp: u8, tipo: u8, pedido: u8, valor: u16, indice: u16, dados: &mut [u8]) -> Result<usize, &'static str>;
+    fn abrir_endpoint(&mut self, disp: u8, velocidade: u8, endereco: u8, tipo: u8, pacote: u16, intervalo: u8) -> Result<Ep, &'static str>;
+    fn bulk(&mut self, disp: u8, ep: &Ep, dados: &mut [u8]) -> Result<usize, &'static str>;
+    fn pedir(&mut self, disp: u8, ep: &Ep, tamanho: usize) -> Result<(), &'static str>;
+    fn colher(&mut self, disp: u8, ep: &Ep, destino: &mut [u8]) -> Option<usize>;
+}
+
+/// Memoria para DMA (zerada, alinhada).
+pub(crate) fn dma(tamanho: usize, alinhamento: usize) -> usize {
+    let layout = core::alloc::Layout::from_size_align(tamanho.max(1), alinhamento).unwrap();
+    let p = unsafe { alloc::alloc::alloc_zeroed(layout) };
+    assert!(!p.is_null(), "usb: sem memória");
+    p as usize
+}
+
+pub(crate) fn liberar_dma(endereco: usize, tamanho: usize, alinhamento: usize) {
+    if endereco != 0 {
+        let layout = core::alloc::Layout::from_size_align(tamanho.max(1), alinhamento).unwrap();
+        unsafe { alloc::alloc::dealloc(endereco as *mut u8, layout) };
+    }
+}
+
+/// O DMA nao ve a cache: limpa e invalida antes e depois.
+pub(crate) fn limpar(endereco: usize, tamanho: usize) {
+    crate::mmu::limpar_cache(endereco, tamanho);
+}
+
+/// Espera `cond` por ate `ms` milissegundos.
+pub(crate) fn esperar(mut cond: impl FnMut() -> bool, ms: u64) -> bool {
+    let prazo = crate::cpu::contador() + crate::cpu::frequencia_timer() * ms / 1000;
+    loop {
+        if cond() {
+            return true;
+        }
+        if crate::cpu::contador() > prazo {
+            return false;
+        }
+    }
+}
+
+pub(crate) fn pausa_ms(ms: u64) {
+    let alvo = crate::cpu::contador() + crate::cpu::frequencia_timer() * ms / 1000;
+    while crate::cpu::contador() < alvo {}
+}
 
 struct Teclado {
+    hc: usize,
     slot: u8,
-    ep: Endpoint,
+    ep: Ep,
     anterior: [u8; 8],
 }
 
 struct Mouse {
+    hc: usize,
     slot: u8,
-    ep: Endpoint,
+    ep: Ep,
     botoes: u8,
 }
 
 pub struct Armazenamento {
+    hc: usize,
     slot: u8,
-    entrada: Endpoint,
-    saida: Endpoint,
+    entrada: Ep,
+    saida: Ep,
     setores: u64,
     tag: u32,
     nome: String,
 }
 
 struct Usb {
-    hc: Xhci,
+    hcs: Vec<Box<dyn Controlador>>,
     teclados: Vec<Teclado>,
     mouses: Vec<Mouse>,
     discos: Vec<Option<Armazenamento>>,
@@ -79,16 +153,45 @@ pub fn iniciar() -> Result<String, &'static str> {
     if usb().is_some() {
         return Ok(String::from("ja ligado"));
     }
-    // DWC3: PRTCAPDIR (bits 13:12) = 1, host
-    unsafe {
-        let g = core::ptr::read_volatile(DWC3_GCTL as *const u32);
-        core::ptr::write_volatile(DWC3_GCTL as *mut u32, (g & !(3 << 12)) | 1 << 12);
+    let mut u = Usb { hcs: Vec::new(), teclados: Vec::new(), mouses: Vec::new(), discos: Vec::new(), eventos: VecDeque::new() };
+    #[cfg(not(feature = "rk322x"))]
+    {
+        // DWC3: PRTCAPDIR (bits 13:12) = 1, host
+        unsafe {
+            let g = core::ptr::read_volatile(DWC3_GCTL as *const u32);
+            core::ptr::write_volatile(DWC3_GCTL as *mut u32, (g & !(3 << 12)) | 1 << 12);
+        }
+        u.hcs.push(Box::new(xhci::Xhci::iniciar(BASE_XHCI)?));
+        ligar_portas(&mut u, 0);
     }
-    let hc = Xhci::iniciar(BASE_XHCI)?;
-    let mut u = Usb { hc, teclados: Vec::new(), mouses: Vec::new(), discos: Vec::new(), eventos: VecDeque::new() };
-    for porta in 1..=u.hc.portas() {
-        if let Some((slot, velocidade)) = u.hc.ligar_porta(porta) {
-            let _ = configurar(&mut u, slot, velocidade, porta);
+    #[cfg(feature = "rk322x")]
+    {
+        // primeiro os EHCI (high speed); o que eles largam aparece no OHCI
+        let mut erros = 0;
+        for &(e, _) in &HOSTS_RK {
+            match ehci::Ehci::iniciar(e) {
+                Ok(hc) => {
+                    u.hcs.push(Box::new(hc));
+                    let k = u.hcs.len() - 1;
+                    ligar_portas(&mut u, k);
+                }
+                Err(_) => erros += 1,
+            }
+        }
+        pausa_ms(100);
+        for (k, &(_, o)) in HOSTS_RK.iter().enumerate() {
+            // enderecos diferentes em cada OHCI so para o log ficar claro
+            match ohci::Ohci::iniciar(o, 1 + 20 * k as u8) {
+                Ok(hc) => {
+                    u.hcs.push(Box::new(hc));
+                    let k = u.hcs.len() - 1;
+                    ligar_portas(&mut u, k);
+                }
+                Err(_) => erros += 1,
+            }
+        }
+        if u.hcs.is_empty() {
+            return Err(if erros > 0 { "nenhum controlador USB respondeu" } else { "sem controladores" });
         }
     }
     let linha = alloc::format!("{} teclado(s), {} mouse(s), {} disco(s)", u.teclados.len(), u.mouses.len(), u.discos.len());
@@ -96,20 +199,28 @@ pub fn iniciar() -> Result<String, &'static str> {
     Ok(linha)
 }
 
+fn ligar_portas(u: &mut Usb, hc: usize) {
+    for porta in 1..=u.hcs[hc].portas() {
+        if let Some((slot, velocidade)) = u.hcs[hc].ligar_porta(porta) {
+            let _ = configurar(u, hc, slot, velocidade, porta);
+        }
+    }
+}
+
 /// Le os descritores, escolhe a configuracao e liga as interfaces que o
 /// MXOS conhece.
-fn configurar(u: &mut Usb, slot: u8, velocidade: u8, porta: u8) -> Result<(), &'static str> {
+fn configurar(u: &mut Usb, hc: usize, slot: u8, velocidade: u8, porta: u8) -> Result<(), &'static str> {
     let mut d = vec![0u8; 18];
-    u.hc.controle(slot, 0x80, 6, 0x0100, 0, &mut d)?;
+    u.hcs[hc].controle(slot, 0x80, 6, 0x0100, 0, &mut d)?;
     // o pacote maximo do endpoint 0 de verdade (full speed pode ser 8 a 64)
-    u.hc.ajustar_ep0(slot, d[7] as u16)?;
+    u.hcs[hc].ajustar_ep0(slot, d[7] as u16)?;
     let mut c = vec![0u8; 9];
-    u.hc.controle(slot, 0x80, 6, 0x0200, 0, &mut c)?;
+    u.hcs[hc].controle(slot, 0x80, 6, 0x0200, 0, &mut c)?;
     let total = u16::from_le_bytes([c[2], c[3]]) as usize;
     let mut c = vec![0u8; total.clamp(9, 1024)];
-    u.hc.controle(slot, 0x80, 6, 0x0200, 0, &mut c)?;
+    u.hcs[hc].controle(slot, 0x80, 6, 0x0200, 0, &mut c)?;
     let configuracao = c[5];
-    u.hc.controle(slot, 0x00, 9, configuracao as u16, 0, &mut [])?;
+    u.hcs[hc].controle(slot, 0x00, 9, configuracao as u16, 0, &mut [])?;
 
     // interfaces e endpoints
     let mut k = 0;
@@ -145,14 +256,14 @@ fn configurar(u: &mut Usb, slot: u8, velocidade: u8, porta: u8) -> Result<(), &'
                 (3, 1, 1) | (3, 1, 2) => {
                     if let Some(&(_, end, _, pacote, intervalo)) = meus.iter().find(|e| e.2 == 3 && e.1 & 0x80 != 0) {
                         // protocolo de boot e sem repeticao automatica
-                        let _ = u.hc.controle(slot, 0x21, 0x0B, 0, n as u16, &mut []);
-                        let _ = u.hc.controle(slot, 0x21, 0x0A, 0, n as u16, &mut []);
-                        let ep = u.hc.abrir_endpoint(slot, velocidade, end, 3, pacote, intervalo)?;
-                        u.hc.pedir(slot, &ep, 8)?;
+                        let _ = u.hcs[hc].controle(slot, 0x21, 0x0B, 0, n as u16, &mut []);
+                        let _ = u.hcs[hc].controle(slot, 0x21, 0x0A, 0, n as u16, &mut []);
+                        let ep = u.hcs[hc].abrir_endpoint(slot, velocidade, end, 3, pacote, intervalo)?;
+                        u.hcs[hc].pedir(slot, &ep, 8)?;
                         if proto == 1 {
-                            u.teclados.push(Teclado { slot, ep, anterior: [0; 8] });
+                            u.teclados.push(Teclado { hc, slot, ep, anterior: [0; 8] });
                         } else {
-                            u.mouses.push(Mouse { slot, ep, botoes: 0 });
+                            u.mouses.push(Mouse { hc, slot, ep, botoes: 0 });
                         }
                     }
                 }
@@ -160,11 +271,11 @@ fn configurar(u: &mut Usb, slot: u8, velocidade: u8, porta: u8) -> Result<(), &'
                     let entrada = meus.iter().find(|e| e.2 == 2 && e.1 & 0x80 != 0).copied();
                     let saida = meus.iter().find(|e| e.2 == 2 && e.1 & 0x80 == 0).copied();
                     if let (Some(i), Some(o)) = (entrada, saida) {
-                        let ep_in = u.hc.abrir_endpoint(slot, velocidade, i.1, 2, i.3, 0)?;
-                        let ep_out = u.hc.abrir_endpoint(slot, velocidade, o.1, 2, o.3, 0)?;
+                        let ep_in = u.hcs[hc].abrir_endpoint(slot, velocidade, i.1, 2, i.3, 0)?;
+                        let ep_out = u.hcs[hc].abrir_endpoint(slot, velocidade, o.1, 2, o.3, 0)?;
                         let nome = if u.discos.is_empty() { String::from("usb") } else { alloc::format!("usb{}", u.discos.len()) };
-                        let mut disco = Armazenamento { slot, entrada: ep_in, saida: ep_out, setores: 0, tag: 1, nome };
-                        if preparar_disco(&mut u.hc, &mut disco).is_ok() {
+                        let mut disco = Armazenamento { hc, slot, entrada: ep_in, saida: ep_out, setores: 0, tag: 1, nome };
+                        if preparar_disco(&mut *u.hcs[hc], &mut disco).is_ok() {
                             u.discos.push(Some(disco));
                         }
                     }
@@ -271,19 +382,19 @@ pub fn colher_entrada() -> Vec<EventoCru> {
     let Some(u) = usb() else { return Vec::new() };
     let mut dados = [0u8; 8];
     for k in 0..u.teclados.len() {
-        let (slot, ep) = (u.teclados[k].slot, u.teclados[k].ep);
-        if let Some(n) = u.hc.colher(slot, &ep, &mut dados) {
+        let (hc, slot, ep) = (u.teclados[k].hc, u.teclados[k].slot, u.teclados[k].ep);
+        if let Some(n) = u.hcs[hc].colher(slot, &ep, &mut dados) {
             if n >= 8 {
                 let antes = u.teclados[k].anterior;
                 relatorio_teclado(&mut u.eventos, &antes, &dados);
                 u.teclados[k].anterior = dados;
             }
-            let _ = u.hc.pedir(slot, &ep, 8);
+            let _ = u.hcs[hc].pedir(slot, &ep, 8);
         }
     }
     for k in 0..u.mouses.len() {
-        let (slot, ep) = (u.mouses[k].slot, u.mouses[k].ep);
-        if let Some(n) = u.hc.colher(slot, &ep, &mut dados) {
+        let (hc, slot, ep) = (u.mouses[k].hc, u.mouses[k].slot, u.mouses[k].ep);
+        if let Some(n) = u.hcs[hc].colher(slot, &ep, &mut dados) {
             if n >= 3 {
                 let botoes = dados[0];
                 let antes = u.mouses[k].botoes;
@@ -305,7 +416,7 @@ pub fn colher_entrada() -> Vec<EventoCru> {
                 }
                 u.eventos.push_back(EventoCru { tipo: EV_SYN, codigo: SYN_REPORT, valor: 0 });
             }
-            let _ = u.hc.pedir(slot, &ep, 8);
+            let _ = u.hcs[hc].pedir(slot, &ep, 8);
         }
     }
     u.eventos.drain(..).collect()
@@ -319,7 +430,7 @@ pub fn tem_entrada() -> bool {
 // ---------------------------------------------------------------------
 // Pendrive: SCSI por bulk-only (CBW, dados, CSW)
 
-fn scsi(hc: &mut Xhci, d: &mut Armazenamento, comando: &[u8], dados: &mut [u8], escrita: bool) -> Result<(), Erro> {
+fn scsi(hc: &mut dyn Controlador, d: &mut Armazenamento, comando: &[u8], dados: &mut [u8], escrita: bool) -> Result<(), Erro> {
     let mut cbw = [0u8; 31];
     cbw[0..4].copy_from_slice(&0x4342_5355u32.to_le_bytes());
     cbw[4..8].copy_from_slice(&d.tag.to_le_bytes());
@@ -341,7 +452,7 @@ fn scsi(hc: &mut Xhci, d: &mut Armazenamento, comando: &[u8], dados: &mut [u8], 
     Ok(())
 }
 
-fn preparar_disco(hc: &mut Xhci, d: &mut Armazenamento) -> Result<(), Erro> {
+fn preparar_disco(hc: &mut dyn Controlador, d: &mut Armazenamento) -> Result<(), Erro> {
     let mut inq = [0u8; 36];
     scsi(hc, d, &[0x12, 0, 0, 0, 36, 0], &mut inq, false)?;
     // o pendrive pode demorar a ficar pronto
@@ -382,11 +493,12 @@ pub fn discos() -> Vec<Box<dyn Disco>> {
     lista
 }
 
-fn com_disco<R>(indice: usize, f: impl FnOnce(&mut Xhci, &mut Armazenamento) -> Result<R, Erro>) -> Result<R, Erro> {
+fn com_disco<R>(indice: usize, f: impl FnOnce(&mut dyn Controlador, &mut Armazenamento) -> Result<R, Erro>) -> Result<R, Erro> {
     let u = usb().ok_or(Erro::SemDisco)?;
-    let Usb { hc, discos, .. } = u;
+    let Usb { hcs, discos, .. } = u;
     let d = discos.get_mut(indice).and_then(Option::as_mut).ok_or(Erro::SemDisco)?;
-    f(hc, d)
+    let hc = hcs.get_mut(d.hc).ok_or(Erro::SemDisco)?;
+    f(&mut **hc, d)
 }
 
 /// Blocos por comando READ(10)/WRITE(10).

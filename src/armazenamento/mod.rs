@@ -186,6 +186,10 @@ fn procurar_discos(estado: &mut Estado) {
     for disco in crate::usb::discos().into_iter().chain(meson_sd::achar()) {
         montar(estado, disco);
     }
+    #[cfg(feature = "rk322x")]
+    for disco in crate::usb::discos() {
+        montar(estado, disco);
+    }
     let mut letra = b'a';
     for slot in (0..virtio_mmio::SLOTS_QEMU_VIRT).rev() {
         let base = virtio_mmio::BASE_QEMU_VIRT + slot * virtio_mmio::PASSO_QEMU_VIRT;

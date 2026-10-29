@@ -14,6 +14,16 @@
 .global _start
 
 _start:
+    @ cabecalho de zImage: alguns U-Boot conferem a assinatura em 0x24
+    b       comeco
+    .rept   8
+    nop
+    .endr
+    .word   0x016F2818                  @ 0x24: assinatura do zImage
+    .word   0                           @ 0x28: comeco
+    .word   __bss_start - _start        @ 0x2C: fim (tamanho do arquivo)
+
+comeco:
     cpsid   aif
     mrc     p15, 0, r4, c0, c0, 5       @ MPIDR: qual nucleo
     ands    r4, r4, #3
