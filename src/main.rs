@@ -37,6 +37,8 @@ mod processo;
 mod rede;
 mod shell;
 #[cfg(not(feature = "mxq"))]
+mod smp;
+#[cfg(not(feature = "mxq"))]
 mod som;
 mod terminal;
 mod timer;

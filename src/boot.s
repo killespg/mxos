@@ -79,3 +79,66 @@ em_el1:
 estacionar:
     wfe
     b       estacionar
+
+// ============================================================
+//  Os outros nucleos (smp.rs): o PSCI CPU_ON comeca aqui com
+//  x0 = &Partida (pilhas e os registradores da MMU do nucleo 0).
+//  Desce para EL1 se precisar, liga a MMU com as tabelas do
+//  kernel (antes disso nada de pilha: cache desligado) e chama
+//  nucleo_secundario.
+// ============================================================
+
+.global _start_secundario
+_start_secundario:
+    mov     x19, x0
+    mrs     x1, CurrentEL
+    lsr     x1, x1, #2
+    and     x1, x1, #3
+    cmp     x1, #2
+    b.ne    secundario_el1
+    mov     x1, #(1 << 31)
+    msr     hcr_el2, x1
+    mrs     x1, cnthctl_el2
+    orr     x1, x1, #3
+    msr     cnthctl_el2, x1
+    msr     cntvoff_el2, xzr
+    mov     x1, #0x3c5
+    msr     spsr_el2, x1
+    adr     x1, secundario_el1
+    msr     elr_el2, x1
+    eret
+
+secundario_el1:
+    mov     x1, #(3 << 20)          // FP/SIMD liberado
+    msr     cpacr_el1, x1
+    ldr     x1, =0x30d00800
+    msr     sctlr_el1, x1
+    ldr     x1, =vetores
+    msr     vbar_el1, x1
+    isb
+    ldr     x1, [x19, #16]          // MAIR
+    msr     mair_el1, x1
+    ldr     x1, [x19, #24]          // TCR
+    msr     tcr_el1, x1
+    ldr     x1, [x19, #32]          // TTBR0 (tabelas do kernel)
+    msr     ttbr0_el1, x1
+    isb
+    tlbi    vmalle1
+    ic      iallu
+    dsb     ish
+    isb
+    mrs     x1, sctlr_el1
+    mov     x2, #0x1005             // M, C e I: MMU e caches
+    orr     x1, x1, x2
+    msr     sctlr_el1, x1
+    isb
+    ldr     x1, [x19, #0]           // pilha de excecao (SP_EL1)
+    msr     spsel, #1
+    mov     sp, x1
+    msr     spsel, #0
+    ldr     x1, [x19, #8]           // pilha do kernel (SP_EL0)
+    mov     sp, x1
+    ldr     x0, [x19, #40]          // numero do nucleo
+    bl      nucleo_secundario
+1:  wfe
+    b       1b

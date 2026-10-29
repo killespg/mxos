@@ -74,6 +74,8 @@ fn atender(id: u32) {
     match id {
         // sem disparar de verdade e repeticao da linha que ainda nao desceu
         IRQ_TIMER if !timer::disparou() => somar(&ESPURIAS, 1),
+        // os outros nucleos: so a troca de programa, sem contar tique
+        IRQ_TIMER if cpu::mpidr() & 0xFF != 0 => timer::proximo_do_nucleo(),
         IRQ_TIMER => {
             somar(&TIMER, 1);
             timer::tique();

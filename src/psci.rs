@@ -57,6 +57,19 @@ pub fn chamar(via: Via, funcao: u32) -> u64 {
     x0
 }
 
+/// Chamada com 3 argumentos (CPU_ON: nucleo, endereco, contexto).
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub fn chamar3(via: Via, funcao: u32, a1: u64, a2: u64, a3: u64) -> u64 {
+    let mut x0 = funcao as u64;
+    unsafe {
+        match via {
+            Via::Hvc => asm!("hvc #0", inout("x0") x0, in("x1") a1, in("x2") a2, in("x3") a3, clobber_abi("C"), options(nostack)),
+            Via::Smc => asm!("smc #0", inout("x0") x0, in("x1") a1, in("x2") a2, in("x3") a3, clobber_abi("C"), options(nostack)),
+        }
+    }
+    x0
+}
+
 /// Guarda a via que o firmware atende (chamado pelo Shell::nova).
 pub fn definir_via(via: Via) {
     VIA.store(via.codigo(), Ordering::Relaxed);

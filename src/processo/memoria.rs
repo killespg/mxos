@@ -252,10 +252,13 @@ impl Espaco {
     /// Tira a pagina (o quadro volta para o heap).
     pub fn desmapear(&mut self, endereco: usize) {
         let numero = endereco / PAGINA;
-        if self.paginas.remove(&numero).is_some() {
+        if let Some(pagina) = self.paginas.remove(&numero) {
             self.permissoes.remove(&numero);
             *self.entrada(endereco & !(PAGINA - 1)) = 0;
             mmu::esquecer_asid(self.asid);
+            // o quadro so volta ao heap depois que nenhum nucleo (outra
+            // thread rodando) pode mais usar a traducao velha
+            drop(pagina);
         }
     }
 

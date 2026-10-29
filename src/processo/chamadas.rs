@@ -1673,7 +1673,10 @@ pub fn trocar_programa(t: &mut Tabela, i: usize, caminho: &str, mut argumentos: 
     elf::conferir(&dados).map_err(|_| ENOEXEC)?;
     // as outras threads morrem no exec
     let (pid, tgid) = (t.processos[i].pid, t.processos[i].tgid);
-    t.processos.retain(|q| !(q.tgid == tgid && q.pid != pid));
+    for q in t.processos.iter_mut().filter(|q| q.tgid == tgid && q.pid != pid && q.rodando.is_some()) {
+        q.morte.get_or_insert(9); // rodando em outro nucleo: some quando voltar
+    }
+    t.processos.retain(|q| !(q.tgid == tgid && q.pid != pid && q.rodando.is_none()));
     let i = t.indice(pid).unwrap_or(i);
     let asid = t.processos[i].espaco.asid;
     let mut espaco = Espaco::novo(asid);

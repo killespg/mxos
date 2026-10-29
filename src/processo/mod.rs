@@ -47,7 +47,7 @@ use core::fmt::Write;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::{armazenamento, cpu, mmu, timer};
+use crate::{armazenamento, cpu, mmu, smp, timer};
 use memoria::{Espaco, PAGINA, Permissao};
 
 /// Onde o programa de teste embutido e carregado.
@@ -214,6 +214,11 @@ pub struct Processo {
     pub cmdline: Vec<u8>,
     /// cpu::contador quando o processo nasceu.
     pub inicio: u64,
+    /// Rodando agora no nucleo n (fora do kernel, sem a trava).
+    pub rodando: Option<usize>,
+    /// Morreu (kill, exit_group de outra thread) enquanto rodava em outro
+    /// nucleo: termina quando voltar ao kernel.
+    pub morte: Option<i32>,
 }
 
 /// Fotografia de um processo (comando "processos", app Tarefas).
@@ -378,6 +383,11 @@ fn liberar_registradores_el0() {
     if FEITO.swap(true, Ordering::Relaxed) {
         return;
     }
+    configurar_el0();
+}
+
+/// O mesmo em cada nucleo (os registradores sao de cada um; smp.rs).
+pub fn configurar_el0() {
     unsafe {
         core::arch::asm!(
             "mrs {t}, sctlr_el1",
@@ -437,6 +447,8 @@ impl Tabela {
             exe: String::new(),
             cmdline: Vec::new(),
             inicio: cpu::contador(),
+            rodando: None,
+            morte: None,
         };
         self.processos.push(Box::new(p));
         pid
@@ -451,11 +463,24 @@ impl Tabela {
             if let Some(lider) = self.indice(tgid) {
                 return self.terminar(lider, status);
             }
+            if self.processos[i].rodando.is_some() {
+                self.processos[i].morte.get_or_insert(status);
+                return;
+            }
             self.processos.remove(i);
             return;
         }
-        // as outras threads do processo somem junto
-        self.processos.retain(|q| !(q.tgid == tgid && q.pid != tgid));
+        if self.processos[i].rodando.is_some() {
+            // as tabelas dele estao em uso em outro nucleo: termina quando voltar
+            self.processos[i].morte.get_or_insert(status);
+            return;
+        }
+        // as outras threads do processo somem junto (as que rodam em outro
+        // nucleo, quando voltarem)
+        for q in self.processos.iter_mut().filter(|q| q.tgid == tgid && q.pid != tgid && q.rodando.is_some()) {
+            q.morte.get_or_insert(status);
+        }
+        self.processos.retain(|q| !(q.tgid == tgid && q.pid != tgid && q.rodando.is_none()));
         let i = self.indice(pid).unwrap_or(i);
         let pai = self.processos[i].pai;
         if let Some(pai_vfork) = self.processos[i].linux.pai_vfork.take() {
@@ -569,12 +594,14 @@ impl Tabela {
         }
     }
 
-    /// O proximo pronto da fila, a partir da vez.
+    /// O proximo pronto da fila, a partir da vez (fora os que ja rodam em
+    /// outro nucleo).
     fn proximo_pronto(&mut self) -> Option<usize> {
         let n = self.processos.len();
         for k in 0..n {
             let i = (self.vez + k) % n;
-            if self.processos[i].estado == Estado::Pronto {
+            let p = &self.processos[i];
+            if p.estado == Estado::Pronto && p.rodando.is_none() && p.morte.is_none() {
                 return Some(i);
             }
         }
@@ -593,24 +620,63 @@ const IRQ: u64 = 1;
 /// nenhum estar pronto). Devolve true se algum processo escreveu, mudou de
 /// estado ou terminou (o terminal precisa olhar).
 pub fn rodar() -> bool {
-    com(|t| {
-        let tique = timer::tiques();
-        let mut novidade = false;
-        t.acordar(true);
-        while let Some(i) = t.proximo_pronto() {
-            if sinais::entregar(t, i) {
-                novidade = true;
-                continue;
+    rodar_fatias().0
+}
+
+/// Os nucleos 1-3 (smp.rs), com a trava do kernel: roda o que houver ate
+/// o fim da fatia. Devolve true se rodou algum processo.
+pub fn rodar_neste_nucleo() -> bool {
+    rodar_fatias().1
+}
+
+/// Roda processos prontos ate o fim da fatia deste nucleo (um tique). O
+/// programa roda sem a trava do kernel (os outros nucleos entram no kernel
+/// enquanto isso); a tabela so e mexida com ela. Devolve (algo mudou que o
+/// terminal precisa ver, rodou algum processo).
+fn rodar_fatias() -> (bool, bool) {
+    let nucleo = smp::nucleo();
+    let fim = cpu::contador() + cpu::frequencia_timer() / timer::HZ;
+    let mut novidade = false;
+    let mut rodou = false;
+    com(|t| t.acordar(true));
+    loop {
+        let escolhido = com(|t| {
+            loop {
+                let i = t.proximo_pronto()?;
+                if sinais::entregar(t, i) {
+                    novidade = true;
+                    continue;
+                }
+                let p = &mut t.processos[i];
+                p.rodando = Some(nucleo);
+                return Some((p.pid, &mut **p as *mut Processo));
             }
-            let motivo = fatia(&mut t.processos[i]);
+        });
+        let Some((pid, p)) = escolhido else { break };
+        rodou = true;
+        // o Box do processo nao muda de lugar e nao some enquanto `rodando`
+        // estiver marcado (terminar espera ele voltar)
+        let motivo = smp::sem_trava(|| fatia(unsafe { &mut *p }));
+        novidade |= com(|t| {
+            let Some(i) = t.indice(pid) else { return true };
+            t.processos[i].rodando = None;
+            if let Some(status) = t.processos[i].morte.take() {
+                // morreu enquanto rodava em outro nucleo
+                if t.processos[i].pid != t.processos[i].tgid {
+                    t.processos.remove(i);
+                } else {
+                    t.terminar(i, status);
+                }
+                return true;
+            }
+            let mut mudou = false;
             if motivo == SINCRONA {
-                novidade |= tratar_excecao(t, i);
+                mudou |= tratar_excecao(t, i);
             } else if motivo != IRQ {
                 // FIQ ou SError vindos do programa: nao deviam acontecer
-                let pid = t.processos[i].pid;
                 let _ = writeln!(Saida(t), "\n[processo {pid}: erro assíncrono da CPU]");
                 t.terminar(i, 7);
-                novidade = true;
+                mudou = true;
             }
             if unix::mexeu() {
                 // um soquete local mudou: o servidor X11 atende na hora e
@@ -619,21 +685,23 @@ pub fn rodar() -> bool {
                 crate::x11::atender();
                 t.acordar(true);
             }
-            if timer::tiques() != tique {
-                // a fatia acabou: o proximo da fila comeca na proxima volta
-                t.vez = t.vez.wrapping_add(1);
-                break;
-            }
+            mudou
+        });
+        if cpu::contador() >= fim {
+            // a fatia acabou: o proximo da fila comeca na proxima volta
+            com(|t| t.vez = t.vez.wrapping_add(1));
+            break;
         }
-        novidade || !t.saida.is_empty()
-    })
+    }
+    novidade |= com(|t| !t.saida.is_empty());
+    (novidade, rodou)
 }
 
 /// Algum processo quer a CPU agora (o laco principal nao deve dormir).
 pub fn tem_prontos() -> bool {
     com(|t| {
         t.acordar(false);
-        t.processos.iter().any(|p| p.estado == Estado::Pronto)
+        t.processos.iter().any(|p| p.estado == Estado::Pronto && p.rodando.is_none())
     })
 }
 

@@ -49,6 +49,19 @@ pub fn iniciar() {
     escrever_controle(LIGADO);
 }
 
+/// O timer de outro nucleo: so tira o programa da CPU a cada periodo
+/// (os tiques da conta sao do nucleo 0).
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub fn iniciar_nucleo() {
+    escrever_alvo(cpu::contador() + PERIODO.load(Ordering::Relaxed));
+    escrever_controle(LIGADO);
+}
+
+/// Interrupcao do timer num nucleo que nao e o 0: marca o proximo.
+pub fn proximo_do_nucleo() {
+    escrever_alvo(cpu::contador() + PERIODO.load(Ordering::Relaxed));
+}
+
 /// O timer chegou mesmo no alvo? A linha do timer pode ainda estar alta
 /// no GIC logo depois de andar o alvo, e a mesma interrupcao vir de novo.
 pub fn disparou() -> bool {

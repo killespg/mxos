@@ -105,7 +105,7 @@ def argumentos_qemu(kernel: pathlib.Path, el2: bool, audio: str) -> list[str]:
     # GICv2 igual ao GIC-400 da TV box (o QEMU escolheria o v3 com virtualization=on)
     maquina = "virt,gic-version=2,virtualization=on" if el2 else "virt,gic-version=2"
     return [
-        qemu(), "-M", maquina, "-cpu", "cortex-a53", "-m", "1G", "-kernel", str(kernel),
+        qemu(), "-M", maquina, "-cpu", "cortex-a53", "-smp", "4", "-accel", "tcg,thread=multi", "-m", "1G", "-kernel", str(kernel),
         # video: framebuffer simples configurado pelo fw_cfg
         "-device", "ramfb",
         # som: o driver so fala virtio-mmio moderno (versao 2)

@@ -33,7 +33,7 @@ use crate::entrada::{Entrada, Layout};
 use crate::shell::Shell;
 use crate::uart::Uart;
 use crate::video::tela::Tela;
-use crate::{drivers, excecao, irq, processo, rede, timer, x11};
+use crate::{drivers, excecao, processo, rede, smp, timer, x11};
 use apps::janela_x::JanelaX;
 use apps::terminal::{self, AppTerminal};
 use janelas::{EventoApp, Gerenciador, Pedido};
@@ -63,6 +63,10 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
     apps::registrar_atalhos(&mut gerenciador);
     // programas de Linux com janela falam X11 em /tmp/.X11-unix/X0
     x11::iniciar(largura, altura);
+    // os outros nucleos rodam processos; daqui em diante o nucleo 0 tem a
+    // trava do kernel e so solta para rodar programas e dormir
+    let nucleos = smp::ligar_nucleos();
+    let _ = writeln!(shell.terminal(), "cpu     : {nucleos} núcleo(s) rodando programas");
     let mut janelas_x: Vec<usize> = Vec::new();
 
     let tela = (largura as i32, altura as i32);
@@ -92,8 +96,10 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
         gerenciador.compor(&framebuffer);
         // o tique de 100 Hz acorda; teclado e mouse sao lidos na volta.
         // Com processo pronto a CPU nao dorme: ele usa o tempo ate o tique.
-        if !processo::tem_prontos() {
-            irq::cochilar();
+        if processo::tem_prontos() {
+            smp::acordar_todos(); // os outros nucleos pegam o que estiver pronto
+        } else {
+            smp::ocioso();
         }
     }
 }

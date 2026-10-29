@@ -16,6 +16,10 @@ fn main() {
         testar_threads();
         return;
     }
+    if args.get(1).is_some_and(|a| a == "cpu") {
+        testar_cpu();
+        return;
+    }
     if args.get(1).is_some_and(|a| a == "unix") {
         testar_unix();
         return;
@@ -268,4 +272,27 @@ fn testar_unix() {
     let mut lido = [0u8; 64];
     let n = unsafe { read(tubo[0], lido.as_mut_ptr().cast(), 64) };
     println!("pipe leu: {:?}", String::from_utf8_lossy(&lido[..n.max(0) as usize]));
+}
+
+// ---------------------------------------------------------------------
+// Varios nucleos (ola cpu): a mesma conta em 1 e em 4 threads
+
+fn conta_pesada(semente: u64) -> u64 {
+    let mut x = semente | 1;
+    for _ in 0..30_000_000u64 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+    }
+    x
+}
+
+fn testar_cpu() {
+    for threads in [1u64, 2, 4] {
+        let inicio = std::time::Instant::now();
+        let filhos: Vec<_> = (0..threads).map(|k| std::thread::spawn(move || conta_pesada(k + 1))).collect();
+        let soma: u64 = filhos.into_iter().map(|f| f.join().unwrap()).fold(0, |a, b| a ^ b);
+        let tempo = inicio.elapsed();
+        println!("{threads} thread(s), {threads} conta(s) de 30 milhões: {tempo:?} (resultado {soma:x})");
+    }
 }

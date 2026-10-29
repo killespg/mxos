@@ -18,7 +18,7 @@
 
 use core::arch::asm;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::{mapa, plataforma};
 
@@ -182,7 +182,7 @@ pub fn ligar() {
 
 /// Garante que as tabelas estao na RAM, e nao presas em algum cache antigo
 /// (o U-Boot rodou com cache ligado antes de nos).
-fn limpar_cache(inicio: usize, tamanho: usize) {
+pub fn limpar_cache(inicio: usize, tamanho: usize) {
     let ctr: u64;
     unsafe { asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack)) };
     let linha = 4 << (ctr >> 16 & 0xF);
@@ -205,6 +205,7 @@ fn ativar(raiz: u64) {
         | 1 << 23                  // EPD1: sem TTBR1 (metade alta) por enquanto
         | bits_fisicos << 32; // IPS
 
+    TCR.store(tcr, Ordering::Relaxed);
     let ligar: u64 = 1 << 0 | 1 << 2 | 1 << 12; // SCTLR: M (MMU), C (cache de dados), I (cache de instrucoes)
     unsafe {
         asm!(
@@ -228,6 +229,15 @@ fn ativar(raiz: u64) {
             options(nostack),
         );
     }
+}
+
+/// O TCR que o nucleo 0 usou (os outros nucleos ligam a MMU igual).
+static TCR: AtomicU64 = AtomicU64::new(0);
+
+/// (MAIR, TCR, TTBR0) para ligar a MMU de outro nucleo (smp.rs).
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub fn registradores() -> (u64, u64, u64) {
+    (MAIR, TCR.load(Ordering::Relaxed), RAIZ_KERNEL.load(Ordering::Relaxed) as u64)
 }
 
 pub struct Estado {

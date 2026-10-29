@@ -54,6 +54,15 @@ pub fn iniciar() {
     escrever(GIC_DISTRIBUIDOR, D_CONTROLE, 1);
 }
 
+/// A interface da CPU de outro nucleo (registradores bancados) e o timer
+/// dele (PPI, tambem bancada no distribuidor).
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub fn iniciar_nucleo() {
+    escrever(GIC_CPU, C_MASCARA, MASCARA);
+    escrever(GIC_CPU, C_CONTROLE, 1);
+    habilitar(crate::plataforma::IRQ_TIMER, false);
+}
+
 /// Desliga e desativa tudo que o firmware (U-Boot) pode ter deixado ligado.
 /// Uma interrupcao de nivel esquecida ligada viraria uma tempestade que
 /// nunca deixa o tratador sair. Mesma limpeza que o Linux faz.

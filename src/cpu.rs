@@ -16,6 +16,13 @@ pub fn el_atual() -> u64 {
 }
 
 /// Identificacao do processador (fabricante, modelo, revisao).
+/// MPIDR_EL1: qual nucleo e este (Aff0 nos 8 bits de baixo).
+pub fn mpidr() -> u64 {
+    let v: u64;
+    unsafe { asm!("mrs {}, mpidr_el1", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
 pub fn midr() -> u64 {
     ler_registrador!("midr_el1")
 }
