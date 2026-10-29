@@ -2,6 +2,8 @@
 //! crescer/encolher com congelamento nos limites min/max, tamanho
 //! cruzado, stretch, justify-content (com margens auto) e align-*.
 
+#[allow(unused_imports)]
+use crate::web::mat::F32Ext;
 use alloc::vec::Vec;
 
 use super::Motor;

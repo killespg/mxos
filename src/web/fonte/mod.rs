@@ -6,6 +6,8 @@
 pub mod raster;
 pub mod ttf;
 
+#[allow(unused_imports)]
+use crate::web::mat::F32Ext;
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::vec::Vec;

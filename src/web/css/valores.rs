@@ -2,6 +2,8 @@
 //! leitor de tokens que pula espacos. O layout trabalha em ponto fixo
 //! (1/64 de pixel): `Fixo`.
 
+#[allow(unused_imports)]
+use crate::web::mat::F32Ext;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;

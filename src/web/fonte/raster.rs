@@ -4,6 +4,8 @@
 //! font-rs/stb_truetype 2, reescrito aqui. As curvas quadraticas viram
 //! retas (o numero de pedacos depende do tamanho da curva).
 
+#[allow(unused_imports)]
+use crate::web::mat::F32Ext;
 use alloc::vec;
 use alloc::vec::Vec;
 

@@ -2,6 +2,8 @@
 //! apendice E): fundo e borda, linhas de texto, filhos em ordem, e por
 //! ultimo os posicionados por z-index. Fixos nao rolam.
 
+#[allow(unused_imports)]
+use crate::web::mat::F32Ext;
 use alloc::vec::Vec;
 
 use super::quadro::{Quadro, Ret};
