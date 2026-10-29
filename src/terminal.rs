@@ -100,7 +100,7 @@ impl fmt::Write for Terminal {
     }
 }
 
-#[cfg(not(feature = "mxq"))]
+#[cfg(not(any(feature = "mxq", feature = "rk322x")))]
 mod video_qemu {
     use alloc::alloc::{Layout, alloc_zeroed, dealloc};
 
@@ -154,6 +154,21 @@ mod video_qemu {
 // Na TV box o caminho e o framebuffer que o U-Boot deixa ligado
 // (src/video/mxq.rs), mapeado pela MMU (plataforma::FRAMEBUFFER). Nunca
 // testado no hardware.
+/// RK322x: o framebuffer do MXOS na janela 0 do VOP (src/video/rk322x.rs).
+#[cfg(feature = "rk322x")]
+mod video_qemu {
+    use super::Video;
+    use crate::video::rk322x;
+    use crate::video::tela::{self, Console, Escala};
+
+    pub fn ligar() -> Result<(Video, tela::Tela, Console), &'static str> {
+        let (tela, base) = rk322x::tomar_posse()?;
+        let (largura, altura) = (tela.largura(), tela.altura());
+        let console = Console::new(tela, Escala::CONSOLE, tela::BRANCO, tela::PRETO);
+        Ok((Video { largura, altura, base, nome: "VOP da Rockchip (HDMI), XRGB8888" }, tela, console))
+    }
+}
+
 #[cfg(feature = "mxq")]
 mod video_qemu {
     use super::Video;

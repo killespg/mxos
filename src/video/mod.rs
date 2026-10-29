@@ -7,6 +7,7 @@
 //!            em crate::fonte: Inter e JetBrains Mono)
 //!   - mxq:   TV box (Amlogic S905W): reaproveita o framebuffer do U-Boot.
 //!            Ainda nao testado no hardware.
+//!   - rk322x: TV box Rockchip: o framebuffer do MXOS na janela do VOP.
 //!
 //! Nenhum modulo aloca memoria: quem chama passa o endereco do buffer.
 //! O mapa de memoria e identidade (virtual = fisico), entao o endereco de
@@ -15,4 +16,6 @@
 pub mod fwcfg;
 pub mod mxq;
 pub mod ramfb;
+#[cfg(feature = "rk322x")]
+pub mod rk322x;
 pub mod tela;
