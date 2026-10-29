@@ -18,6 +18,7 @@ mod drivers;
 mod entrada;
 mod excecao;
 mod fonte;
+mod frequencia;
 mod gic;
 mod gui;
 mod heap;
@@ -117,6 +118,10 @@ mod qemu {
             Err(motivo) => diga(&mut terminal, format_args!("usb     : desligado ({motivo})")),
         }
         iniciar_disco(&mut terminal);
+        // a frequencia escolhida mora na config, que esta no disco
+        if let Some(linha) = crate::frequencia::aplicar_config() {
+            diga(&mut terminal, format_args!("cpu     : {linha}"));
+        }
         iniciar_rede(&mut terminal);
         let (Ok(video), Some(framebuffer)) = (terminal.video(), terminal.tela_do_framebuffer()) else {
             diga(&mut terminal, format_args!("gui     : sem vídeo, fica só o shell na serial"));

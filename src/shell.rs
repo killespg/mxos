@@ -149,6 +149,7 @@ impl Shell {
         self.banner();
         loop {
             self.atender_processos();
+            crate::frequencia::vigiar();
             if processos::tem_prontos() {
                 // com processo para rodar a CPU nao dorme: so olha a serial
                 processar_fundo();
@@ -351,6 +352,7 @@ impl Shell {
             "info" => self.info(),
             "uptime" => self.uptime(),
             "config" => self.config(argumentos),
+            "cpu" => self.frequencia(argumentos),
             "nas" => match argumentos.trim() {
                 "parar" => {
                     crate::nas::parar();
@@ -404,6 +406,7 @@ impl Shell {
         diga!(self, "  echo T        imprime o texto T");
         diga!(self, "  info          dados do hardware e do kernel");
         diga!(self, "  uptime        tempo desde que ligou");
+        diga!(self, "  cpu [perfil]  frequência, overclock, temperatura e GPU (TV box)");
         diga!(self, "  mem           mapa de memória do kernel e uso do heap");
         diga!(self, "  mmu           estado da MMU e das tabelas de páginas");
         diga!(self, "  traduzir E    mostra como a MMU traduz o endereço E (hex)");
@@ -512,6 +515,88 @@ impl Shell {
                     Ok(()) => diga!(self, "{k} gravado"),
                     Err(e) => diga!(self, "config: não gravou ({e})"),
                 }
+            }
+        }
+    }
+
+    /// cpu                       -> estado e perfis
+    /// cpu PERFIL [fixo]         -> stock, fabrica, turbo, extreme
+    /// cpu MHZ [MV] [fixo]       -> personalizado (passa do recomendado)
+    /// cpu limite GRAUS [fixo]   -> throttling (padrao 85)
+    /// cpu gpu turbo|normal [fixo]
+    /// "fixo" grava na config e vale nos proximos boots.
+    fn frequencia(&mut self, argumentos: &str) {
+        use crate::frequencia as f;
+        if !f::suportado() {
+            diga!(self, "cpu: DVFS e overclock só na TV box RK322x");
+            return;
+        }
+        let partes: Vec<&str> = argumentos.split_whitespace().collect();
+        let fixo = partes.last() == Some(&"fixo");
+        let partes = &partes[..partes.len() - fixo as usize];
+        let mut gravar: Vec<(&str, String)> = Vec::new();
+        match partes {
+            [] => {
+                diga!(self, "CPU: {}", f::descricao());
+                diga!(self, "GPU: {}   limite: {} °C (volta a {} MHz)", f::descricao_gpu(), f::limite_c(), f::FRIO.mhz);
+                for p in f::PERFIS {
+                    diga!(self, "  {:<8} {:>5} MHz  {},{:03} V  {}", p.nome, p.mhz, p.uv / 1_000_000, p.uv / 1000 % 1000, p.nota);
+                }
+                diga!(self, "uso: cpu <perfil> | cpu <MHz> [mV] | cpu limite <°C> | cpu gpu turbo|normal   (+ fixo)");
+                return;
+            }
+            ["limite", graus] => {
+                match graus.parse::<i32>().map_err(|_| "número inválido").and_then(f::definir_limite) {
+                    Ok(()) => diga!(self, "throttling a {} °C", f::limite_c()),
+                    Err(e) => return diga!(self, "cpu: {e}"),
+                }
+                gravar.push(("cpu_limite", format!("{}", f::limite_c())));
+            }
+            ["gpu", modo @ ("turbo" | "normal")] => {
+                let turbo = *modo == "turbo";
+                match f::gpu_turbo(turbo) {
+                    Ok(mhz) => diga!(self, "GPU a {mhz} MHz"),
+                    Err(e) => return diga!(self, "gpu: {e}"),
+                }
+                gravar.push(("gpu_turbo", String::from(if turbo { "sim" } else { "nao" })));
+            }
+            [nome] if f::perfil(nome).is_some() => {
+                let p = f::perfil(nome).unwrap();
+                if let Err(e) = f::definir(p.mhz, Some(p.uv)) {
+                    return diga!(self, "cpu: {e}");
+                }
+                gravar.push(("cpu_perfil", String::from(p.nome)));
+            }
+            [mhz] | [mhz, _] => {
+                let Ok(m) = mhz.parse::<u32>() else {
+                    return diga!(self, "cpu: perfil ou MHz desconhecido: {mhz}");
+                };
+                let mv = match partes.get(1).map(|v| v.parse::<u32>()) {
+                    Some(Ok(mv)) => Some(mv),
+                    Some(Err(_)) => return diga!(self, "cpu: tensão em mV, ex.: cpu 1392 1400"),
+                    None => None,
+                };
+                if let Err(e) = f::definir(m, mv.map(|mv| mv * 1000)) {
+                    return diga!(self, "cpu: {e}");
+                }
+                gravar.push(("cpu_perfil", String::from("personalizado")));
+                gravar.push(("cpu_mhz", format!("{}", m / 24 * 24)));
+                gravar.push(("cpu_mv", format!("{}", mv.unwrap_or(f::tensao_para(m) / 1000))));
+            }
+            _ => return diga!(self, "uso: cpu <perfil> | cpu <MHz> [mV] | cpu limite <°C> | cpu gpu turbo|normal   (+ fixo)"),
+        }
+        diga!(self, "CPU: {}", f::descricao());
+        if f::mhz() > f::RECOMENDADO_MHZ {
+            diga!(self, "Atenção: acima do recomendado ({} MHz). Use dissipador; se travar, reinicie (o fixo só vale se gravado).", f::RECOMENDADO_MHZ);
+        }
+        if fixo {
+            let mut cfg = crate::config::Config::carregar();
+            for (k, v) in &gravar {
+                cfg.definir(k, v);
+            }
+            match cfg.salvar() {
+                Ok(()) => diga!(self, "gravado em /config/mxos.cfg"),
+                Err(e) => diga!(self, "config: não gravou ({e})"),
             }
         }
     }

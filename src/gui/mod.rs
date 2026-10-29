@@ -95,6 +95,7 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
         if timer::tiques() >= proximo_tique {
             proximo_tique = timer::tiques() + TIQUES_POR_TIQUE_APP;
             gerenciador.tique();
+            crate::frequencia::vigiar();
             atender_externos(&mut gerenciador, &mut entrada);
         }
         // os processos rodam ate o proximo tique; o shell da janela mostra a saida

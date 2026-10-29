@@ -32,7 +32,7 @@ use crate::gui::janelas::{App, EventoApp, Pedido};
 use crate::gui::tema::{self, Aparencia, PapelDeParede, TEMAS, Tema};
 use crate::gui::widgets::{self, Abas, AcaoCampo, CampoTexto, Icone};
 use crate::rede::{self, Ip, Mac};
-use crate::{cpu, heap, plataforma, psci, timer};
+use crate::{cpu, frequencia, heap, plataforma, psci, timer};
 
 const TITULO: &str = "Configurações";
 /// Versao do MXOS: major.minor do Cargo.toml.
@@ -106,9 +106,12 @@ const MAX_DISCOS: usize = 4;
 
 // Aba Sistema.
 const Y_PAINEL_SISTEMA: i32 = TOPO + 60;
-const LINHAS_SISTEMA: i32 = 6;
+const LINHAS_SISTEMA: i32 = 7;
 const Y_SAIR: i32 = Y_PAINEL_SISTEMA + LINHAS_SISTEMA * ALTURA_LINHA + 36;
 const LARGURA_SIM: i32 = 128;
+/// Linha da frequencia da CPU (so na TV box), abaixo de Reiniciar/Desligar.
+const Y_CPU: i32 = Y_SAIR + ALTURA_BOTAO + 20;
+const LARGURA_PASSO: i32 = 36;
 
 /// Cores do papel de parede: tons escuros e medios, onde o texto claro dos
 /// icones da area de trabalho continua legivel. A primeira e a de fabrica.
@@ -241,6 +244,8 @@ pub struct Configuracoes {
     versao_psci: u64,
     /// Segundo mostrado: Rede e Sistema se atualizam uma vez por segundo.
     segundo: u64,
+    /// Perfil da CPU escolhido na aba Sistema, gravado no Salvar (cpu_perfil).
+    cpu_perfil: Option<&'static str>,
     pedidos: Vec<Pedido>,
 }
 
@@ -264,6 +269,7 @@ impl Configuracoes {
             modificado: false,
             versao_psci: psci::chamar(psci::via(), psci::VERSAO),
             segundo: segundos_ligado(),
+            cpu_perfil: None,
             pedidos: Vec::new(),
         };
         app.trocou_de_aba();
@@ -362,6 +368,9 @@ impl Configuracoes {
         let pagina = self.campo_pagina.texto().trim();
         if !pagina.is_empty() {
             cfg.definir("pagina_inicial", pagina);
+        }
+        if let Some(nome) = self.cpu_perfil {
+            cfg.definir("cpu_perfil", nome);
         }
         self.aviso = Some(match cfg.salvar() {
             Ok(()) => {
@@ -522,6 +531,18 @@ impl Configuracoes {
             }
             return false;
         }
+        if frequencia::suportado() {
+            let passo = if botao_cpu_menos().contem(x, y) {
+                -1
+            } else if botao_cpu_mais().contem(x, y) {
+                1
+            } else {
+                0
+            };
+            if passo != 0 {
+                return self.passo_cpu(passo);
+            }
+        }
         let saida = if botao_reiniciar().contem(x, y) {
             Saida::Reiniciar
         } else if botao_desligar().contem(x, y) {
@@ -530,6 +551,26 @@ impl Configuracoes {
             return false;
         };
         self.confirmar = Some(saida);
+        true
+    }
+
+    /// Perfil anterior ou seguinte (Stock, Fabrica, Turbo, Extreme); troca na
+    /// hora. O personalizado e so pelo comando `cpu`.
+    fn passo_cpu(&mut self, passo: i32) -> bool {
+        let perfis = frequencia::PERFIS;
+        let agora = frequencia::mhz();
+        let i = perfis.iter().rposition(|p| p.mhz <= agora).unwrap_or(0) as i32;
+        let novo = perfis[(i + passo).clamp(0, perfis.len() as i32 - 1) as usize];
+        if novo.mhz == agora {
+            return false;
+        }
+        match frequencia::definir(novo.mhz, Some(novo.uv)) {
+            Ok(()) => {
+                self.cpu_perfil = Some(novo.nome);
+                self.mudou();
+            }
+            Err(e) => self.aviso = Some((format!("CPU: {e}"), Tom::Erro)),
+        }
         true
     }
 
@@ -734,6 +775,7 @@ impl Configuracoes {
             ("Firmware", format!("PSCI v{}.{} via {}", psci_v >> 16 & 0xFFFF, psci_v & 0xFFFF, psci::via().nome())),
             ("Memória", memoria),
             ("Ligado há", format!("{}h {:02}m {:02}s", segundos / 3600, segundos / 60 % 60, segundos % 60)),
+            ("Frequência", if frequencia::suportado() { frequencia::descricao() } else { String::from("fixa (do firmware)") }),
         ];
         linhas_info(s, painel, &linhas, t);
         // barra do heap na mesma linha, depois do texto da memoria
@@ -749,6 +791,21 @@ impl Configuracoes {
                 let x = botao_desligar().direita() + 16;
                 widgets::rotulo(s, x, Y_SAIR + 8, "Pelo firmware (PSCI).", cor_fraca(t));
             }
+        }
+        if frequencia::suportado() {
+            widgets::rotulo(s, MARGEM, Y_CPU + 8, "CPU", t.texto);
+            widgets::botao(s, botao_cpu_menos(), "-", false);
+            widgets::botao(s, botao_cpu_mais(), "+", false);
+            let x = botao_cpu_mais().direita() + 16;
+            let nota = if frequencia::limitado() {
+                format!("Quente: limitado a {} MHz até esfriar.", frequencia::FRIO.mhz)
+            } else if frequencia::mhz() > frequencia::RECOMENDADO_MHZ {
+                String::from("Acima do recomendado: use dissipador.")
+            } else {
+                format!("Perfil {}. Turbo é o limite recomendado.", frequencia::escolhido())
+            };
+            let nota = nota.as_str();
+            widgets::rotulo(s, x, Y_CPU + 8, nota, cor_fraca(t));
         }
     }
 
@@ -910,6 +967,14 @@ fn botao_reiniciar() -> Retangulo {
 
 fn botao_desligar() -> Retangulo {
     botao_reiniciar().deslocado(112 + ESPACO_CARTAO, 0)
+}
+
+fn botao_cpu_menos() -> Retangulo {
+    Retangulo::novo(MARGEM + COLUNA_VALOR - 48, Y_CPU, LARGURA_PASSO, ALTURA_BOTAO)
+}
+
+fn botao_cpu_mais() -> Retangulo {
+    botao_cpu_menos().deslocado(LARGURA_PASSO + 8, 0)
 }
 
 fn faixa_confirmacao() -> Retangulo {
