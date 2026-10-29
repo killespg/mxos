@@ -536,11 +536,74 @@ def elf_para_imagem(elf: pathlib.Path, destino: pathlib.Path) -> None:
     print("Atencao: ainda nao testado no hardware.")
 
 
+# pacotes do Debian que vao no pendrive (o curl e o da atualizacao pela internet)
+PACOTES = ["netsurf-fb", "netsurf-common", "fonts-dejavu-core", "ca-certificates", "curl"]
+
+
+def git(*args: str) -> str:
+    r = subprocess.run(["git", *args], cwd=RAIZ, capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def preparar_pendrive() -> pathlib.Path:
+    """Kernel da box, pacotes, a pasta saida/pendrive (tudo o que vai no
+    pendrive, com versao.txt e novidades.txt) e saida/MXOS-pendrive.img
+    (a mesma coisa como imagem, para gravar com o Rufus ou o balenaEtcher)."""
+    elf_para_imagem(compilar(mxq=True), RAIZ / "saida" / "mxos-mxq.img")
+    raiz = RAIZ / "saida" / "raiz"
+    if not (raiz / "usr" / "bin" / "curl").exists():
+        subprocess.run([sys.executable, "-I", str(RAIZ / "ferramentas" / "pacotes.py"), *PACOTES], cwd=RAIZ, check=True)
+    pendrive = RAIZ / "saida" / "pendrive"
+    if pendrive.exists():
+        shutil.rmtree(pendrive)
+    subprocess.run([sys.executable, "-I", str(CRIAR_DISCO), "--pasta", str(pendrive), "--raiz", str(raiz)], cwd=RAIZ, check=True)
+    shutil.copyfile(RAIZ / "saida" / "mxos-mxq.img", pendrive / "mxos-mxq.img")
+    # os scripts do U-Boot para ligar so com o pendrive (botao de reset)
+    subprocess.run([sys.executable, "-I", str(RAIZ / "ferramentas" / "boot_box.py"), str(pendrive)], cwd=RAIZ, check=True)
+    versao = f"{versao_cargo()} ({git('rev-parse', '--short', 'HEAD')}, {time.strftime('%d/%m/%Y')})"
+    (pendrive / "versao.txt").write_text(versao + "\n", encoding="utf-8")
+    (pendrive / "novidades.txt").write_text(git("log", "-12", "--pretty=%s") + "\n", encoding="utf-8")
+    imagem = RAIZ / "saida" / "MXOS-pendrive.img"
+    subprocess.run([sys.executable, "-I", str(CRIAR_DISCO), str(imagem), "--de-pasta", str(pendrive), "--tamanho-mb", "512"], cwd=RAIZ, check=True)
+    print(f"pronto: {pendrive} (copiar) e {imagem} (gravar) - versao {versao}")
+    return pendrive
+
+
+def versao_cargo() -> str:
+    for linha in (RAIZ / "Cargo.toml").read_text(encoding="utf-8").splitlines():
+        if linha.startswith("version"):
+            return linha.split('"')[1]
+    return "?"
+
+
+def publicar(pendrive: pathlib.Path) -> None:
+    """Empacota a pasta do pendrive (mxos.tar) e cria uma release no GitHub
+    com ela, versao.txt, novidades.txt e tamanho.txt: o app "Atualizar o
+    sistema" da box acha pela internet."""
+    import tarfile
+    pacote = RAIZ / "saida" / "mxos.tar"
+    with tarfile.open(pacote, "w", format=tarfile.USTAR_FORMAT) as tar:
+        for arquivo in sorted(pendrive.rglob("*")):
+            if arquivo.name in ("aml_autoscript", "s905_autoscript", "manifesto.txt"):
+                continue
+            tar.add(arquivo, arcname=arquivo.relative_to(pendrive).as_posix(), recursive=False)
+    tamanho = RAIZ / "saida" / "tamanho.txt"
+    tamanho.write_text(str(pacote.stat().st_size))
+    etiqueta = "v" + versao_cargo() + "-" + git("rev-parse", "--short", "HEAD")
+    titulo = (pendrive / "versao.txt").read_text(encoding="utf-8").strip()
+    subprocess.run(["gh", "release", "create", etiqueta, str(pacote), str(pendrive / "versao.txt"),
+                    str(pendrive / "novidades.txt"), str(tamanho), "--latest", "--title", f"MXOS {titulo}",
+                    "--notes-file", str(pendrive / "novidades.txt")], cwd=RAIZ, check=True)
+    print(f"publicado: {etiqueta}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compila e roda o MXOS.")
     parser.add_argument("--el2", action="store_true", help="comeca em EL2, como o U-Boot")
     parser.add_argument("--teste", metavar="CMDS", help="comandos separados por ';'")
-    parser.add_argument("--mxq", action="store_true", help="gera a imagem da TV box")
+    parser.add_argument("--mxq", action="store_true", help="gera a imagem da TV box, a pasta do pendrive e o .img para gravar")
+    parser.add_argument("--servir", action="store_true", help="como --mxq e serve a atualizacao para a box na rede de casa")
+    parser.add_argument("--publicar", action="store_true", help="como --mxq e publica a atualizacao no GitHub (gh release)")
     parser.add_argument("--captura", metavar="PNG", help="com --teste: salva a tela no fim")
     parser.add_argument("--sem-janela", action="store_true", help="so a serial, sem tela e sem som")
     parser.add_argument("--espera", metavar="SEGUNDOS", type=float, default=3.0,
@@ -569,19 +632,12 @@ def main() -> int:
         global DISCO
         DISCO = (RAIZ / opcoes.disco).resolve()
 
-    if opcoes.mxq:
-        elf_para_imagem(compilar(mxq=True), RAIZ / "saida" / "mxos-mxq.img")
-        # o cartao SD da box e o disco "/" do MXOS: tudo o que o disco do
-        # QEMU tem (e os pacotes de saida/raiz) vai numa pasta para copiar
-        cartao = RAIZ / "saida" / "pendrive"
-        comando = [sys.executable, "-I", str(CRIAR_DISCO), "--pasta", str(cartao)]
-        if (RAIZ / "saida" / "raiz").is_dir():
-            comando += ["--raiz", str(RAIZ / "saida" / "raiz")]
-        subprocess.run(comando, cwd=RAIZ, check=True)
-        shutil.copyfile(RAIZ / "saida" / "mxos-mxq.img", cartao / "mxos-mxq.img")
-        # os scripts do U-Boot para ligar so com o pendrive (botao de reset)
-        subprocess.run([sys.executable, "-I", str(RAIZ / "ferramentas" / "boot_box.py"), str(cartao)], cwd=RAIZ, check=True)
-        print(f"copie TUDO de {cartao} para um pendrive (ou cartao SD) em FAT32")
+    if opcoes.mxq or opcoes.servir or opcoes.publicar:
+        pendrive = preparar_pendrive()
+        if opcoes.servir:
+            subprocess.run([sys.executable, "-I", str(RAIZ / "ferramentas" / "servir_atualizacao.py"), str(pendrive)], cwd=RAIZ)
+        if opcoes.publicar:
+            publicar(pendrive)
         return 0
 
     # "" (nenhum comando) serve para quem so quer as acoes ou a captura

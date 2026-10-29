@@ -30,7 +30,7 @@ mod comandos;
 mod dhcp;
 mod dns;
 mod ethernet;
-mod http;
+pub mod http;
 mod icmp;
 mod ipv4;
 pub mod soquete;

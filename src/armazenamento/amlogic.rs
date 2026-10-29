@@ -26,6 +26,8 @@ use super::{meson_sd, relogio, Disco, Erro};
 const SETOR_MPT: u64 = 0x2400000 / 512;
 const ENDERECO_KERNEL: u32 = 0x0108_0000;
 const PAGINA_BOOT: usize = 2048;
+/// Nome do disco da particao data (o volume "/" quando o MXOS liga da eMMC).
+pub const NOME_DADOS: &str = "emmc (dados)";
 
 #[derive(Clone, Debug)]
 pub struct ParticaoMpt {
@@ -105,7 +107,7 @@ impl Pedaco {
 
 impl Disco for Pedaco {
     fn nome(&self) -> &str {
-        "emmc (dados)"
+        NOME_DADOS
     }
     fn setores(&self) -> u64 {
         self.setores
@@ -203,6 +205,20 @@ pub fn instalar(emmc: &mut dyn Disco, pendrive: &mut Fat32, saida: &mut dyn Writ
     emmc.sincronizar()?;
     let _ = writeln!(saida, "pronto: tire o pendrive e reinicie. Para voltar a parte de boot do Android: restaurar-boot");
     Ok(())
+}
+
+/// Grava o MXOS (`kernel` = mxos-mxq.img) na particao boot.
+pub fn gravar_boot(emmc: &mut dyn Disco, kernel: &[u8]) -> Result<(), Erro> {
+    let tabela = ler_mpt(emmc)?;
+    let boot = achar(&tabela, "boot", emmc.setores()).ok_or(Erro::Corrompido("a eMMC não tem a partição boot"))?.clone();
+    let mut img = imagem_de_boot(kernel);
+    if img.len() as u64 > boot.setores * 512 {
+        return Err(Erro::Corrompido("o MXOS não cabe na partição boot"));
+    }
+    img.resize(img.len().div_ceil(512) * 512, 0);
+    meson_sd::liberar_escrita(boot.inicio, boot.inicio + boot.setores);
+    emmc.escrever(boot.inicio, &img)?;
+    emmc.sincronizar()
 }
 
 /// Grava de volta a particao boot guardada em /mxos-backup/boot.img.

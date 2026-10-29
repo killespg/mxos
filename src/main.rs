@@ -8,6 +8,7 @@
 extern crate alloc;
 
 mod armazenamento;
+mod atualizacao;
 mod audio;
 mod config;
 mod cpu;

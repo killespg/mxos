@@ -2,6 +2,7 @@
 //! desenha dentro da propria Superficie de conteudo.
 //!
 //!   - arquivos:      gerenciador de arquivos e de discos
+//!   - atualizar:     atualizacao pela rede (PC de casa ou GitHub)
 //!   - calculadora:   inteiros de 64 bits, mouse e teclado
 //!   - configuracoes: personalizar, teclado, rede, disco e sistema
 //!   - drivers:       painel com os dispositivos e os drivers de cada um
@@ -15,6 +16,7 @@
 //!   - terminal:      o shell numa janela
 
 pub mod arquivos;
+pub mod atualizar;
 pub mod calculadora;
 pub mod configuracoes;
 pub mod drivers;
@@ -48,6 +50,7 @@ pub fn registrar_apps_basicos(g: &mut Gerenciador) {
     g.registrar_app("Personalizar", Icone::Monitor, configuracoes::criar_personalizar);
     g.registrar_app("Calculadora", Icone::Calculadora, criar_calculadora);
     g.registrar_app("Pintura", Icone::Pincel, criar_pintura);
+    g.registrar_app("Atualizar o sistema", Icone::Engrenagem, atualizar::criar);
     g.registrar_app("Sobre o MXOS", Icone::Info, criar_sobre);
 }
 

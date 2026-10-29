@@ -275,20 +275,48 @@ fn montar_emmc(estado: &mut Estado, mut disco: Box<dyn Disco>) -> Option<Box<dyn
         return None;
     }
     meson_sd::liberar_escrita(dados.inicio, dados.inicio + dados.setores);
-    let particao = Box::new(Particao { disco, inicio: dados.inicio, setores: dados.setores });
-    if let Ok(fs) = Fat32::montar(particao, relogio) {
+    // a eMMC fica na lista dos crus (a atualizacao ainda grava a particao
+    // boot); o volume "/" a ve por um Pedaco. O Box nunca sai da lista
+    // enquanto o volume existe, entao o ponteiro do Pedaco continua bom.
+    estado.crus.push(disco);
+    let emmc = estado.crus.last_mut().unwrap();
+    let pedaco = unsafe { amlogic::Pedaco::novo(&mut **emmc, &dados) };
+    if let Ok(fs) = Fat32::montar(Box::new(pedaco), relogio) {
         estado.volume = Some(fs);
     }
     None
+}
+
+/// O MXOS ligou da eMMC? (o volume "/" e a particao data dela)
+#[cfg(feature = "mxq")]
+fn ligou_da_emmc(estado: &Estado) -> bool {
+    estado.volume.as_ref().is_some_and(|v| v.nome_disco() == amlogic::NOME_DADOS)
+}
+
+/// Kernel novo na particao boot da eMMC, se o MXOS ligou dela. Ok(false):
+/// ligou do pendrive (o arquivo /mxos-mxq.img ja e o que o U-Boot carrega).
+#[cfg(feature = "mxq")]
+pub fn atualizar_boot_emmc(kernel: &[u8]) -> Result<bool, Erro> {
+    com(|estado| {
+        if !ligou_da_emmc(estado) {
+            return Ok(false);
+        }
+        let emmc = estado.crus.iter_mut().find(|d| d.nome() == "emmc").ok_or(Erro::SemDisco)?;
+        amlogic::gravar_boot(&mut **emmc, kernel)?;
+        Ok(true)
+    })
 }
 
 /// Troca o Android da eMMC pelo MXOS (comando "instalar-emmc"): ver amlogic.rs.
 #[cfg(feature = "mxq")]
 pub fn instalar_emmc(saida: &mut dyn core::fmt::Write) -> Result<(), Erro> {
     com(|estado| {
+        if ligou_da_emmc(estado) {
+            return Err(Erro::Corrompido("o MXOS ligou da eMMC: ligue pelo pendrive para instalar"));
+        }
         let Estado { volume, crus, .. } = estado;
         let pendrive = volume.as_mut().ok_or(Erro::SemDisco)?;
-        let emmc = crus.iter_mut().find(|d| d.nome() == "emmc").ok_or(Erro::Corrompido("eMMC não achada (ou o MXOS ligou dela)"))?;
+        let emmc = crus.iter_mut().find(|d| d.nome() == "emmc").ok_or(Erro::Corrompido("eMMC não achada"))?;
         amlogic::instalar(&mut **emmc, pendrive, saida)
     })
 }

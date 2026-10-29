@@ -1160,6 +1160,7 @@ def main() -> int:
     parser.add_argument("--sem-mbr", action="store_true", help="FAT32 no disco inteiro (superfloppy)")
     parser.add_argument("--tamanho-mb", type=int, default=TAMANHO_PADRAO // (1024 * 1024))
     parser.add_argument("--raiz", metavar="PASTA", help="arvore extra (pacotes do Debian) por cima da padrao")
+    parser.add_argument("--de-pasta", metavar="PASTA", help="a imagem leva so o conteudo desta pasta (a do pendrive)")
     parser.add_argument("--pasta", metavar="PASTA", help="em vez da imagem, grava a arvore numa pasta (para copiar num cartao SD)")
     opcoes = parser.parse_args()
     # nomes com acento no console do Windows: o que nao couber vira "?"
@@ -1182,7 +1183,7 @@ def main() -> int:
         return 0
     if not opcoes.imagem:
         parser.error("diga a imagem a criar ou use --verificar IMG")
-    arvore = conteudo_padrao()
+    arvore = arvore_da_pasta(pathlib.Path(opcoes.de_pasta)) if opcoes.de_pasta else conteudo_padrao()
     if opcoes.raiz:
         arvore = com_raiz(arvore, pathlib.Path(opcoes.raiz))
     criar(pathlib.Path(opcoes.imagem), opcoes.tamanho_mb * 1024 * 1024, not opcoes.sem_mbr, arvore)

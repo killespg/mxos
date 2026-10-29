@@ -18,7 +18,7 @@ use super::{ErroRede, Resposta, com, esperar};
 
 const MAX_REDIRECIONAMENTOS: usize = 5;
 /// Maior resposta aceita (o heap e grande, mas uma pagina nao precisa mais).
-const MAX_RESPOSTA: usize = 8 << 20;
+const MAX_RESPOSTA: usize = 32 << 20;
 
 const INCOMPLETA: ErroRede = ErroRede::Protocolo("resposta HTTP incompleta");
 

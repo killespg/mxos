@@ -632,6 +632,7 @@ fn comando_de_modulo(saida: &mut Terminal, nome: &str, argumentos: &str) -> bool
         || crate::rede::comando(nome, argumentos, &mut *saida)
         || crate::navegador::comando(nome, argumentos, &mut *saida)
         || crate::drivers::comando(nome, argumentos, &mut *saida)
+        || crate::atualizacao::comando(nome, argumentos, &mut *saida)
 }
 
 
