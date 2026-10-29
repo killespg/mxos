@@ -44,7 +44,9 @@ use crate::gui::widgets::{
     cor_texto_fraco,
 };
 
-const LARGURA: i32 = 720;
+const LARGURA: i32 = 900;
+/// Coluna da arvore de pastas (so na vista de pasta).
+const LARGURA_ARVORE: i32 = 190;
 const ALTURA: i32 = 480;
 /// Espaco entre a borda e os botoes das barras.
 pub const MARGEM: i32 = 6;
@@ -232,6 +234,9 @@ pub struct Arquivos {
     ctrl: bool,
     titulo: String,
     pedidos: Vec<Pedido>,
+    arvore: super::arvore::Arvore,
+    /// Ultima posicao do mouse (a roda rola o que esta embaixo dele).
+    mouse: (i32, i32),
 }
 
 impl Arquivos {
@@ -275,7 +280,13 @@ impl Arquivos {
             ctrl: false,
             titulo: String::new(),
             pedidos: Vec::new(),
+            arvore: super::arvore::Arvore::nova(),
+            mouse: (0, 0),
         }
+    }
+
+    fn area_arvore(&self) -> Retangulo {
+        Retangulo::novo(0, TOPO_CONTEUDO, LARGURA_ARVORE, ALTURA - TOPO_CONTEUDO - ALTURA_ESTADO)
     }
 
     // ------------------------------------------------------- navegacao
@@ -313,6 +324,8 @@ impl Arquivos {
         }
         if let Local::Pasta(caminho) = &destino {
             self.ultima_pasta = caminho.clone();
+            let linhas = super::arvore::Arvore::linhas_visiveis(self.area_arvore());
+            self.arvore.mostrar(caminho, linhas);
         }
         self.local = destino;
         self.cancelar_modo();
@@ -730,7 +743,8 @@ impl Arquivos {
 
     /// O que aparece embaixo das barras (lista ou cartoes).
     fn area_conteudo(&self) -> Retangulo {
-        Retangulo::novo(0, TOPO_CONTEUDO, LARGURA, ALTURA - TOPO_CONTEUDO - ALTURA_ESTADO)
+        let x = if matches!(self.local, Local::Pasta(_)) { LARGURA_ARVORE } else { 0 };
+        Retangulo::novo(x, TOPO_CONTEUDO, LARGURA - x, ALTURA - TOPO_CONTEUDO - ALTURA_ESTADO)
     }
 
     /// A lista encosta nas bordas: o contorno dela fica por baixo da borda
@@ -793,6 +807,16 @@ impl Arquivos {
                 return true;
             }
             return redesenhar;
+        }
+        if matches!(self.local, Local::Pasta(_)) && self.area_arvore().contem(x, y) {
+            return match self.arvore.clique(x, y, self.area_arvore()) {
+                super::arvore::Clique::Navegar(c) => {
+                    self.ir_para(Local::Pasta(c), true);
+                    true
+                }
+                super::arvore::Clique::Mudou => true,
+                super::arvore::Clique::Nada => redesenhar,
+            };
         }
         if !self.area_conteudo().contem(x, y) {
             return redesenhar;
@@ -1000,6 +1024,7 @@ impl Arquivos {
         if mudou {
             let selecionado = self.item_selecionado().map(|i| i.nome.clone());
             self.recarregar(selecionado.as_deref());
+            self.arvore.atualizar();
         }
         mudou
     }
@@ -1067,6 +1092,7 @@ impl Arquivos {
     }
 
     fn desenhar_pasta(&self, s: &mut Superficie, t: &Tema) {
+        self.arvore.desenhar(s, self.area_arvore(), self.pasta_atual(), t);
         self.lista.desenhar(s, self.area_lista());
         let aviso = match self.erro_pasta {
             Some(e) => Some((format!("Não foi possível ler a pasta: {e}"), t.fechar)),
@@ -1201,7 +1227,15 @@ impl App for Arquivos {
             EventoApp::Botao { x, y, botao: Botao::Esquerdo, pressionado: false } => self.soltar(x, y, e),
             // a lista guarda o ponteiro (a roda so rola com ele em cima) e
             // arrasta o polegar da barra de rolagem
-            EventoApp::Mouse { .. } | EventoApp::Roda(_) => self.pasta_atual().is_some() && self.evento_lista(e),
+            EventoApp::Roda(passos) if self.pasta_atual().is_some() && self.area_arvore().contem(self.mouse.0, self.mouse.1) => {
+                let linhas = super::arvore::Arvore::linhas_visiveis(self.area_arvore());
+                self.arvore.rolar(-(passos as isize) * 3, linhas)
+            }
+            EventoApp::Mouse { x, y, .. } => {
+                self.mouse = (x, y);
+                self.pasta_atual().is_some() && self.evento_lista(e)
+            }
+            EventoApp::Roda(_) => self.pasta_atual().is_some() && self.evento_lista(e),
             EventoApp::Caractere(c) => self.caractere(c, e),
             EventoApp::Tecla { codigo, pressionada } => self.tecla(codigo, pressionada, e),
             _ => false,

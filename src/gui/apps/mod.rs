@@ -16,6 +16,7 @@
 //!   - terminal:      o shell numa janela
 
 pub mod arquivos;
+pub mod arvore;
 pub mod atualizar;
 pub mod calculadora;
 pub mod configuracoes;
@@ -28,6 +29,7 @@ pub mod navegador;
 pub mod pintura;
 pub mod sobre;
 pub mod tarefas;
+pub mod visualizador;
 pub mod terminal;
 
 use alloc::boxed::Box;
@@ -72,6 +74,9 @@ pub fn registrar_atalhos(g: &mut Gerenciador) {
 /// navegador, o resto no editor de texto.
 pub fn abrir_arquivo(caminho: &str) -> Box<dyn App> {
     let minusculo = caminho.to_ascii_lowercase();
+    if visualizador::eh_midia(&minusculo) {
+        return visualizador::abrir(caminho);
+    }
     if minusculo.ends_with(".htm") || minusculo.ends_with(".html") {
         Box::new(navegador::Navegador::novo(&format!("disco:{caminho}")))
     } else {

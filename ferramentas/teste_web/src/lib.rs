@@ -18,6 +18,9 @@ pub mod json;
 #[path = "../../../src/gui/realce.rs"]
 pub mod realce;
 
+#[path = "../../../src/midia/mod.rs"]
+pub mod midia;
+
 pub mod rede;
 pub mod png;
 
