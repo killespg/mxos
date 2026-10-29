@@ -124,6 +124,13 @@ impl Pilha {
         for (i, parte) in partes.iter().take(2).enumerate() {
             todas[i + 1] = parte;
         }
+        if destino == self.ip && self.ip != [0; 4] {
+            // para nos mesmos: nao sai pela placa
+            if self.loopback.len() < 256 {
+                self.loopback.push_back(todas.concat());
+            }
+            return;
+        }
         if destino == BROADCAST_IP || destino == self.broadcast_local() {
             self.enviar_quadro(BROADCAST, TIPO_IPV4, &todas);
             return;

@@ -468,9 +468,16 @@ impl Tabela {
         // filhos que ja tinham terminado e ninguem vai esperar: somem
         self.processos.retain(|p| !(p.pai == 0 && matches!(p.estado, Estado::Terminado(_)) && p.pid != pid));
         let i = self.indice(pid).unwrap_or(i);
-        if pai == 0 {
+        // pai que ignora SIGCHLD (ou pediu SA_NOCLDWAIT) nao faz wait4
+        let pai_ignora = self.indice(pai).is_some_and(|j| {
+            let acao = self.processos[j].linux.acoes[17];
+            acao.tratador == sinais::SIG_IGN || acao.flags & 1 != 0
+        });
+        if pai == 0 || pai_ignora {
             // ninguem vai fazer wait4: sai da tabela ja
-            self.terminados.push((pid, status));
+            if pai == 0 {
+                self.terminados.push((pid, status));
+            }
             self.processos.remove(i);
             return;
         }

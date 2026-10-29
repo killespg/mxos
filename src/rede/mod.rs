@@ -133,6 +133,10 @@ struct Pilha {
     /// Sockets de ping abertos e o ICMP que chegou para eles.
     ouvintes_icmp: usize,
     icmp_recebidos: soquete::FilaIcmp,
+    /// Portas TCP com um socket escutando (listen).
+    escutas: Vec<u16>,
+    /// Pacotes IP para o nosso proprio IP, entregues no proximo processar.
+    loopback: alloc::collections::VecDeque<Vec<u8>>,
     cache_dns: Vec<(String, [u8; 4])>,
     id_ip: u16,
     pacotes_rx: u64,
@@ -158,6 +162,8 @@ impl Pilha {
             porta_tcp: tcp::porta_inicial(semente),
             ouvintes_icmp: 0,
             icmp_recebidos: alloc::collections::VecDeque::new(),
+            escutas: Vec::new(),
+            loopback: alloc::collections::VecDeque::new(),
             cache_dns: Vec::new(),
             id_ip: semente as u16,
             pacotes_rx: 0,
@@ -171,6 +177,11 @@ impl Pilha {
         while let Some(tamanho) = self.nic.receber(&mut quadro) {
             self.pacotes_rx += 1;
             self.receber_quadro(&quadro[..tamanho]);
+        }
+        // o que mandamos para nos mesmos (cada resposta pode gerar outra)
+        for _ in 0..256 {
+            let Some(pacote) = self.loopback.pop_front() else { break };
+            self.receber_ipv4(&pacote);
         }
         self.tcp_temporizar();
         self.expirar_espera_arp();

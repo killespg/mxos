@@ -1,4 +1,5 @@
-//! TCP (RFC 9293), so o lado cliente. A conexao do navegador fica em
+//! TCP (RFC 9293): cliente e servidor (abertura passiva nas portas que um
+//! socket escuta: SYN -> SYN+ACK -> ACK). A conexao do navegador fica em
 //! `Pilha::tcp`; as dos sockets dos programas em `Pilha::soquetes` e
 //! trocam de lugar com ela para usar estas funcoes (soquete.rs).
 //!   porta origem, porta destino, seq, ack, tamanho do cabecalho, flags,
@@ -43,6 +44,8 @@ const MAX_TENTATIVAS: u32 = 6;
 /// TIME_WAIT curto: so para responder um FIN repetido.
 const TEMPO_ESPERA_MS: u64 = 2000;
 const PRIMEIRA_PORTA: u16 = 49152;
+/// Conexoes esperando o accept em cada porta que escuta.
+const MAX_FILA_ESCUTA: usize = 16;
 
 /// Primeira porta local das conexoes (muda a cada boot).
 pub fn porta_inicial(semente: u64) -> u16 {
@@ -53,6 +56,8 @@ pub fn porta_inicial(semente: u64) -> u16 {
 pub enum Estado {
     Fechada,
     SynEnviado,
+    /// Chegou SYN numa porta que escuta; mandamos SYN+ACK.
+    SynRecebido,
     Estabelecida,
     /// Mandamos FIN, esperando o ACK dele.
     FinEspera1,
@@ -72,6 +77,7 @@ impl Estado {
         match self {
             Estado::Fechada => "fechada",
             Estado::SynEnviado => "SYN enviado",
+            Estado::SynRecebido => "SYN recebido",
             Estado::Estabelecida => "estabelecida",
             Estado::FinEspera1 => "FIN espera 1",
             Estado::FinEspera2 => "FIN espera 2",
@@ -114,6 +120,10 @@ pub struct Conexao {
     pub erro: Option<ErroRede>,
     /// O programa fechou o socket: a conexao some quando terminar.
     pub largada: bool,
+    /// Conexao que chegou numa porta que escuta (servidor), e se o
+    /// accept ja a entregou.
+    pub escuta: Option<u16>,
+    pub entregue: bool,
 }
 
 /// Um segmento que chegou, ja separado.
@@ -163,6 +173,8 @@ impl Conexao {
             desde_ms: 0,
             erro: None,
             largada: false,
+            escuta: None,
+            entregue: false,
         }
     }
 
@@ -173,6 +185,14 @@ impl Conexao {
 
     pub fn porta_local(&self) -> u16 {
         self.porta_local
+    }
+
+    pub fn porta_remota(&self) -> u16 {
+        self.porta_remota
+    }
+
+    pub fn remoto(&self) -> [u8; 4] {
+        self.remoto
     }
 
     /// Ha bytes recebidos esperando a leitura.
@@ -316,6 +336,8 @@ impl Pilha {
         let seq = c.snd_una;
         if c.estado == Estado::SynEnviado {
             self.tcp_segmento(seq, SYN, &[]);
+        } else if c.estado == Estado::SynRecebido {
+            self.tcp_segmento(seq, SYN | ACK, &[]);
         } else if c.dados_em_voo() > 0 {
             let pedaco = c.envio[..c.dados_em_voo().min(c.mss_remoto)].to_vec();
             self.tcp_segmento(seq, ACK | PSH, &pedaco);
@@ -340,7 +362,9 @@ impl Pilha {
                 self.tcp_com(id, |p| p.tcp_temporizar_atual());
             }
             if let Some(c) = &self.soquetes[id - 1] {
-                if c.largada && matches!(c.estado, Estado::Fechada | Estado::TempoEspera) {
+                let terminou = matches!(c.estado, Estado::Fechada | Estado::TempoEspera);
+                // largada pelo programa, ou de servidor que caiu antes do accept
+                if terminou && (c.largada || (c.escuta.is_some() && !c.entregue)) {
                     self.soquetes[id - 1] = None;
                 }
             }
@@ -394,6 +418,10 @@ impl Pilha {
                 if let Some(k) = self.soquetes.iter().position(|c| c.as_ref().is_some_and(dela)) {
                     return self.tcp_com(k + 1, |p| p.receber_tcp_atual(origem, destino, dados));
                 }
+                let flags = dados[13];
+                if flags & (SYN | ACK | RST) == SYN && self.escutas.contains(&porta_destino) {
+                    return self.tcp_syn_de_cliente(origem, destino, dados);
+                }
             }
         }
         self.receber_tcp_atual(origem, destino, dados)
@@ -436,6 +464,23 @@ impl Pilha {
         if self.tcp.estado == Estado::SynEnviado {
             self.tcp_syn_ack(&s);
             return;
+        }
+        if self.tcp.estado == Estado::SynRecebido {
+            let c = &mut self.tcp;
+            if s.flags & SYN != 0 {
+                // o SYN dele de novo: o SYN+ACK se perdeu
+                let seq = c.snd_una;
+                self.tcp_segmento(seq, SYN | ACK, &[]);
+                return;
+            }
+            if s.flags & ACK == 0 || s.ack != c.snd_nxt {
+                return;
+            }
+            c.snd_una = s.ack;
+            c.janela_remota = s.janela as u32;
+            c.estado = Estado::Estabelecida;
+            c.tentativas = 0;
+            c.rto_ms = RTO_INICIAL_MS;
         }
         self.tcp_ack(&s);
         let ack_ja = self.tcp_dados(&s);
@@ -614,6 +659,43 @@ impl Pilha {
             c.ack_pendente = true;
         }
         n
+    }
+
+    /// SYN de um cliente numa porta que escuta: a conexao nasce num socket
+    /// novo, em SynRecebido, e o accept a pega quando o ACK chegar.
+    fn tcp_syn_de_cliente(&mut self, origem: [u8; 4], destino: [u8; 4], dados: &[u8]) {
+        let pseudo = pseudo_cabecalho(origem, destino, PROTO_TCP, dados.len());
+        let tamanho = (dados[12] >> 4) as usize * 4;
+        if checksum(&[&pseudo, dados]) != 0 || tamanho < TAMANHO || tamanho > dados.len() {
+            return;
+        }
+        let porta = ler16(dados, 2);
+        let fila = self.soquetes.iter().flatten().filter(|c| c.escuta == Some(porta) && !c.entregue).count();
+        if fila >= MAX_FILA_ESCUTA {
+            return; // fila cheia: o cliente tenta de novo
+        }
+        let iss = (crate::cpu::contador() >> 4) as u32;
+        let mut c = Conexao::fechada();
+        c.estado = Estado::SynRecebido;
+        c.remoto = origem;
+        c.porta_local = porta;
+        c.porta_remota = ler16(dados, 0);
+        c.rcv_nxt = ler32(dados, 4).wrapping_add(1);
+        c.snd_una = iss;
+        c.snd_nxt = iss.wrapping_add(1);
+        c.janela_remota = ler16(dados, 14) as u32;
+        c.mss_remoto = ler_mss(&dados[TAMANHO..tamanho]).unwrap_or(MSS_PADRAO).clamp(64, MSS);
+        c.ultimo_envio_ms = agora_ms();
+        c.escuta = Some(porta);
+        let id = match self.soquetes.iter().position(Option::is_none) {
+            Some(k) => k + 1,
+            None => {
+                self.soquetes.push(None);
+                self.soquetes.len()
+            }
+        };
+        self.soquetes[id - 1] = Some(c);
+        self.tcp_com(id, |p| p.tcp_segmento(iss, SYN | ACK, &[]));
     }
 
     /// Poe de volta na frente do buffer o que o programa nao leu.

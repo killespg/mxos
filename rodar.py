@@ -25,6 +25,8 @@ Uso:
                                                               acentuadas e o c cedilha saem pelas
                                                               teclas mortas do ABNT2
                                     esperar MS
+  python rodar.py --porta 8080:80 encaminha http://localhost:8080 do PC para a porta 80
+                                  do MXOS (ex.: executar httpd -h /paginas)
   python rodar.py --mxq           gera saida/mxos-mxq.img para a TV box
 
 O disco (saida/disco.img, FAT32 de 64 MB) e criado por ferramentas/criar_disco.py
@@ -93,6 +95,10 @@ def compilar(mxq: bool) -> pathlib.Path:
     return pasta / ALVO / "release" / "mxos"
 
 
+# Portas TCP encaminhadas do PC para o MXOS: (porta no PC, porta no MXOS).
+PORTAS: list[tuple[int, int]] = []
+
+
 def argumentos_qemu(kernel: pathlib.Path, el2: bool, audio: str) -> list[str]:
     # GICv2 igual ao GIC-400 da TV box (o QEMU escolheria o v3 com virtualization=on)
     maquina = "virt,gic-version=2,virtualization=on" if el2 else "virt,gic-version=2"
@@ -110,8 +116,9 @@ def argumentos_qemu(kernel: pathlib.Path, el2: bool, audio: str) -> list[str]:
         # disco FAT32 (virtio-blk); virgula no caminho vira ",," para o QEMU
         "-drive", f"file={str(DISCO).replace(',', ',,')},if=none,format=raw,id=disco",
         "-device", "virtio-blk-device,drive=disco",
-        # rede "user": DHCP, DNS e saida para a internet sem configurar nada
-        "-netdev", "user,id=rede",
+        # rede "user": DHCP, DNS e saida para a internet sem configurar nada;
+        # --porta PC:MXOS deixa o PC entrar num servidor que roda no MXOS
+        "-netdev", "user,id=rede" + "".join(f",hostfwd=tcp:127.0.0.1:{pc}-:{mxos}" for pc, mxos in PORTAS),
         "-device", "virtio-net-device,netdev=rede",
     ]
 
@@ -535,6 +542,8 @@ def main() -> int:
     parser.add_argument("--layout", choices=["abnt2", "us"], default="abnt2",
                         help="com --acoes: layout do MXOS para o digitar (padrao abnt2)")
     parser.add_argument("--disco-novo", action="store_true", help="recria saida/disco.img")
+    parser.add_argument("--porta", metavar="PC:MXOS", action="append", default=[],
+                        help="encaminha a porta TCP do PC (127.0.0.1) para o MXOS, ex.: 8080:80 para o httpd")
     parser.add_argument("--disco", metavar="IMG",
                         help="outra imagem de disco (padrao saida/disco.img); cada QEMU precisa da sua")
     opcoes = parser.parse_args()
@@ -542,6 +551,12 @@ def main() -> int:
     sys.stdout.reconfigure(errors="replace")
     global LAYOUT
     LAYOUT = opcoes.layout
+    for par in opcoes.porta:
+        try:
+            pc, mxos = (int(x) for x in par.split(":"))
+        except ValueError:
+            sys.exit(f"--porta {par}: use PC:MXOS, ex.: 8080:80")
+        PORTAS.append((pc, mxos))
     if opcoes.disco:
         global DISCO
         DISCO = (RAIZ / opcoes.disco).resolve()

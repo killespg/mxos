@@ -1,11 +1,13 @@
 //! Sockets do Linux sobre a pilha de rede do MXOS (rede/soquete.rs):
 //!
-//!   AF_INET + SOCK_STREAM   TCP cliente (connect, send, recv, shutdown)
+//!   AF_INET + SOCK_STREAM   TCP cliente (connect, send, recv, shutdown) e
+//!                           servidor (bind, listen, accept)
 //!   AF_INET + SOCK_DGRAM    UDP (bind, connect, sendto, recvfrom...)
 //!   AF_INET + ICMP          ping (SOCK_RAW ou SOCK_DGRAM com IPPROTO_ICMP)
 //!
-//! Servidor (listen/accept), AF_UNIX e IPv6 ainda nao existem: devolvem
-//! o erro que o Linux daria sem suporte, e os programas se viram.
+//! AF_UNIX e IPv6 ainda nao existem: devolvem o erro que o Linux daria
+//! sem suporte, e os programas se viram. 127.x.x.x vira o nosso IP (a
+//! pilha entrega para si mesma sem passar pela placa).
 //!
 //! Chamada que espera (connect, recv sem dados) segue a regra das outras:
 //! Fim::Esperar e o SVC repete na proxima volta; com O_NONBLOCK (ou
@@ -54,6 +56,9 @@ pub enum Soquete {
         remoto: Option<Endereco>,
         /// Ja respondemos o connect nao bloqueante que terminou.
         avisado: bool,
+        /// Porta do bind e se o listen ja foi feito nela.
+        local: Option<u16>,
+        escutando: bool,
     },
     Udp {
         porta: Option<u16>,
@@ -70,6 +75,7 @@ impl Drop for Soquete {
     fn drop(&mut self) {
         match self {
             Soquete::Tcp { conexao: Some(id), .. } => rede::tcp_largar(*id),
+            Soquete::Tcp { local: Some(porta), escutando: true, .. } => rede::tcp_parar(*porta),
             Soquete::Udp { porta: Some(porta), .. } => rede::udp_fechar(*porta),
             Soquete::Icmp { .. } => rede::icmp_ouvir(false),
             _ => {}
@@ -102,7 +108,11 @@ fn ler_endereco(t: &Tabela, i: usize, endereco: usize, tamanho: usize) -> Result
     if b.len() < 8 {
         return Err(EINVAL);
     }
-    Ok(Some(([b[4], b[5], b[6], b[7]], u16::from_be_bytes([b[2], b[3]]))))
+    let mut ip = [b[4], b[5], b[6], b[7]];
+    if ip[0] == 127 {
+        ip = rede::ip_local(); // loopback
+    }
+    Ok(Some((ip, u16::from_be_bytes([b[2], b[3]]))))
 }
 
 /// Escreve um sockaddr_in em `endereco` (com o tamanho em `*tamanho`).
@@ -135,7 +145,7 @@ pub fn socket(t: &mut Tabela, i: usize, familia: u64, tipo: u64, protocolo: u64)
         return Err(EAFNOSUPPORT);
     }
     let soquete = match (tipo & 0xF, protocolo) {
-        (SOCK_STREAM, 0 | 6) => Soquete::Tcp { conexao: None, remoto: None, avisado: false },
+        (SOCK_STREAM, 0 | 6) => Soquete::Tcp { conexao: None, remoto: None, avisado: false, local: None, escutando: false },
         (SOCK_DGRAM, 0 | 17) => Soquete::Udp { porta: None, remoto: None },
         (SOCK_DGRAM | SOCK_RAW, IPPROTO_ICMP) => {
             rede::icmp_ouvir(true);
@@ -155,7 +165,7 @@ pub fn connect(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usiz
     };
     let r = com_soquete(t, i, fd, |s, nao_bloqueia| -> Result<Option<i64>, i64> {
         match s {
-            Soquete::Tcp { conexao, remoto, avisado } => {
+            Soquete::Tcp { conexao, remoto, avisado, .. } => {
                 let Some(destino) = destino else { return Err(EAFNOSUPPORT) };
                 let id = match *conexao {
                     Some(id) => id,
@@ -210,13 +220,55 @@ pub fn bind(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize) 
             *porta = Some(rede::udp_abrir(local.map_or(0, |l| l.1)).map_err(errno_rede)?);
             Ok(0)
         }
+        Soquete::Tcp { local: porta, conexao: None, .. } => {
+            *porta = Some(local.map_or(0, |l| l.1));
+            Ok(0)
+        }
         _ => Ok(0),
     })?
 }
 
 pub fn listen(t: &mut Tabela, i: usize, fd: u64) -> Result<i64, i64> {
-    com_soquete(t, i, fd, |_, _| ())?;
-    Err(EOPNOTSUPP)
+    com_soquete(t, i, fd, |s, _| match s {
+        Soquete::Tcp { local: Some(porta), escutando, conexao: None, .. } if *porta != 0 => {
+            rede::tcp_escutar(*porta).map_err(errno_rede)?;
+            *escutando = true;
+            Ok(0)
+        }
+        Soquete::Tcp { .. } => Err(EINVAL),
+        _ => Err(EOPNOTSUPP),
+    })?
+}
+
+/// accept e accept4: um socket novo com a conexao que chegou.
+pub fn accept(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize, flags: u64) -> Fim {
+    let r = com_soquete(t, i, fd, |s, nao_bloqueia| match s {
+        Soquete::Tcp { local: Some(porta), escutando: true, .. } => match rede::tcp_aceitar(*porta) {
+            Some(cliente) => Ok(Some(cliente)),
+            None if nao_bloqueia => Err(EAGAIN),
+            None => Ok(None),
+        },
+        Soquete::Tcp { .. } => Err(EINVAL),
+        _ => Err(EOPNOTSUPP),
+    });
+    let (id, ip, porta) = match r {
+        Ok(Ok(Some(c))) => c,
+        Ok(Ok(None)) => return Fim::Esperar("esperando uma conexão"),
+        Ok(Err(e)) | Err(e) => return Fim::Valor(-e),
+    };
+    let soquete = Soquete::Tcp { conexao: Some(id), remoto: Some((ip, porta)), avisado: true, local: None, escutando: false };
+    let flags_abertura = O_RDWR | if flags & SOCK_NONBLOCK != 0 { O_NONBLOCK } else { 0 };
+    let aberto = Descricao::nova(Tipo::Soquete(soquete), flags_abertura);
+    let novo = match t.processos[i].linux.novo_descritor(aberto, flags & SOCK_CLOEXEC != 0) {
+        Ok(fd) => fd,
+        Err(e) => return Fim::Valor(-e),
+    };
+    if endereco != 0 {
+        if let Err(e) = escrever_endereco(t, i, endereco, tamanho, (ip, porta)) {
+            return Fim::Valor(-e);
+        }
+    }
+    Fim::Valor(novo as i64)
 }
 
 /// getsockname (`do_outro` = false) e getpeername (true).
@@ -227,6 +279,7 @@ pub fn nome(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize, 
         Soquete::Icmp { remoto, .. } if do_outro => remoto.map(|ip| (ip, 0)).ok_or(ENOTCONN),
         Soquete::Udp { porta, .. } => Ok((rede::ip_local(), porta.unwrap_or(0))),
         Soquete::Tcp { conexao: Some(id), .. } => Ok((rede::ip_local(), rede::tcp_porta_local(*id))),
+        Soquete::Tcp { local: Some(porta), .. } => Ok((rede::ip_local(), *porta)),
         _ => Ok((rede::ip_local(), 0)),
     })??;
     escrever_endereco(t, i, endereco, tamanho, valor)?;
@@ -388,6 +441,7 @@ pub fn prontidao(s: &Soquete) -> (bool, bool, bool) {
             EstadoTcp::Conectada => (rede::tcp_legivel(*id), true, false),
             EstadoTcp::Fechada(erro) => (true, false, erro.is_some()),
         },
+        Soquete::Tcp { local: Some(porta), escutando: true, .. } => (rede::tcp_tem_cliente(*porta), false, false),
         Soquete::Tcp { .. } => (false, false, true),
         Soquete::Udp { porta, .. } => (porta.is_some_and(rede::udp_legivel), true, false),
         Soquete::Icmp { .. } => (rede::icmp_legivel(), true, false),

@@ -321,7 +321,8 @@ fn despachar(t: &mut Tabela, i: usize, numero: u64, a: [u64; 6]) -> Fim {
         199 => Err(97), // socketpair: so AF_UNIX, que nao existe
         200 => soquetes::bind(t, i, a[0], a[1] as usize, a[2] as usize),
         201 => soquetes::listen(t, i, a[0]),
-        202 | 242 => Err(95), // accept: sem servidor ainda
+        202 => return soquetes::accept(t, i, a[0], a[1] as usize, a[2] as usize, 0),
+        242 => return soquetes::accept(t, i, a[0], a[1] as usize, a[2] as usize, a[3]),
         203 => return soquetes::connect(t, i, a[0], a[1] as usize, a[2] as usize),
         204 => soquetes::nome(t, i, a[0], a[1] as usize, a[2] as usize, false),
         205 => soquetes::nome(t, i, a[0], a[1] as usize, a[2] as usize, true),

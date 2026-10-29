@@ -82,7 +82,7 @@ pub fn tcp_estado(id: usize) -> EstadoTcp {
     com(|p| {
         p.processar();
         p.tcp_com(id, |p| match p.tcp.estado {
-            Estado::SynEnviado => EstadoTcp::Conectando,
+            Estado::SynEnviado | Estado::SynRecebido => EstadoTcp::Conectando,
             Estado::Fechada if p.tcp.erro.is_some() => EstadoTcp::Fechada(p.tcp.erro),
             Estado::Fechada | Estado::TempoEspera => EstadoTcp::Fechada(None),
             _ => EstadoTcp::Conectada,
@@ -138,6 +138,57 @@ pub fn tcp_largar(id: usize) {
             p.tcp.largada = true;
         })
     });
+}
+
+/// Passa a aceitar conexoes na `porta`.
+pub fn tcp_escutar(porta: u16) -> Result<(), ErroRede> {
+    com(|p| {
+        if !p.escutas.contains(&porta) {
+            p.escutas.push(porta);
+        }
+    })
+}
+
+/// Para de escutar: as conexoes que ninguem aceitou caem.
+pub fn tcp_parar(porta: u16) {
+    let _ = com(|p| {
+        p.escutas.retain(|&e| e != porta);
+        for id in 1..=p.soquetes.len() {
+            let pendente = p.soquetes[id - 1].as_ref().is_some_and(|c| c.escuta == Some(porta) && !c.entregue);
+            if pendente {
+                p.tcp_com(id, |p| p.tcp_abortar());
+                p.soquetes[id - 1] = None;
+            }
+        }
+    });
+}
+
+/// Uma conexao pronta na `porta` (o accept): (numero, ip e porta do cliente).
+pub fn tcp_aceitar(porta: u16) -> Option<(usize, [u8; 4], u16)> {
+    com(|p| {
+        p.processar();
+        let k = p.soquetes.iter().position(|c| {
+            c.as_ref().is_some_and(|c| {
+                c.escuta == Some(porta) && !c.entregue && matches!(c.estado, Estado::Estabelecida | Estado::EsperaFechar)
+            })
+        })?;
+        let c = p.soquetes[k].as_mut()?;
+        c.entregue = true;
+        Some((k + 1, c.remoto(), c.porta_remota()))
+    })
+    .ok()
+    .flatten()
+}
+
+/// Ha conexao esperando o accept na `porta`?
+pub fn tcp_tem_cliente(porta: u16) -> bool {
+    com(|p| {
+        p.processar();
+        p.soquetes.iter().flatten().any(|c| {
+            c.escuta == Some(porta) && !c.entregue && matches!(c.estado, Estado::Estabelecida | Estado::EsperaFechar)
+        })
+    })
+    .unwrap_or(false)
 }
 
 /// A porta local da conexao.
