@@ -671,6 +671,8 @@ pub struct CampoTexto {
     apagado: bool,
     /// Tiques desde a ultima piscada.
     tiques: u8,
+    /// Ctrl apertado (Ctrl+C copia o texto, Ctrl+V cola).
+    ctrl: bool,
 }
 
 /// Largura em pixels onde o texto do campo aparece.
@@ -698,7 +700,7 @@ const TIQUES_PISCADA: u8 = 5;
 
 impl CampoTexto {
     pub fn novo(texto: &str) -> Self {
-        let mut campo = CampoTexto { texto: String::new(), cursor: 0, rolagem: 0, focado: false, apagado: false, tiques: 0 };
+        let mut campo = CampoTexto { texto: String::new(), cursor: 0, rolagem: 0, focado: false, apagado: false, tiques: 0, ctrl: false };
         campo.definir(texto);
         campo
     }
@@ -727,6 +729,23 @@ impl CampoTexto {
     pub fn evento(&mut self, e: EventoApp, area: Retangulo) -> AcaoCampo {
         let acao = match e {
             EventoApp::Botao { x, y, botao: Botao::Esquerdo, pressionado: true } => self.clique(x, y, area),
+            EventoApp::Tecla { codigo: 29 | 97, pressionada } => {
+                self.ctrl = pressionada;
+                AcaoCampo::Nada
+            }
+            EventoApp::Tecla { codigo: super::transferencia::TECLA_C, pressionada: true } if self.focado && self.ctrl => {
+                super::transferencia::copiar(&self.texto);
+                AcaoCampo::Nada
+            }
+            EventoApp::Tecla { codigo: super::transferencia::TECLA_V, pressionada: true } if self.focado && self.ctrl => {
+                let mut mudou = AcaoCampo::Nada;
+                for c in super::transferencia::texto().chars() {
+                    if self.caractere(c) == AcaoCampo::Mudou {
+                        mudou = AcaoCampo::Mudou;
+                    }
+                }
+                mudou
+            }
             EventoApp::Caractere(c) if self.focado => self.caractere(c),
             EventoApp::Tecla { codigo, pressionada: true } if self.focado => self.tecla(codigo),
             EventoApp::Tique if self.focado => return self.piscar(),

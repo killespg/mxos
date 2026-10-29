@@ -22,6 +22,7 @@ pub mod cursor;
 pub mod grafico;
 pub mod janelas;
 pub mod tema;
+pub mod transferencia;
 pub mod widgets;
 
 use alloc::boxed::Box;

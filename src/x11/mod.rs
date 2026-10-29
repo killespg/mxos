@@ -32,6 +32,9 @@ const RAIZ: u32 = 0x100;
 const MAPA_CORES: u32 = 0x101;
 const VISUAL: u32 = 0x102;
 const VISUAL_ARGB: u32 = 0x103;
+/// Janela invisivel do proprio servidor: dona da selecao quando o texto
+/// foi copiado no MXOS, e quem recebe o texto copiado num programa X.
+const JANELA_SERVIDOR: u32 = 0x104;
 const MASCARA_ID: u32 = 0x001F_FFFF;
 
 const OP_BIG_REQUESTS: u8 = 128;
@@ -222,6 +225,8 @@ pub struct Servidor {
     botoes: u16,
     modificadores: u16,
     donos_selecao: BTreeMap<u32, u32>,
+    /// Ultima versao da area de transferencia do MXOS ja vista.
+    versao_transferencia: u64,
 }
 
 struct Global(UnsafeCell<Option<Servidor>>);
@@ -251,8 +256,27 @@ pub fn iniciar(largura: usize, altura: usize) {
         botoes: 0,
         modificadores: 0,
         donos_selecao: BTreeMap::new(),
+        versao_transferencia: 0,
     };
     unsafe { *SERVIDOR.0.get() = Some(s) };
+    let s = servidor().unwrap();
+    let j = Janela {
+        pai: RAIZ,
+        filhas: Vec::new(),
+        x: -1,
+        y: -1,
+        imagem: Imagem::nova(1, 1, 0),
+        profundidade: 24,
+        mapeada: false,
+        sobrepor: true,
+        so_entrada: true,
+        fundo: None,
+        interesses: Vec::new(),
+        propriedades: BTreeMap::new(),
+        na_tela: true,
+        suja: false,
+    };
+    s.recursos.insert(JANELA_SERVIDOR, (0, Recurso::Janela(j)));
 }
 
 /// Atende quem conectou e os pedidos de todos. Devolve true se algo mudou.
@@ -271,6 +295,14 @@ pub fn atender() -> bool {
     let ids: Vec<u32> = s.clientes.keys().copied().collect();
     for id in ids {
         mexeu |= s.atender_cliente(id);
+    }
+    // copiaram no MXOS: a selecao CLIPBOARD passa a ser do servidor
+    let versao = crate::gui::transferencia::versao();
+    if versao != s.versao_transferencia {
+        s.versao_transferencia = versao;
+        let clipboard = s.atomo_de("CLIPBOARD");
+        s.tomar_selecao(clipboard);
+        mexeu = true;
     }
     mexeu
 }
@@ -669,22 +701,21 @@ impl Servidor {
             }
             22 => {
                 let (dono, selecao) = (u32_em(p, 4), u32_em(p, 8));
-                self.donos_selecao.insert(selecao, dono);
+                let velho = self.donos_selecao.insert(selecao, dono);
+                if let Some(v) = velho.filter(|&v| v != dono) {
+                    self.avisar_perda(v, selecao);
+                }
+                // o texto copiado num programa X vai para o MXOS tambem
+                if selecao == self.atomo_de("CLIPBOARD") && dono != 0 {
+                    let (utf8, prop) = (self.atomo_de("UTF8_STRING"), self.atomo_de("MXOS_SELECAO"));
+                    self.pedir_conversao(dono, selecao, utf8, JANELA_SERVIDOR, prop);
+                }
             }
             23 => {
                 let dono = self.donos_selecao.get(&u32_em(p, 4)).copied().unwrap_or(0);
                 self.responder(id, 0, Vec::from(dono.to_le_bytes()));
             }
-            24 => {
-                // ConvertSelection: ninguem converte; SelectionNotify sem propriedade
-                let mut e = [0u8; 32];
-                e[0] = 31;
-                e[4..8].copy_from_slice(&u32_em(p, 20).to_le_bytes());
-                e[8..12].copy_from_slice(&u32_em(p, 4).to_le_bytes());
-                e[12..16].copy_from_slice(&u32_em(p, 8).to_le_bytes());
-                e[16..20].copy_from_slice(&u32_em(p, 12).to_le_bytes());
-                self.evento(id, e);
-            }
+            24 => self.converter_selecao(id, p),
             25 => self.mandar_evento(p),
             26 | 31 => self.responder(id, 0, Vec::new()), // GrabPointer/GrabKeyboard: Success
             27 | 28 | 29 | 30 | 32 | 33 | 34 | 35 | 36 | 37 | 42 => {
@@ -1095,6 +1126,13 @@ impl Servidor {
         if atomo == ATOMO_WM_NAME || self.atomos.get(atomo as usize - 1).is_some_and(|a| a == "_NET_WM_NAME") {
             self.sujar(w);
         }
+        if w == JANELA_SERVIDOR {
+            // a resposta do programa dono da selecao: o texto copiado
+            if let Some(prop) = self.janela_mut(w).and_then(|j| j.propriedades.remove(&atomo)) {
+                crate::gui::transferencia::guardar(&String::from_utf8_lossy(&prop.dados));
+            }
+            return;
+        }
         self.avisar_propriedade(w, atomo, 0);
     }
 
@@ -1156,6 +1194,91 @@ impl Servidor {
         } else {
             self.evento_para_interessados(destino, mascara, e);
         }
+    }
+
+    /// O numero de um atomo (criando, se precisar).
+    fn atomo_de(&mut self, nome: &str) -> u32 {
+        match self.atomos.iter().position(|a| a == nome) {
+            Some(i) => i as u32 + 1,
+            None => {
+                self.atomos.push(String::from(nome));
+                self.atomos.len() as u32
+            }
+        }
+    }
+
+    /// SelectionClear para o dono antigo.
+    fn avisar_perda(&mut self, janela: u32, selecao: u32) {
+        let Some(&(dono, _)) = self.recursos.get(&janela) else { return };
+        let mut e = [0u8; 32];
+        e[0] = 29;
+        e[4..8].copy_from_slice(&agora_ms().to_le_bytes());
+        e[8..12].copy_from_slice(&janela.to_le_bytes());
+        e[12..16].copy_from_slice(&selecao.to_le_bytes());
+        self.evento(dono, e);
+    }
+
+    fn tomar_selecao(&mut self, selecao: u32) {
+        if let Some(v) = self.donos_selecao.insert(selecao, JANELA_SERVIDOR).filter(|&v| v != JANELA_SERVIDOR) {
+            self.avisar_perda(v, selecao);
+        }
+    }
+
+    /// SelectionRequest para o programa dono de `janela_dona`.
+    fn pedir_conversao(&mut self, janela_dona: u32, selecao: u32, alvo: u32, quem: u32, propriedade: u32) {
+        let Some(&(dono, _)) = self.recursos.get(&janela_dona) else { return };
+        let mut e = [0u8; 32];
+        e[0] = 30;
+        e[4..8].copy_from_slice(&agora_ms().to_le_bytes());
+        e[8..12].copy_from_slice(&janela_dona.to_le_bytes());
+        e[12..16].copy_from_slice(&quem.to_le_bytes());
+        e[16..20].copy_from_slice(&selecao.to_le_bytes());
+        e[20..24].copy_from_slice(&alvo.to_le_bytes());
+        e[24..28].copy_from_slice(&propriedade.to_le_bytes());
+        self.evento(dono, e);
+    }
+
+    /// ConvertSelection: o dono (um programa) converte; sem dono, ou com o
+    /// texto copiado no MXOS, o servidor responde com a area de transferencia.
+    fn converter_selecao(&mut self, id: u32, p: &[u8]) {
+        let (quem, selecao, alvo, propriedade, tempo) = (u32_em(p, 4), u32_em(p, 8), u32_em(p, 12), u32_em(p, 16), u32_em(p, 20));
+        let dono = self.donos_selecao.get(&selecao).copied().unwrap_or(0);
+        let do_programa = dono != JANELA_SERVIDOR && self.recursos.get(&dono).is_some_and(|(c, _)| self.clientes.contains_key(c));
+        if do_programa {
+            return self.pedir_conversao(dono, selecao, alvo, quem, propriedade);
+        }
+        let propriedade = if propriedade == 0 { alvo } else { propriedade };
+        let (utf8, texto_a, targets, atom) = (self.atomo_de("UTF8_STRING"), self.atomo_de("TEXT"), self.atomo_de("TARGETS"), 4);
+        let texto = crate::gui::transferencia::texto();
+        let resposta = if alvo == targets {
+            let mut d = Vec::new();
+            for a in [targets, utf8, 31, texto_a] {
+                d.extend_from_slice(&a.to_le_bytes());
+            }
+            Some((atom, 32u8, d))
+        } else if alvo == utf8 || alvo == texto_a {
+            Some((utf8, 8, Vec::from(texto.as_bytes())))
+        } else if alvo == 31 {
+            // STRING: Latin-1
+            Some((31, 8, texto.chars().map(|c| if (c as u32) < 256 { c as u8 } else { b'?' }).collect()))
+        } else {
+            None
+        };
+        let feito = match (resposta, self.janela_mut(quem)) {
+            (Some((tipo, formato, dados)), Some(j)) => {
+                j.propriedades.insert(propriedade, Propriedade { tipo, formato, dados });
+                true
+            }
+            _ => false,
+        };
+        let mut e = [0u8; 32];
+        e[0] = 31; // SelectionNotify
+        e[4..8].copy_from_slice(&tempo.to_le_bytes());
+        e[8..12].copy_from_slice(&quem.to_le_bytes());
+        e[12..16].copy_from_slice(&selecao.to_le_bytes());
+        e[16..20].copy_from_slice(&alvo.to_le_bytes());
+        e[20..24].copy_from_slice(&(if feito { propriedade } else { 0 }).to_le_bytes());
+        self.evento(id, e);
     }
 
     fn pegar_ponteiro(&mut self, id: u32, w: u32) {

@@ -690,6 +690,24 @@ impl Editor {
                 self.executar(Acao::Salvar);
                 return true;
             }
+            // sem selecao: Ctrl+C copia a linha do cursor; Ctrl+V cola
+            crate::gui::transferencia::TECLA_C if self.ctrl => {
+                crate::gui::transferencia::copiar(&self.linhas[self.linha]);
+                return false;
+            }
+            crate::gui::transferencia::TECLA_V if self.ctrl => {
+                let texto = crate::gui::transferencia::texto();
+                for (k, parte) in texto.split('\n').enumerate() {
+                    if k > 0 {
+                        self.nova_linha();
+                    }
+                    let limpo: String = parte.chars().filter(|c| !c.is_control() || *c == '\t').collect();
+                    if !limpo.is_empty() {
+                        self.inserir(&limpo);
+                    }
+                }
+                return true;
+            }
             KEY_HOME if self.ctrl => self.colocar_cursor(0, 0),
             KEY_END if self.ctrl => self.colocar_cursor(ultima, self.colunas_da_linha(ultima)),
             KEY_LEFT => self.mover_esquerda(),
