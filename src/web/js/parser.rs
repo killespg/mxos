@@ -54,7 +54,11 @@ pub fn analisar(fonte: &str) -> Result<Vec<Stmt>, ErroSintaxe> {
     let mut p = Parser { t, i: 0, em_funcao: false, em_gerador: false, em_async: false, sem_in: false };
     let mut v = Vec::new();
     while !p.fim() {
+        let antes = p.i;
         v.push(p.declaracao()?);
+        if p.i == antes {
+            return p.erro("comando que não avança");
+        }
     }
     Ok(v)
 }
@@ -194,11 +198,9 @@ impl Parser {
                 Ok(d)
             }
             Tok::Palavra("import") if !self.eh_em(1, "(") && !self.eh_em(1, ".") => {
-                // modulos: ignora a linha (sem carregamento de modulos)
-                while !self.fim() && !self.eh(";") && !(self.linha_antes() && self.i > 0) {
-                    self.avancar();
-                }
-                self.aceitar(";");
+                // modulos: ignora ate o especificador ('x') e o fim do comando
+                self.avancar();
+                self.pular_ate_modulo();
                 Ok(Stmt::Vazio)
             }
             Tok::Palavra("export") => {
@@ -212,16 +214,41 @@ impl Parser {
                     return Ok(Stmt::Expr(e));
                 }
                 if self.eh("{") || self.eh("*") {
-                    while !self.fim() && !self.eh(";") && !self.linha_antes() {
-                        self.avancar();
+                    // export { a, b } [from 'x'] / export * from 'x'
+                    let estrela = self.eh("*");
+                    if !estrela {
+                        while !self.fim() && !self.aceitar("}") {
+                            self.avancar();
+                        }
                     }
-                    self.aceitar(";");
+                    if estrela || self.eh("from") {
+                        self.pular_ate_modulo();
+                    } else {
+                        self.aceitar(";");
+                    }
                     return Ok(Stmt::Vazio);
                 }
                 self.declaracao()
             }
             _ => self.comando(),
         }
+    }
+
+    /// Pula ate o texto do modulo ('x'), o `with {...}` e o `;`.
+    fn pular_ate_modulo(&mut self) {
+        while !self.fim() {
+            let texto = matches!(self.tok_em(0), Tok::Texto(_));
+            self.avancar();
+            if texto {
+                break;
+            }
+        }
+        if (self.eh("with") || self.eh("assert")) && !self.linha_antes() {
+            while !self.fim() && !self.aceitar("}") {
+                self.avancar();
+            }
+        }
+        self.aceitar(";");
     }
 
     fn lista_decl(&mut self, tipo: TipoDecl) -> Result<Stmt, ErroSintaxe> {

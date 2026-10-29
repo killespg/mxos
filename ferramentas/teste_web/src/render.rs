@@ -145,7 +145,7 @@ pub fn despejar(pag: &Pagina, prof: usize) -> String {
             return;
         }
         let c = &pag.arvore.caixas[k as usize];
-        let nome = match pag.doc.elemento(c.no) {
+        let nome = match pag.doc.borrow().elemento(c.no) {
             Some(e) => {
                 let mut x = e.nome.texto().to_string();
                 if let Some(i) = e.id {

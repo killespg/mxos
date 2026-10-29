@@ -386,3 +386,129 @@ impl Iterator for Descendentes<'_> {
         Some(id)
     }
 }
+
+// ------------------------------------------------- serializar e copiar
+
+fn escapar(s: &str, atributo: bool, saida: &mut String) {
+    for c in s.chars() {
+        match c {
+            '&' => saida.push_str("&amp;"),
+            '\u{A0}' => saida.push_str("&nbsp;"),
+            '"' if atributo => saida.push_str("&quot;"),
+            '<' if !atributo => saida.push_str("&lt;"),
+            '>' if !atributo => saida.push_str("&gt;"),
+            c => saida.push(c),
+        }
+    }
+}
+
+const VAZIOS: &[&str] = &["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"];
+const CRUS: &[&str] = &["script", "style", "xmp", "iframe", "noembed", "noframes", "plaintext", "noscript"];
+
+impl Documento {
+    /// HTML de um no (outerHTML) ou so dos filhos (innerHTML).
+    pub fn serializar(&self, id: Id, proprio: bool, saida: &mut String) {
+        match &self.no(id).tipo {
+            Tipo::Texto(t) => {
+                let pai_cru = self.elemento(self.pai(id)).is_some_and(|e| CRUS.contains(&e.nome.texto()));
+                if pai_cru { saida.push_str(t) } else { escapar(t, false, saida) }
+            }
+            Tipo::Comentario(c) => {
+                saida.push_str("<!--");
+                saida.push_str(c);
+                saida.push_str("-->");
+            }
+            Tipo::Doctype(n) => {
+                saida.push_str("<!DOCTYPE ");
+                saida.push_str(n);
+                saida.push('>');
+            }
+            Tipo::Documento => {
+                for f in self.filhos(id) {
+                    self.serializar(f, true, saida);
+                }
+            }
+            Tipo::Elemento(e) => {
+                let nome = e.nome.texto();
+                if proprio {
+                    saida.push('<');
+                    saida.push_str(nome);
+                    for at in &e.atributos {
+                        saida.push(' ');
+                        saida.push_str(at.nome.texto());
+                        saida.push_str("=\"");
+                        escapar(&at.valor, true, saida);
+                        saida.push('"');
+                    }
+                    saida.push('>');
+                    if VAZIOS.contains(&nome) {
+                        return;
+                    }
+                }
+                for f in self.filhos(id) {
+                    self.serializar(f, true, saida);
+                }
+                if proprio {
+                    saida.push_str("</");
+                    saida.push_str(nome);
+                    saida.push('>');
+                }
+            }
+        }
+    }
+
+    /// Copia um no (e os filhos, se `profundo`) para um no solto novo.
+    pub fn clonar(&mut self, id: Id, profundo: bool) -> Id {
+        let tipo = self.no(id).tipo.clone();
+        let novo = self.criar(tipo);
+        if profundo {
+            let filhos: Vec<Id> = self.filhos(id).collect();
+            for f in filhos {
+                let c = self.clonar(f, true);
+                self.anexar(novo, c);
+            }
+        }
+        novo
+    }
+
+    /// Traz para ca um no de outro documento (copia).
+    pub fn importar(&mut self, outro: &Documento, id: Id) -> Id {
+        let novo = self.criar(outro.no(id).tipo.clone());
+        let filhos: Vec<Id> = outro.filhos(id).collect();
+        for f in filhos {
+            let c = self.importar(outro, f);
+            self.anexar(novo, c);
+        }
+        novo
+    }
+
+    /// Le um pedaco de HTML (contexto: dentro do body) e devolve os nos
+    /// soltos, prontos para anexar.
+    pub fn fragmento(&mut self, html: &str) -> Vec<Id> {
+        let outro = super::html::analisar(&alloc::format!("<!DOCTYPE html><body>{html}"));
+        let mut v = Vec::new();
+        // <head> pode ter ganho <style>/<meta> do fragmento; vao junto
+        if let Some(h) = outro.cabeca() {
+            for f in outro.filhos(h).collect::<Vec<_>>() {
+                v.push(self.importar(&outro, f));
+            }
+        }
+        if let Some(b) = outro.corpo() {
+            for f in outro.filhos(b).collect::<Vec<_>>() {
+                v.push(self.importar(&outro, f));
+            }
+        }
+        v
+    }
+
+    /// O no esta dentro de `ancestral` (ou e ele)?
+    pub fn dentro_de(&self, mut id: Id, ancestral: Id) -> bool {
+        while id != NENHUM {
+            if id == ancestral {
+                return true;
+            }
+            id = self.pai(id);
+        }
+        false
+    }
+}

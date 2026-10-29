@@ -109,6 +109,7 @@ pub trait Anfitriao {
     fn pegar(&mut self, vm: &mut Vm, no: u32, c: Chave) -> Option<R<Valor>>;
     fn por(&mut self, vm: &mut Vm, no: u32, c: Chave, v: &Valor) -> Option<R<()>>;
     fn raizes(&self, vs: &mut Vec<Valor>);
+    fn como_any(&mut self) -> &mut dyn core::any::Any;
 }
 
 pub struct Vm {

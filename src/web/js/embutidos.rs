@@ -753,29 +753,93 @@ fn arr_from(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     Ok(vm.novo_array(itens))
 }
 
+/// Metodos que mudam o array, chamados num array-like
+/// (Array.prototype.push.call(obj, ...)): roda numa copia e grava de volta.
+fn generico(vm: &mut Vm, c: &Ctx, f: super::vm::FnNativa) -> R<Valor> {
+    if let Valor::Obj(r) = c.this {
+        if matches!(vm.heap.get(*r).classe, Classe::Array(_)) {
+            return f(vm, c);
+        }
+    } else {
+        return vm.erro_tipo("this não é objeto");
+    }
+    let itens = itens_de(vm, c.this)?;
+    let antes = itens.len();
+    let tmp = vm.novo_array(itens);
+    let t = tmp.obj().unwrap_or(0);
+    let r = f(vm, &Ctx { this: &tmp, args: c.args, dado: c.dado, novo: None })?;
+    let novos = arr(vm, t).clone();
+    for (i, v) in novos.iter().enumerate() {
+        vm.por_idx(c.this, &Valor::Num(i as f64), v.clone())?;
+    }
+    if let Valor::Obj(o) = c.this {
+        for i in novos.len()..antes {
+            vm.heap.get_mut(*o).remover(chave(&alloc::format!("{i}")));
+        }
+    }
+    vm.por(c.this, chave("length"), Valor::Num(novos.len() as f64))?;
+    Ok(if r == tmp { c.this.clone() } else { r })
+}
+
+fn arr_push(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+    generico(vm, c, arr_push_)
+}
+
+fn arr_pop(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+    generico(vm, c, arr_pop_)
+}
+
+fn arr_shift(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+    generico(vm, c, arr_shift_)
+}
+
+fn arr_unshift(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+    generico(vm, c, arr_unshift_)
+}
+
+fn arr_splice(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+    generico(vm, c, arr_splice_)
+}
+
+fn arr_reverse(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+    generico(vm, c, arr_reverse_)
+}
+
+fn arr_sort(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+    generico(vm, c, arr_sort_)
+}
+
+fn arr_fill(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+    generico(vm, c, arr_fill_)
+}
+
+fn arr_copy_within(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+    generico(vm, c, arr_copy_within_)
+}
+
 fn arr_of(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     Ok(vm.novo_array(c.args.to_vec()))
 }
 
-fn arr_push(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+fn arr_push_(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     let r = this_array(vm, c)?;
     let a = arr_mut(vm, r);
     a.extend_from_slice(c.args);
     Ok(Valor::Num(a.len() as f64))
 }
 
-fn arr_pop(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+fn arr_pop_(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     let r = this_array(vm, c)?;
     Ok(arr_mut(vm, r).pop().unwrap_or_default())
 }
 
-fn arr_shift(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+fn arr_shift_(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     let r = this_array(vm, c)?;
     let a = arr_mut(vm, r);
     Ok(if a.is_empty() { Valor::Indef } else { a.remove(0) })
 }
 
-fn arr_unshift(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+fn arr_unshift_(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     let r = this_array(vm, c)?;
     let a = arr_mut(vm, r);
     let resto: Vec<Valor> = a.drain(..).collect();
@@ -793,7 +857,7 @@ fn arr_slice(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     Ok(vm.novo_array(v))
 }
 
-fn arr_splice(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+fn arr_splice_(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     let r = this_array(vm, c)?;
     let n = arr(vm, r).len();
     let ini = relativo(int_arg(vm, c, 0, 0.0)?, n);
@@ -839,7 +903,7 @@ fn arr_to_string(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     Ok(Valor::texto(&juntar(vm, &itens, ",")?))
 }
 
-fn arr_reverse(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+fn arr_reverse_(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     let r = this_array(vm, c)?;
     arr_mut(vm, r).reverse();
     Ok(c.this.clone())
@@ -1081,7 +1145,7 @@ fn ordenar(vm: &mut Vm, itens: &mut Vec<Valor>, cmp: &Valor) -> R<()> {
     Ok(())
 }
 
-fn arr_sort(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+fn arr_sort_(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     let r = this_array(vm, c)?;
     let mut itens = arr(vm, r).clone();
     ordenar(vm, &mut itens, &c.arg(0))?;
@@ -1113,7 +1177,7 @@ fn arr_with(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     Ok(vm.novo_array(itens))
 }
 
-fn arr_fill(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+fn arr_fill_(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     let r = this_array(vm, c)?;
     let n = arr(vm, r).len();
     let ini = relativo(int_arg(vm, c, 1, 0.0)?, n);
@@ -1160,7 +1224,7 @@ fn arr_at(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     Ok(if i >= 0.0 { itens.get(i as usize).cloned().unwrap_or_default() } else { Valor::Indef })
 }
 
-fn arr_copy_within(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+fn arr_copy_within_(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     let r = this_array(vm, c)?;
     let n = arr(vm, r).len();
     let alvo = relativo(int_arg(vm, c, 0, 0.0)?, n);

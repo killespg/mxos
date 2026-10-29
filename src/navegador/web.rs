@@ -214,7 +214,8 @@ pub fn desenhar(p: &PaginaWeb, s: &mut Superficie, area: Retangulo, rolagem: i32
 /// O endereco do link no ponto (x, y) da area da pagina.
 pub fn link_em(p: &PaginaWeb, x: i32, y: i32, rolagem: i32) -> Option<String> {
     let id = p.pag.link_em(x, y, rolagem)?;
-    let href = p.pag.doc.elemento(id)?.atributo(a::HREF)?;
+    let doc = p.pag.doc.borrow();
+    let href = doc.elemento(id)?.atributo(a::HREF)?;
     if href.trim_start().starts_with("javascript:") {
         return None;
     }

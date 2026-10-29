@@ -5,6 +5,7 @@
 pub mod ast;
 pub mod bytecode;
 pub mod compilador;
+pub mod dom;
 pub mod embutidos;
 pub mod lexico;
 pub mod mat64;

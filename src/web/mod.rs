@@ -20,4 +20,5 @@ pub mod layout;
 pub mod mat;
 pub mod pagina;
 pub mod pintura;
+pub mod script;
 pub mod url;
