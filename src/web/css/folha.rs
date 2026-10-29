@@ -47,7 +47,34 @@ pub struct Midia {
 
 impl Folha {
     pub fn ler(texto: &str, m: &Midia) -> Folha {
-        let t = token::tokens(texto);
+        Folha::ler_com_base(texto, m, "")
+    }
+
+    /// Le uma folha baixada de `base`: os url() relativos viram absolutos
+    /// (sao relativos a folha, nao a pagina).
+    pub fn ler_com_base(texto: &str, m: &Midia, base: &str) -> Folha {
+        let mut t = token::tokens(texto);
+        if !base.is_empty() {
+            let mut i = 0;
+            while i < t.len() {
+                match &t[i] {
+                    Token::Url(u) if !u.starts_with("data:") => t[i] = Token::Url(crate::web::url::resolver(base, u)),
+                    Token::Funcao(f) if f == "url" => {
+                        let mut j = i + 1;
+                        while matches!(t.get(j), Some(Token::Espaco)) {
+                            j += 1;
+                        }
+                        if let Some(Token::Texto(u)) = t.get(j) {
+                            if !u.starts_with("data:") {
+                                t[j] = Token::Texto(crate::web::url::resolver(base, u));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
         let mut f = Folha::default();
         ler_regras(&t, m, &mut f, true);
         f

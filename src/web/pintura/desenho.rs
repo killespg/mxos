@@ -14,11 +14,7 @@ use crate::web::fonte::{Fontes, Glifo};
 use crate::web::layout::caixa::{Arvore, Substituido, Tipo};
 
 /// Uma imagem decodificada (ARGB com alfa).
-pub struct Bitmap32 {
-    pub largura: i32,
-    pub altura: i32,
-    pub px: Vec<u32>,
-}
+pub use crate::web::imagem::Imagem as Bitmap32;
 
 /// Onde a pintura busca imagens: pelo elemento (<img>) ou pela URL
 /// (fundos em CSS).

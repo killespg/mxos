@@ -56,6 +56,6 @@ fn sites_reais() {
     for (nome, url) in sites {
         let Ok((tipo, bytes)) = teste_web::rede::pagina(url) else { continue };
         let (h, t) = renderizar(nome, &bytes, Some(&tipo), url, 1280, 2400);
-        println!("{nome:10} altura {h:6}px  html {:6.1} css {:6.1} layout {:6.1} pintura {:6.1} ms", t[0], t[1], t[2], t[3]);
+        println!("{nome:10} altura {h:6}px  html {:6.1} css {:6.1} imagens {:7.1} layout {:6.1} pintura {:6.1} ms", t[0], t[1], t[2], t[3], t[4]);
     }
 }

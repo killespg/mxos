@@ -166,3 +166,53 @@ pub fn resolver(base: &str, rel: &str) -> String {
         None => String::from(rel),
     }
 }
+
+/// Base64 (RFC 4648, aceita sem "=" e com espacos).
+pub fn base64(s: &str) -> Vec<u8> {
+    let mut v = Vec::with_capacity(s.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut n = 0;
+    for c in s.bytes() {
+        let x = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => continue,
+        } as u32;
+        buf = (buf << 6) | x;
+        n += 6;
+        if n >= 8 {
+            n -= 8;
+            v.push((buf >> n) as u8);
+        }
+    }
+    v
+}
+
+/// Conteudo de um "data:tipo;base64,...." (ou com %XX).
+pub fn dados(url: &str) -> Option<Vec<u8>> {
+    let resto = url.strip_prefix("data:")?;
+    let virgula = resto.find(',')?;
+    let (cab, corpo) = (&resto[..virgula], &resto[virgula + 1..]);
+    if cab.ends_with(";base64") {
+        return Some(base64(corpo));
+    }
+    // %XX
+    let b = corpo.as_bytes();
+    let mut v = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(x) = u8::from_str_radix(&corpo[i + 1..i + 3], 16) {
+                v.push(x);
+                i += 3;
+                continue;
+            }
+        }
+        v.push(b[i]);
+        i += 1;
+    }
+    Some(v)
+}
