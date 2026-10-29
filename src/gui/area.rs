@@ -28,7 +28,10 @@ const VERSAO: &str = concat!(env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_P
 // Medidas da barra de tarefas (em pixels, relativas a barra).
 const MARGEM_BARRA: i32 = 3;
 const LARGURA_INICIAR: i32 = 84;
-const LARGURA_RELOGIO: i32 = 80;
+/// Hora em cima e data embaixo, encostadas na direita.
+const LARGURA_RELOGIO: i32 = 104;
+/// Raio dos cantos dos botoes da barra.
+const RAIO_BARRA: i32 = 4;
 const LARGURA_MAX_BOTAO: i32 = 170;
 const LARGURA_MIN_BOTAO: i32 = 28;
 const ESPACO_BOTOES: i32 = 4;
@@ -113,12 +116,43 @@ pub fn copiar_recortado(origem: &Superficie, x: i32, y: i32, recorte: Retangulo,
 
 /// Segundos -> "HH:MM:SS" (as horas passam de 99 sem cortar).
 pub fn relogio(segundos: u64) -> String {
-    format!("{:02}:{:02}:{:02}", segundos / 3600, segundos / 60 % 60, segundos % 60)
+    format!("{:02}:{:02}:{:02}", segundos / 3600 % 24, segundos / 60 % 60, segundos % 60)
 }
 
 /// Segundos -> "HH:MM".
 pub fn relogio_curto(segundos: u64) -> String {
-    format!("{:02}:{:02}", segundos / 3600, segundos / 60 % 60)
+    format!("{:02}:{:02}", segundos / 3600 % 24, segundos / 60 % 60)
+}
+
+/// Segundos desde 1970 na hora local (o RTC lido no boot mais o contador,
+/// com o fuso da aparencia).
+pub fn agora_local() -> u64 {
+    let freq = crate::cpu::frequencia_timer().max(1);
+    let utc = crate::processo::rtc_no_boot() + crate::cpu::contador() / freq;
+    (utc as i64 + tema::aparencia().fuso as i64 * 3600).max(0) as u64
+}
+
+/// Segundos locais -> "qua, 29/10/2026".
+pub fn data(segundos: u64) -> String {
+    const DIAS: [&str; 7] = ["qui", "sex", "sáb", "dom", "seg", "ter", "qua"];
+    let dias = segundos / 86_400;
+    let (ano, mes, dia) = civil(dias as i64);
+    format!("{}, {dia:02}/{mes:02}/{ano}", DIAS[(dias % 7) as usize])
+}
+
+/// Dias desde 1970-01-01 -> (ano, mes, dia), pelo calendario gregoriano
+/// (algoritmo de Howard Hinnant, so com inteiros).
+fn civil(dias: i64) -> (i64, u32, u32) {
+    let z = dias + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let dia = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let mes = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let ano = yoe + era * 400 + (mes <= 2) as i64;
+    (ano, mes, dia)
 }
 
 // --------------------------------------------------------- papel de parede
@@ -270,24 +304,56 @@ impl BarraTarefas {
         Retangulo::novo(x, MARGEM_BARRA, LARGURA_RELOGIO, ALTURA_BARRA_TAREFAS - 2 * MARGEM_BARRA)
     }
 
-    /// Redesenha a barra inteira na propria Superficie.
-    pub fn desenhar(&mut self, itens: &[ItemBarra], relogio: &str, menu_aberto: bool, t: &Tema) {
+    /// Fundo da barra (um degrade bem leve) na parte `r` dela.
+    fn pintar_fundo(&mut self, r: Retangulo, t: &Tema) {
         let area = self.superficie.area();
-        self.superficie.gradiente_vertical(area, clarear(t.barra_tarefas, 24), t.barra_tarefas);
-        self.superficie.retangulo(Retangulo::novo(0, 0, area.largura, 1), clarear(t.barra_tarefas, 70));
+        let (cima, baixo) = (clarear(t.barra_tarefas, 14), t.barra_tarefas);
+        for y in r.y.max(0)..r.baixo().min(area.altura) {
+            let cor = grafico::misturar(cima, baixo, (y * 255 / area.altura.max(1)) as u32);
+            self.superficie.retangulo(Retangulo::novo(r.x, y, r.largura, 1), cor);
+        }
+        if r.y == 0 {
+            self.superficie.retangulo(Retangulo::novo(r.x, 0, r.largura, 1), clarear(t.barra_tarefas, 50));
+        }
+    }
+
+    /// Redesenha a barra inteira na propria Superficie.
+    pub fn desenhar(&mut self, itens: &[ItemBarra], hora: &str, data: &str, menu_aberto: bool, t: &Tema) {
+        let area = self.superficie.area();
+        self.pintar_fundo(area, t);
 
         let iniciar = self.iniciar();
-        let cor = if menu_aberto { t.botao_destaque } else { t.botao };
-        botao(&mut self.superficie, iniciar, "", cor, t.botao_texto, t.borda, 1);
-        desenhar_logo(&mut self.superficie, iniciar, t.botao_texto, t);
+        if menu_aberto {
+            self.superficie.retangulo_arredondado(iniciar, RAIO_BARRA, clarear(t.barra_tarefas, 40));
+        }
+        desenhar_logo(&mut self.superficie, iniciar, t.barra_texto, t);
 
+        self.pintar_relogio(hora, data, t);
         let caixa = self.caixa_relogio();
-        self.superficie.retangulo(caixa, escurecer(t.barra_tarefas, 60));
-        self.superficie.contorno(caixa, clarear(t.barra_tarefas, 40), 1);
-        widgets::texto_centrado(&mut self.superficie, caixa, relogio, t.barra_texto, &INTER_NEGRITO);
-
-        self.desenhar_botoes(itens, iniciar.direita() + 8, caixa.x - 8, t);
+        // risquinho separando os botoes do relogio
+        self.superficie.retangulo(Retangulo::novo(caixa.x - 8, 10, 1, area.altura - 20), clarear(t.barra_tarefas, 30));
+        self.desenhar_botoes(itens, iniciar.direita() + 8, caixa.x - 16, t);
         self.suja = false;
+    }
+
+    /// So o relogio (a cada segundo ou minuto): devolve o retangulo na
+    /// tela que mudou, para sujar so ele e nao a barra toda.
+    pub fn atualizar_relogio(&mut self, hora: &str, data: &str, t: &Tema) -> Retangulo {
+        self.pintar_relogio(hora, data, t);
+        self.caixa_relogio().deslocado(0, self.y)
+    }
+
+    /// Hora em cima (seminegrito) e data embaixo, alinhadas a direita.
+    fn pintar_relogio(&mut self, hora: &str, data: &str, t: &Tema) {
+        let caixa = self.caixa_relogio();
+        self.pintar_fundo(caixa, t);
+        let meio = caixa.y + caixa.altura / 2;
+        let direita = caixa.direita() - 6;
+        let x_hora = direita - INTER_NEGRITO.largura(hora);
+        self.superficie.texto_com(x_hora, meio - 3, hora, t.barra_texto, &INTER_NEGRITO);
+        let x_data = direita - INTER.largura(data);
+        let cor_data = grafico::misturar(t.barra_texto, t.barra_tarefas, 70);
+        self.superficie.texto_com(x_data, meio + 12, data, cor_data, &INTER);
     }
 
     /// Um botao por janela entre `inicio` e `fim` (x relativos a barra).
@@ -306,19 +372,26 @@ impl BarraTarefas {
                 break; // janelas demais: as ultimas ficam sem botao
             }
             let r = Retangulo::novo(x, MARGEM_BARRA, largura, altura);
+            // botao plano: so a janela ativa tem fundo; o tracinho embaixo
+            // diz quem esta aberta (comprido = ativa, curto = aberta)
             let fundo = match (item.focada, item.minimizada) {
-                (true, _) => t.botao_destaque,
-                (false, true) => escurecer(t.botao, 40),
-                (false, false) => t.botao,
+                (true, _) => Some(clarear(t.barra_tarefas, 34)),
+                (false, false) => Some(clarear(t.barra_tarefas, 14)),
+                (false, true) => None,
             };
-            self.superficie.retangulo(r, fundo);
-            self.superficie.contorno(r, t.borda, 1);
-            if item.focada {
-                // tracinho de destaque embaixo da janela ativa
-                self.superficie.retangulo(Retangulo::novo(r.x + 2, r.baixo() - 3, r.largura - 4, 2), t.destaque);
+            if let Some(cor) = fundo {
+                self.superficie.retangulo_arredondado(r, RAIO_BARRA, cor);
             }
-            let texto = fonte::encurtar(item.titulo, r.largura - 14, &INTER);
-            widgets::texto_na_faixa(&mut self.superficie, r.x + 7, r, &texto, t.botao_texto, &INTER);
+            let (traco, cor_traco) = if item.focada {
+                (r.largura - 2 * RAIO_BARRA - 4, t.destaque)
+            } else {
+                (14, clarear(t.barra_tarefas, 90))
+            };
+            self.superficie.retangulo_arredondado(Retangulo::novo(r.x + (r.largura - traco) / 2, r.baixo() - 3, traco, 3), 1, cor_traco);
+            let cor_texto = if item.minimizada { grafico::misturar(t.barra_texto, t.barra_tarefas, 110) } else { t.barra_texto };
+            let texto = fonte::encurtar(item.titulo, r.largura - 18, &INTER);
+            let faixa = Retangulo::novo(r.x, r.y, r.largura, r.altura - 3);
+            widgets::texto_na_faixa(&mut self.superficie, r.x + 9, faixa, &texto, cor_texto, &INTER);
             self.botoes.push((r.deslocado(0, self.y), item.id));
         }
     }

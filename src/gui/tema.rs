@@ -20,9 +20,9 @@ use core::cell::UnsafeCell;
 
 use super::grafico::Cor;
 
-pub const ALTURA_TITULO: i32 = 24;
-pub const BORDA: i32 = 2;
-pub const ALTURA_BARRA_TAREFAS: i32 = 32;
+pub const ALTURA_TITULO: i32 = 30;
+pub const BORDA: i32 = 1;
+pub const ALTURA_BARRA_TAREFAS: i32 = 40;
 
 /// Desenho do papel de parede. Todos usam a cor de Aparencia::cor_papel.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -94,6 +94,8 @@ pub struct Aparencia {
     /// Arrastar uma janela mostra so o contorno; ela vai para o lugar ao
     /// soltar (bem mais leve que redesenhar tudo a cada movimento).
     pub arrastar_contorno: bool,
+    /// Fuso do relogio da barra, em horas (Brasilia = -3).
+    pub fuso: i32,
 }
 
 /// A aparencia de fabrica (a mesma do config::Config::padrao).
@@ -103,6 +105,7 @@ pub const APARENCIA_PADRAO: Aparencia = Aparencia {
     relogio_segundos: true,
     icones: true,
     arrastar_contorno: true,
+    fuso: -3,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

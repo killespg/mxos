@@ -33,7 +33,7 @@ use super::widgets::Icone;
 use crate::cpu;
 use crate::video::tela::Tela;
 use crate::entrada::{Botao, Evento, Layout};
-use crate::fonte::{self, INTER_NEGRITO};
+use crate::fonte::{self, INTER, INTER_NEGRITO};
 
 /// Evento entregue a um app. Coordenadas relativas ao canto do conteudo.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -122,7 +122,9 @@ const SOMBRA: i32 = 6;
 /// Opacidade da sombra no miolo (0 a 255).
 const SOMBRA_ALFA: u32 = 120;
 /// Botoes [_] e [x] da barra de titulo.
-const LADO_BOTAO: i32 = 18;
+const LADO_BOTAO: i32 = 20;
+/// Raio dos cantos das janelas.
+const RAIO_JANELA: i32 = 8;
 /// Onde abrem as janelas do menu: uma escada a partir daqui.
 const CASCATA_X: i32 = 48;
 const CASCATA_Y: i32 = 32;
@@ -264,39 +266,52 @@ impl Janela {
         self.conteudo_sujo = false;
     }
 
-    /// Desenha a barra de titulo no cache: degrade, titulo em seminegrito,
-    /// botoes [_] e [x].
+    /// Desenha a barra de titulo no cache: degrade leve, titulo em
+    /// seminegrito e os botoes [_] e [x] arredondados. A janela que nao
+    /// esta em foco fica apagada (titulo e botoes mais fracos).
     fn desenhar_barra(&mut self, focada: bool, t: &Tema) {
         let s = &mut self.barra;
         let area = s.area();
         let base = if focada { t.titulo_ativo } else { t.titulo_inativo };
-        s.gradiente_vertical(area, area::clarear(base, 36), base);
+        s.gradiente_vertical(area, area::clarear(base, 18), base);
+        // brilho de 1 px no alto, como luz batendo na borda
+        s.retangulo(Retangulo::novo(0, 0, area.largura, 1), area::clarear(base, 60));
 
-        let espaco = area.largura - 2 * (LADO_BOTAO + 4) - 16;
+        let espaco = area.largura - 2 * (LADO_BOTAO + 6) - 24;
         let texto = fonte::encurtar(&self.titulo, espaco, &INTER_NEGRITO);
-        let base = INTER_NEGRITO.base_centralizada(0, ALTURA_TITULO);
-        s.texto_com(9, base, &texto, t.titulo_texto, &INTER_NEGRITO);
+        let linha = INTER_NEGRITO.base_centralizada(0, ALTURA_TITULO);
+        let cor_texto = if focada { t.titulo_texto } else { grafico::misturar(t.titulo_texto, base, 80) };
+        s.texto_com(12, linha, &texto, cor_texto, &INTER_NEGRITO);
 
+        let simbolo = if focada { 0x00FF_FFFF } else { grafico::misturar(0x00FF_FFFF, base, 90) };
         let m = botao_minimizar_local(area.largura);
-        s.retangulo(m, t.botao);
-        s.contorno(m, t.borda, 1);
-        s.retangulo(Retangulo::novo(m.x + 5, m.baixo() - 6, m.largura - 10, 2), t.botao_texto);
+        s.retangulo_arredondado(m, 4, area::clarear(base, 28));
+        s.retangulo(Retangulo::novo(m.x + 6, m.y + m.altura / 2, m.largura - 12, 2), simbolo);
 
         let f = botao_fechar_local(area.largura);
-        s.retangulo(f, t.fechar);
-        s.contorno(f, t.borda, 1);
+        let vermelho = if focada { t.fechar } else { grafico::misturar(t.fechar, base, 110) };
+        s.retangulo_arredondado(f, 4, vermelho);
+        // X de 2 px, um pouco menor que o botao
         for d in 0..2 {
-            // X com traco de 2 px
-            s.linha(f.x + 5 + d, f.y + 5, f.direita() - 6 + d, f.baixo() - 6, 0x00FF_FFFF);
-            s.linha(f.direita() - 6 + d, f.y + 5, f.x + 5 + d, f.baixo() - 6, 0x00FF_FFFF);
+            s.linha(f.x + 6 + d, f.y + 6, f.direita() - 7 + d, f.baixo() - 7, simbolo);
+            s.linha(f.direita() - 7 + d, f.y + 6, f.x + 6 + d, f.baixo() - 7, simbolo);
         }
         self.barra_suja = false;
     }
 
-    /// Pinta a janela (sombra, borda, titulo, conteudo) na parte `area` da cena.
+    /// Pinta a janela (sombra, borda, titulo, conteudo) na parte `area` da
+    /// cena, com os cantos arredondados: o que estava embaixo dos quatro
+    /// cantos e guardado antes e volta, suavizado, depois.
     fn pintar(&self, cena: &mut Superficie, area: Retangulo, t: &Tema) {
         let m = self.moldura();
         pintar_sombra(cena, m, area, t.sombra);
+        let cantos = guardar_cantos(cena, m, area);
+        self.pintar_retangular(cena, area, t);
+        arredondar_cantos(cena, m, area, &cantos, t.borda);
+    }
+
+    fn pintar_retangular(&self, cena: &mut Superficie, area: Retangulo, t: &Tema) {
+        let m = self.moldura();
         area::preencher(cena, Retangulo::novo(m.x, m.y, m.largura, BORDA), area, t.borda);
         area::preencher(cena, Retangulo::novo(m.x, m.baixo() - BORDA, m.largura, BORDA), area, t.borda);
         area::preencher(cena, Retangulo::novo(m.x, m.y + BORDA, BORDA, m.altura - 2 * BORDA), area, t.borda);
@@ -308,6 +323,77 @@ impl Janela {
     }
 }
 
+/// Os quatro cantos de RAIO_JANELA x RAIO_JANELA da moldura `m`
+/// (cima-esquerda, cima-direita, baixo-esquerda, baixo-direita).
+fn cantos(m: Retangulo) -> [(i32, i32); 4] {
+    let r = RAIO_JANELA;
+    [(m.x, m.y), (m.direita() - r, m.y), (m.x, m.baixo() - r), (m.direita() - r, m.baixo() - r)]
+}
+
+const PIXELS_CANTO: usize = (RAIO_JANELA * RAIO_JANELA) as usize;
+
+/// O que esta na cena embaixo dos cantos da moldura (antes da janela).
+fn guardar_cantos(cena: &Superficie, m: Retangulo, area: Retangulo) -> [[Cor; PIXELS_CANTO]; 4] {
+    let mut guardado = [[0; PIXELS_CANTO]; 4];
+    for (k, (x0, y0)) in cantos(m).into_iter().enumerate() {
+        for dy in 0..RAIO_JANELA {
+            for dx in 0..RAIO_JANELA {
+                let (x, y) = (x0 + dx, y0 + dy);
+                if area.contem(x, y) {
+                    guardado[k][(dy * RAIO_JANELA + dx) as usize] = cena.ler_pixel(x, y).unwrap_or(0);
+                }
+            }
+        }
+    }
+    guardado
+}
+
+/// Arredonda os cantos: fora da curva volta o fundo guardado, na curva
+/// passa a linha da borda (BORDA px) e dentro fica a janela. Cada pixel
+/// e medido com 4 x 4 amostras, para a curva sair lisa.
+fn arredondar_cantos(cena: &mut Superficie, m: Retangulo, area: Retangulo, guardado: &[[Cor; PIXELS_CANTO]; 4], borda: Cor) {
+    let r = RAIO_JANELA;
+    // raios em quartos de pixel, ao quadrado: fora da borda e dentro dela
+    let fora = (r * 4) * (r * 4);
+    let dentro = ((r - BORDA) * 4) * ((r - BORDA) * 4);
+    for (k, (x0, y0)) in cantos(m).into_iter().enumerate() {
+        // centro do circulo, em quartos de pixel
+        let cx = if k % 2 == 0 { (x0 + r) * 4 } else { x0 * 4 };
+        let cy = if k < 2 { (y0 + r) * 4 } else { y0 * 4 };
+        for dy in 0..r {
+            for dx in 0..r {
+                let (x, y) = (x0 + dx, y0 + dy);
+                if !area.contem(x, y) {
+                    continue;
+                }
+                let (mut no_contorno, mut na_janela) = (0u32, 0u32);
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        // 4 x 4 pontos dentro do pixel, em quartos de pixel
+                        let (qx, qy) = (x * 4 + sx - cx, y * 4 + sy - cy);
+                        let d = qx * qx + qy * qy;
+                        if d <= dentro {
+                            na_janela += 1;
+                        } else if d <= fora {
+                            no_contorno += 1;
+                        }
+                    }
+                }
+                if na_janela == 16 {
+                    continue;
+                }
+                let fundo = guardado[k][(dy * r + dx) as usize];
+                let janela = cena.ler_pixel(x, y).unwrap_or(fundo);
+                // fundo -> borda pela parte que cai no contorno, depois -> janela
+                let com_borda = grafico::misturar(fundo, borda, (no_contorno + na_janela) * 16);
+                let total = (no_contorno + na_janela).max(1);
+                let cor = grafico::misturar(com_borda, janela, na_janela * 255 / total);
+                cena.pixel(x, y, cor);
+            }
+        }
+    }
+}
+
 /// Botao [x] relativo a barra de titulo de largura `largura`.
 fn botao_fechar_local(largura: i32) -> Retangulo {
     let margem = (ALTURA_TITULO - LADO_BOTAO) / 2;
@@ -316,7 +402,7 @@ fn botao_fechar_local(largura: i32) -> Retangulo {
 
 /// Botao [_], a esquerda do [x].
 fn botao_minimizar_local(largura: i32) -> Retangulo {
-    botao_fechar_local(largura).deslocado(-(LADO_BOTAO + 4), 0)
+    botao_fechar_local(largura).deslocado(-(LADO_BOTAO + 6), 0)
 }
 
 /// Sombra suave embaixo e a direita da moldura: escurece o que ja esta
@@ -369,9 +455,74 @@ fn juntar(sujas: &mut Vec<Retangulo>, r: Retangulo) {
     }
 }
 
+/// O que o relogio da barra mostra agora: hora (com ou sem segundos) e data.
+fn hora_e_data() -> (String, String) {
+    let agora = area::agora_local();
+    let hora = if tema::aparencia().relogio_segundos { area::relogio(agora) } else { area::relogio_curto(agora) };
+    (hora, area::data(agora))
+}
+
 /// Retangulo do cursor com a ponta em (x, y).
 fn retangulo_cursor((x, y): (i32, i32)) -> Retangulo {
     Retangulo::novo(x, y, cursor::LARGURA, cursor::ALTURA)
+}
+
+/// Menu do clique direito na area de trabalho.
+const ITENS_CONTEXTO: [&str; 2] = ["Alterar plano de fundo…", "Próximo plano de fundo"];
+const ALTURA_ITEM_CONTEXTO: i32 = 30;
+const LARGURA_CONTEXTO: i32 = 220;
+
+#[derive(Clone, Copy, PartialEq)]
+struct MenuContexto {
+    r: Retangulo,
+    destacado: Option<usize>,
+}
+
+impl MenuContexto {
+    /// Aberto com o canto em (x, y), sem sair da area de trabalho.
+    fn novo(x: i32, y: i32, largura_tela: i32, altura_area: i32) -> MenuContexto {
+        let altura = ITENS_CONTEXTO.len() as i32 * ALTURA_ITEM_CONTEXTO + 8;
+        let x = x.min(largura_tela - LARGURA_CONTEXTO - 2).max(0);
+        let y = y.min(altura_area - altura - 2).max(0);
+        MenuContexto { r: Retangulo::novo(x, y, LARGURA_CONTEXTO, altura), destacado: None }
+    }
+
+    fn item(&self, i: usize) -> Retangulo {
+        Retangulo::novo(self.r.x + 4, self.r.y + 4 + i as i32 * ALTURA_ITEM_CONTEXTO, self.r.largura - 8, ALTURA_ITEM_CONTEXTO)
+    }
+
+    fn item_em(&self, x: i32, y: i32) -> Option<usize> {
+        (0..ITENS_CONTEXTO.len()).find(|&i| self.item(i).contem(x, y))
+    }
+
+    /// Com sombra um pouco maior que o retangulo.
+    fn limites(&self) -> Retangulo {
+        Retangulo::novo(self.r.x, self.r.y, self.r.largura + SOMBRA, self.r.altura + SOMBRA)
+    }
+
+    /// Desenhado direto na cena (e pequeno; nao precisa de cache).
+    fn pintar(&self, cena: &mut Superficie, area: Retangulo, t: &Tema) {
+        if self.limites().intersecao(&area).vazio() {
+            return;
+        }
+        let mut pedaco = Superficie::nova(self.r.largura as usize, self.r.altura as usize, 0);
+        cena.copiar_regiao_para(self.r, &mut pedaco, 0, 0);
+        let fundo = pedaco.area();
+        pedaco.retangulo_arredondado(fundo, 7, t.borda);
+        pedaco.retangulo_arredondado(Retangulo::novo(1, 1, fundo.largura - 2, fundo.altura - 2), 6, t.fundo_janela);
+        for (i, texto) in ITENS_CONTEXTO.iter().enumerate() {
+            let r = self.item(i).deslocado(-self.r.x, -self.r.y);
+            let destacado = self.destacado == Some(i);
+            if destacado {
+                pedaco.retangulo_arredondado(r, 5, t.destaque);
+            }
+            let cor = if destacado { 0x00FF_FFFF } else { t.texto };
+            let linha = INTER.base_centralizada(r.y, r.altura);
+            pedaco.texto_com(r.x + 12, linha, texto, cor, &INTER);
+        }
+        pintar_sombra(cena, self.r, area, t.sombra);
+        area::copiar_recortado(&pedaco, self.r.x, self.r.y, area, cena);
+    }
 }
 
 /// Janela sendo arrastada pela barra de titulo.
@@ -402,6 +553,8 @@ pub struct Gerenciador {
     /// ele esta desenhado na tela.
     contorno: Option<Retangulo>,
     contorno_desenhado: Option<Retangulo>,
+    /// Menu do clique direito na area de trabalho (None = fechado).
+    contexto: Option<MenuContexto>,
     botoes: u8,
     arrasto: Option<Arrasto>,
     /// Janela que recebeu o clique no conteudo: fica com o mouse ate soltar.
@@ -438,6 +591,7 @@ impl Gerenciador {
             cursor_desenhado: None,
             contorno: None,
             contorno_desenhado: None,
+            contexto: None,
             botoes: 0,
             arrasto: None,
             captura: None,
@@ -671,6 +825,15 @@ impl Gerenciador {
             }
             return;
         }
+        if let Some(mut mc) = self.contexto {
+            let destacado = mc.item_em(x, y);
+            if destacado != mc.destacado {
+                mc.destacado = destacado;
+                self.contexto = Some(mc);
+                self.sujar(mc.r);
+            }
+            return;
+        }
         self.passar_atalhos(x, y);
         if self.menu.aberto() && self.captura.is_none() {
             self.menu.passar(x, y);
@@ -764,6 +927,14 @@ impl Gerenciador {
             return;
         }
         let (x, y) = self.cursor;
+        if let Some(mc) = self.contexto.take() {
+            // qualquer clique fecha o menu; em cima de um item, faz o item
+            self.sujar(mc.limites());
+            if let Some(i) = mc.item_em(x, y) {
+                self.fazer_contexto(i);
+                return;
+            }
+        }
         let menu_aberto = self.menu.aberto();
         if menu_aberto && self.clique_com_menu(x, y) {
             return;
@@ -779,11 +950,35 @@ impl Gerenciador {
             if botao == Botao::Esquerdo && !menu_aberto {
                 self.clicar_area(x, y);
             }
+            if botao == Botao::Direito && !menu_aberto {
+                let mc = MenuContexto::novo(x, y, self.largura, self.altura_area());
+                self.sujar(mc.limites());
+                self.contexto = Some(mc);
+            }
             return;
         };
         let id = self.janelas[i].id;
         self.focar(id);
         self.clicar_janela(id, botao, x, y);
+    }
+
+    /// Um item do menu do clique direito.
+    fn fazer_contexto(&mut self, item: usize) {
+        match item {
+            0 => {
+                self.abrir_em_cascata(apps::configuracoes::criar_personalizar());
+            }
+            _ => {
+                // o proximo padrao de papel de parede, na hora (Salvar nas
+                // Configuracoes guarda no disco)
+                let mut a = tema::aparencia();
+                let todos = tema::PapelDeParede::TODOS;
+                let i = todos.iter().position(|&p| p == a.papel).unwrap_or(0);
+                a.papel = todos[(i + 1) % todos.len()];
+                tema::definir_aparencia(a);
+                self.redesenhar_tudo();
+            }
+        }
     }
 
     /// Clique com o menu aberto. true = o clique acabou aqui.
@@ -954,11 +1149,17 @@ impl Gerenciador {
         for id in ids {
             self.enviar(id, EventoApp::Tique);
         }
-        let segundos = cpu::contador() / cpu::frequencia_timer().max(1);
+        let segundos = area::agora_local();
         let relogio = if tema::aparencia().relogio_segundos { segundos } else { segundos / 60 };
         if relogio != self.relogio {
             self.relogio = relogio;
-            self.barra.sujar();
+            if self.barra.suja() {
+                return; // a barra inteira ja vai ser refeita
+            }
+            // so o relogio muda: nada de redesenhar a barra toda
+            let (hora, data) = hora_e_data();
+            let r = self.barra.atualizar_relogio(&hora, &data, &tema::atual());
+            self.sujar(r);
         }
     }
 
@@ -1078,9 +1279,8 @@ impl Gerenciador {
             .map(|j| ItemBarra { id: j.id, titulo: &j.titulo, focada: self.foco == Some(j.id), minimizada: j.minimizada })
             .collect();
         itens.sort_unstable_by_key(|item| item.id);
-        let segundos = cpu::contador() / cpu::frequencia_timer().max(1);
-        let relogio = if tema::aparencia().relogio_segundos { area::relogio(segundos) } else { area::relogio_curto(segundos) };
-        self.barra.desenhar(&itens, &relogio, self.menu.aberto(), t);
+        let (hora, data) = hora_e_data();
+        self.barra.desenhar(&itens, &hora, &data, self.menu.aberto(), t);
     }
 
     /// Refaz a parte `area` da cena, de baixo para cima.
@@ -1098,6 +1298,9 @@ impl Gerenciador {
         self.barra.pintar(&mut self.cena, area);
         if self.menu.aberto() {
             self.menu.pintar(&mut self.cena, area);
+        }
+        if let Some(mc) = self.contexto {
+            mc.pintar(&mut self.cena, area, t);
         }
     }
 

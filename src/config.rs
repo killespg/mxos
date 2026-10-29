@@ -10,6 +10,7 @@
 //!   relogio_segundos=sim
 //!   icones=sim
 //!   arrastar_contorno=sim
+//!   fuso=-3
 //!   layout=abnt2
 //!   pagina_inicial=disco:/paginas/index.html
 //!
@@ -36,13 +37,14 @@ const CABECALHO: &str = "# MXOS: configuracoes (chave=valor)\n";
 const TAMANHO_MAXIMO: usize = 16 * 1024;
 
 /// Chaves conhecidas e os valores de fabrica, na ordem em que sao gravadas.
-const PADROES: [(&str, &str); 8] = [
+const PADROES: [(&str, &str); 9] = [
     ("tema", "Azul"),
     ("papel", "gradiente"),
     ("cor_papel", "204060"),
     ("relogio_segundos", "sim"),
     ("icones", "sim"),
     ("arrastar_contorno", "sim"),
+    ("fuso", "-3"),
     ("layout", "abnt2"),
     ("pagina_inicial", "disco:/paginas/index.html"),
 ];
@@ -146,6 +148,7 @@ fn valor_valido(chave: &str, valor: &str) -> bool {
         "cor_papel" => ler_cor(valor).is_some(),
         "relogio_segundos" | "icones" | "arrastar_contorno" => ler_sim_nao(valor).is_some(),
         "layout" => ler_layout(valor).is_some(),
+        "fuso" => ler_fuso(valor).is_some(),
         _ => !valor.is_empty(),
     }
 }
@@ -211,7 +214,13 @@ pub fn aparencia_de(cfg: &Config) -> Aparencia {
         relogio_segundos: sim_nao("relogio_segundos", padrao.relogio_segundos),
         icones: sim_nao("icones", padrao.icones),
         arrastar_contorno: sim_nao("arrastar_contorno", padrao.arrastar_contorno),
+        fuso: cfg.obter("fuso").and_then(ler_fuso).unwrap_or(padrao.fuso),
     }
+}
+
+/// "-3", "+1", "0": horas de diferenca para o UTC (de -12 a +14).
+fn ler_fuso(valor: &str) -> Option<i32> {
+    valor.trim().trim_start_matches('+').parse().ok().filter(|h| (-12..=14).contains(h))
 }
 
 /// Poe em uso o tema e a aparencia de `cfg` (tema::definir e
@@ -234,6 +243,7 @@ pub fn guardar_aparencia(cfg: &mut Config) {
     cfg.definir("relogio_segundos", texto_sim_nao(a.relogio_segundos));
     cfg.definir("icones", texto_sim_nao(a.icones));
     cfg.definir("arrastar_contorno", texto_sim_nao(a.arrastar_contorno));
+    cfg.definir("fuso", &alloc::format!("{}", a.fuso));
 }
 
 /// Layout do teclado de `cfg`: "us" ou "abnt2" (padrao).

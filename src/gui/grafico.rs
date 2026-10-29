@@ -194,6 +194,34 @@ impl Superficie {
     }
 
     /// Moldura de `espessura` pixels por dentro de `r`.
+    /// Retangulo cheio com os cantos arredondados (raio pequeno, sem
+    /// suavizar: so os pixels de fora da curva ficam sem pintar).
+    pub fn retangulo_arredondado(&mut self, r: Retangulo, raio: i32, cor: Cor) {
+        let raio = raio.min(r.largura / 2).min(r.altura / 2).max(0);
+        for dy in 0..r.altura {
+            // quanto a linha entra nos cantos (0 no meio)
+            let canto = if dy < raio {
+                raio - dy - 1
+            } else if dy >= r.altura - raio {
+                dy - (r.altura - raio)
+            } else {
+                -1
+            };
+            let recuo = if canto < 0 {
+                0
+            } else {
+                let d = canto + 1;
+                // recuo do circulo de raio `raio` nessa altura (inteiro)
+                let mut x = 0;
+                while (raio - x) * (raio - x) + d * d > raio * raio + raio / 2 {
+                    x += 1;
+                }
+                x
+            };
+            self.retangulo(Retangulo::novo(r.x + recuo, r.y + dy, r.largura - 2 * recuo, 1), cor);
+        }
+    }
+
     pub fn contorno(&mut self, r: Retangulo, cor: Cor, espessura: i32) {
         if espessura <= 0 || r.vazio() {
             return;
