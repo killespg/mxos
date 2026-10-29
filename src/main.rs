@@ -10,6 +10,7 @@ extern crate alloc;
 mod armazenamento;
 mod atualizacao;
 mod audio;
+mod chip8;
 mod config;
 mod cpu;
 mod cripto;

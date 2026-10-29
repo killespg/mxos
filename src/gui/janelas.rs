@@ -48,6 +48,9 @@ pub enum EventoApp {
     Tique,
     /// Os processos escreveram algo ou terminaram (so o terminal liga).
     Processos,
+    /// A cada volta do laco principal (~100 por segundo), so para quem pede
+    /// em App::quer_quadros (jogos, emuladores).
+    Quadro,
 }
 
 /// Um programa que mora numa janela.
@@ -70,6 +73,10 @@ pub trait App {
     /// a janela vem depois, pelo X11 (apps/linux.rs).
     fn lancar(&self) -> Option<Vec<String>> {
         None
+    }
+    /// true = recebe EventoApp::Quadro a cada volta do laco principal.
+    fn quer_quadros(&self) -> bool {
+        false
     }
 }
 
@@ -1214,6 +1221,14 @@ impl Gerenciador {
 
     /// Tique para todos os apps (minimizados tambem), a fotografia do
     /// resumo() e o relogio.
+    /// EventoApp::Quadro para os apps que pedem (animacao fluida).
+    pub fn quadro(&mut self) {
+        let ids: Vec<usize> = self.janelas.iter().filter(|j| j.app.quer_quadros()).map(|j| j.id).collect();
+        for id in ids {
+            self.enviar(id, EventoApp::Quadro);
+        }
+    }
+
     pub fn tique(&mut self) {
         guardar_resumo(self.janelas());
         // os ids antes: um app pode abrir ou fechar janelas no proprio Tique

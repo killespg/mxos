@@ -94,6 +94,7 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
         }
         // os processos rodam ate o proximo tique; o shell da janela mostra a saida
         gerenciador.enviar(id_terminal, EventoApp::Processos);
+        gerenciador.quadro();
         atender_x11(&mut gerenciador, &mut janelas_x, (largura as i32, altura as i32));
         crate::audio::dsp::bombear();
         gerenciador.compor(&framebuffer);

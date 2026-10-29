@@ -21,6 +21,9 @@ pub mod realce;
 #[path = "../../../src/midia/mod.rs"]
 pub mod midia;
 
+#[path = "../../../src/chip8.rs"]
+pub mod chip8;
+
 pub mod rede;
 pub mod png;
 

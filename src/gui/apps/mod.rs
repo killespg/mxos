@@ -19,6 +19,7 @@ pub mod arquivos;
 pub mod arvore;
 pub mod atualizar;
 pub mod calculadora;
+pub mod chip8;
 pub mod configuracoes;
 pub mod drivers;
 pub mod editor;
@@ -54,6 +55,7 @@ pub fn registrar_apps_basicos(g: &mut Gerenciador) {
     g.registrar_app("Personalizar", Icone::Monitor, configuracoes::criar_personalizar);
     g.registrar_app("Calculadora", Icone::Calculadora, criar_calculadora);
     g.registrar_app("Pintura", Icone::Pincel, criar_pintura);
+    g.registrar_app("CHIP-8", Icone::Monitor, chip8::criar);
     g.registrar_app("Atualizar o sistema", Icone::Engrenagem, atualizar::criar);
     g.registrar_app("Sobre o MXOS", Icone::Info, criar_sobre);
 }
@@ -74,6 +76,9 @@ pub fn registrar_atalhos(g: &mut Gerenciador) {
 /// navegador, o resto no editor de texto.
 pub fn abrir_arquivo(caminho: &str) -> Box<dyn App> {
     let minusculo = caminho.to_ascii_lowercase();
+    if minusculo.ends_with(".ch8") || minusculo.ends_with(".c8") {
+        return chip8::abrir(caminho);
+    }
     if visualizador::eh_midia(&minusculo) {
         return visualizador::abrir(caminho);
     }

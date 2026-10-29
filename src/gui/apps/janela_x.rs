@@ -53,7 +53,7 @@ impl App for JanelaX {
 
     fn evento(&mut self, e: EventoApp) -> bool {
         match e {
-            EventoApp::Processos | EventoApp::Tique => {
+            EventoApp::Processos | EventoApp::Tique | EventoApp::Quadro => {
                 if !x11::viva(self.id) {
                     self.sumiu = true;
                     return false;
