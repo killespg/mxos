@@ -324,7 +324,7 @@ impl Navegador {
     fn carregar(&mut self) {
         let Some(carga) = self.carga.take() else { return };
         let aberta = motor::abrir(&carga.url);
-        let pagina = motor::diagramar(&motor::analisar(&aberta.html), AREA_PAGINA.largura);
+        let pagina = motor::diagramar(&motor::documento(&aberta.html, &aberta.url_final), AREA_PAGINA.largura);
         self.guardar_no_historico(carga.destino, &aberta.url_final);
         self.titulo = titulo_da_janela(&pagina.titulo, &aberta.url_final);
         self.status = match aberta.erro {

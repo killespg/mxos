@@ -102,7 +102,7 @@ fn le_a_imagem_do_python() {
     let mut fs = montar(&imagem);
     assert_eq!(fs.rotulo(), "MXOS");
     assert_eq!(nomes(&mut fs, "/"), ["LEIAME.TXT", "config", "paginas", "documentos"]);
-    assert_eq!(nomes(&mut fs, "/paginas"), ["index.html", "sobre.html", "guia.html", "tabelas.html", "teste.html"]);
+    assert_eq!(nomes(&mut fs, "/paginas"), ["index.html", "sobre.html", "guia.html", "tabelas.html", "teste.html", "css.html", "estilo.css"]);
     assert_eq!(nomes(&mut fs, "/documentos"), ["notas.txt", "Lista de compras.txt", "Anotações.txt"]);
     assert!(nomes(&mut fs, "/config").is_empty());
     let index = fs.ler("/paginas/index.html").unwrap();
@@ -119,7 +119,7 @@ fn le_a_imagem_do_python() {
     assert_eq!(fs.listar("/LEIAME.TXT").err(), Some(Erro::NaoEPasta));
     assert_eq!(fs.ler("/nada.txt"), Err(Erro::NaoAchado));
     assert_eq!(fs.ler("/nada/x.txt"), Err(Erro::NaoAchado));
-    let livre_python = 126_952u64 * 512;
+    let livre_python = 126_945u64 * 512;
     assert_eq!(fs.bytes_livres(), livre_python);
 }
 
@@ -327,7 +327,7 @@ fn operacoes_aleatorias() {
         }
     }
     let lista = verificar(&imagem, "aleatorio.img");
-    let originais = 9; // arquivos que ja vinham na imagem
+    let originais = 11; // arquivos que ja vinham na imagem
     assert_eq!(lista.iter().filter(|l| l.starts_with("ARQ ")).count(), modelo.len() + originais);
 }
 

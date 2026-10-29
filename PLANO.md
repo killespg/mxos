@@ -46,7 +46,7 @@ de arquivos. Resumo:
   ícones, menu iniciar, widgets, temas; apps em `src/gui/apps/`: Terminal,
   Arquivos (+ Discos), Editor, Navegador, Tarefas, Drivers, Configurações,
   Calculadora, Pintura, Sobre. Configuração salva em `/config/mxos.cfg`.
-- Navegador (`src/navegador/`): HTML → layout → desenho; **ainda ignora CSS**.
+- Navegador (`src/navegador/`): HTML + CSS leve → layout → desenho.
 - Shell (`src/shell.rs`) na serial e na janela do Terminal (comandos: `help`).
 
 **Limite importante:** todos os apps são compilados dentro do kernel. Ainda não
@@ -201,7 +201,24 @@ A rodada de acentos foi interrompida no meio. Compila limpo (QEMU e mxq), mas:
   sem cortes; a `Lista` já usa `fonte::encurtar`. Shell: `echo ação é ç` e `cat /documentos/Anotações.txt` ok.
 - Trema: `ü`/`Ü` saem certos pelo teclado virtio (testado com `digitar`); não era bug do kernel.
 - `rodar.py`: o `digitar` agora manda os símbolos nas teclas do ABNT2 (`/`, `:`, `[`, `'`...) e ganhou
-  `--layout us`. Testado: `echo üÜ /a:b [x]{y} 'q' "d" ção ~ ^ ` ?|\` sai igual na janela do terminal.
+  `--layout us`. Testado: ``echo üÜ /a:b [x]{y} 'q' "d" ção ~ ^ ` ?|\`` sai igual na janela do terminal.
 - `teste_fat32`: listas e tamanhos atualizados para o disco de exemplo novo (13 testes passando). Neste PC
   não há Visual Studio: os testes rodam com `cargo +stable-x86_64-pc-windows-gnu test --release`.
 - Projeto em `C:\dev\mxos` (caminho curto; o QEMU não gosta de caminho longo).
+
+### Passo 1 (feito): CSS no navegador
+
+- `src/navegador/css.rs`: leitor de CSS (comentários, @-regras puladas, atalhos abertos em propriedades simples),
+  seletores (tipo, classe, id, `*`, descendente, filho, `a:link`), cascata com especificidade, ordem e `!important`.
+- `html.rs`: pilha de elementos com o estilo calculado de cada um; fecha sozinho `<p>`, `<li>`, `<td>`...;
+  `display: none` some com o texto; `display: inline` em bloco não parte a linha. Trecho ganhou `Tinta` (cor e
+  fundo) e bits MONO, SEM_SUBLINHADO e TAMANHO; Bloco ganhou `alinhar`, `altura_linha` e a lista de caixas.
+- `layout.rs`: caixas do CSS (margem, borda, recheio, largura, `margin: auto`) abrem e fecham entre os blocos;
+  `text-align` e `line-height` por linha. As faixas agora são marcadas no fim (a caixa só sabe a altura quando fecha).
+- `render.rs`: fundo da página, cor do texto, fundo de trecho, caixas com bordas por lado.
+- `mod.rs`: `documento()` baixa as folhas dos `<link>` (disco ou http) antes de analisar.
+- Página de teste `disco:/paginas/css.html` + `estilo.css` no disco; conferida por captura. O example.com
+  (`max-width: 26em; margin: auto; padding: 25vh`, `light-dark()`) sai igual ao de um navegador de verdade.
+- Problema que custou tempo: uma troca em massa de `margem_pendente = true` por `pedir_margem()` pegou a linha de
+  dentro do próprio `pedir_margem` (recursão infinita, sem mensagem). Achado pelo PC da CPU no monitor do QEMU
+  (`info registers`) + `llvm-objdump` (`rustup component add llvm-tools`).

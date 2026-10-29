@@ -88,7 +88,7 @@ saem (o teclado americano não tem teclas mortas). Pela serial (`--teste`) tudo 
 | `src/entrada/` | Teclado e mouse virtio-input (layouts US e ABNT2, com teclas mortas e ç) |
 | `src/armazenamento/` | Driver virtio-blk e FAT32 com nomes longos em UTF-16 (ler, gravar, pastas, renomear) e os comandos `ls`, `cat`, `escrever`... |
 | `src/rede/` | Driver virtio-net e a rede feita do zero: Ethernet, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP e cliente HTTP |
-| `src/navegador/` | Motor do navegador: HTML tolerante, diagramação com quebra de linha, desenho e modo texto (`navegar`); o app da janela fica em `src/gui/apps/navegador.rs` |
+| `src/navegador/` | Motor do navegador: HTML tolerante, CSS leve (`css.rs`), diagramação com quebra de linha e caixas, desenho e modo texto (`navegar`); o app da janela fica em `src/gui/apps/navegador.rs` |
 | `ferramentas/criar_disco.py` | Cria a imagem FAT32 do disco do zero e confere imagens (`--verificar`) |
 | `ferramentas/gerar_fontes.py` | Gera `src/fonte/*.mxf` a partir das fontes TrueType em `ferramentas/fontes/` (precisa do Pillow e do fontTools só no PC) |
 | `ferramentas/fontes/` | Inter e JetBrains Mono (TTF) com as licenças (SIL Open Font License 1.1) |
@@ -243,6 +243,32 @@ mxos> escrever /documentos/Olá.txt Ação, pão e café
 gravado: /documentos/Olá.txt (21 bytes)
 mxos> cat /documentos/Anotações.txt
 ```
+
+## CSS no navegador
+
+O navegador lê CSS de `<style>`, do atributo `style="..."` e de `<link rel="stylesheet">` (baixado do disco ou por
+`http://` antes de montar a página; até 4 folhas de 256 KB). É um subconjunto leve, feito do zero em
+`src/navegador/css.rs`:
+
+| O quê | Suportado |
+|---|---|
+| Seletores | tipo (`p`), `.classe`, `#id`, `*`, descendente (`div p`), filho (`ul > li`), lista com vírgula, `a:link`/`a:visited` |
+| Cascata | especificidade, ordem no texto, `!important`, `style="..."` acima dos seletores; herança das propriedades de texto |
+| Texto | `color`, `font-weight`, `font-style`, `font-size` (px, pt, em, rem, %, palavras), `font-family` (monospace ou não), `font` (atalho), `text-align`, `text-decoration`, `line-height` |
+| Caixas | `margin` (com `auto` para centralizar), `padding`, `border` e `border-*` (largura, estilo, cor), `width`, `max-width`, `background(-color)` |
+| Outros | `display: none / block / inline`, `list-style: none`, cores por nome, `#rgb`, `#rrggbb`, `rgb()`, `rgba()`, `light-dark()` |
+| HTML antigo | `align`, `bgcolor`, `<font color>`, `<body text>`, `<center>`, `hidden` |
+
+Fica de fora: flexbox, grid, `position`, `float`, `@media` (pulado inteiro), `@font-face`, seletores de atributo,
+`:hover` e `::before` (a regra inteira é ignorada), animações. A fonte continua sendo uma das quatro pré-renderizadas:
+`font-size` escolhe a mais perto (até 18 px a normal, até 25 px a de 20 px, acima a de 32 px).
+
+Como cabe num motor sem árvore: o construtor do HTML guarda a pilha dos elementos abertos (para casar os seletores e
+herdar o estilo). O que é de texto vai para cada trecho (cor, fundo, negrito...); o que é de caixa vira uma `Caixa`
+do documento, e cada bloco sabe em que caixas está. Na diagramação as caixas abrem e fecham entre um bloco e outro;
+o fundo e as bordas entram antes do texto e ganham a altura quando a caixa fecha.
+
+A página `disco:/paginas/css.html` (com `estilo.css` por `<link>`) mostra tudo isso.
 
 ## Na TV box (ainda não testado no hardware)
 

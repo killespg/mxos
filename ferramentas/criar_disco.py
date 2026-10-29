@@ -107,6 +107,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <li><a href="guia.html">Guia do MXOS</a>: aplicativos, atalhos e comandos (página longa)</li>
 <li><a href="tabelas.html">Tabelas e listas</a>: o que o navegador sabe mostrar</li>
 <li><a href="teste.html">Teste do navegador</a>: estilos, links e páginas de erro</li>
+<li><a href="css.html">Teste de CSS</a>: cores, bordas, caixas e alinhamento</li>
 </ul>
 <hr>
 <p>Veja também as <a href="/documentos/notas.txt">notas</a> e o
@@ -441,6 +442,66 @@ Frases para testar o teclado ABNT2:
 """
 
 
+CSS_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Teste de CSS</title>
+<link rel="stylesheet" href="estilo.css">
+<style>
+/* seletores de tipo, classe, id, descendente e filho */
+h1 { color: #1d4ed8; text-align: center; }
+.aviso { background-color: #fff7d6; border: 1px solid #e0b000; padding: 8px 12px; margin: 10px 0; }
+.aviso b { color: #a15c00; }
+#centro { text-align: center; color: rgb(120, 40, 160); }
+.direita { text-align: right; }
+.cartao { width: 300px; margin: 12px auto; padding: 10px; border: 2px solid #3b82f6; background: #eff6ff; }
+.cartao > p { margin: 0; }
+.menu { list-style: none; background: #1f2937; color: #9ca3af; padding: 6px 10px; }
+.menu li { display: inline; }
+.menu a { color: white; text-decoration: none; font-weight: bold; }
+.mono { font-family: Consolas, monospace; color: green; }
+.grande { font-size: 22px; }
+.enorme { font-size: 2em; color: crimson; }
+.escondido { display: none; }
+.espacado { line-height: 1.9; }
+.marca { background: yellow; }
+.forte { color: red !important; }
+p.especifico { color: teal; }
+p { color: #333333; }
+</style>
+</head>
+<body>
+<h1>Teste de CSS</h1>
+<ul class="menu"><li><a href="index.html">Início</a> |</li><li><a href="guia.html">Guia</a> |</li><li><a href="css.html">CSS</a></li></ul>
+<p class="intro">Esta página testa o CSS do navegador do MXOS: cores, fundos, bordas, alinhamento,
+margens, recheio, largura e <span class="marca">texto marcado</span>.</p>
+<div class="aviso"><b>Aviso:</b> esta caixa tem fundo amarelo, borda e recheio (padding).</div>
+<p id="centro">Este parágrafo está centralizado e roxo (seletor #id).</p>
+<p class="direita">Este está alinhado à direita.</p>
+<div class="cartao"><p>Cartão com 300 px de largura, centralizado com <code>margin: auto</code>.</p></div>
+<p class="especifico">Especificidade: <code>p.especifico</code> ganha de <code>p</code> (verde-azulado).</p>
+<p class="forte especifico" style="color: blue">Com <code>!important</code> o vermelho ganha do style="...".</p>
+<p style="color: #c2410c; font-weight: bold">Estilo inline (atributo style) laranja e negrito.</p>
+<p class="mono">font-family: monospace em verde.</p>
+<p class="grande">Texto de 22 px.</p>
+<p class="enorme">Texto de 2em.</p>
+<p class="escondido">VOCÊ NÃO DEVIA VER ISTO (display: none).</p>
+<p class="espacado">Este parágrafo tem line-height 1.9, então as linhas ficam mais afastadas umas das outras
+quando o texto é comprido e quebra em mais de uma linha dentro da janela do navegador.</p>
+<p class="externo">Esta linha vem da folha externa (estilo.css, por &lt;link&gt;).</p>
+<p>Fim da página. <a href="index.html">Voltar</a></p>
+</body>
+</html>
+"""
+
+ESTILO_CSS = """/* folha de estilo de fora, ligada por <link rel="stylesheet"> */
+body { background-color: #f8fafc; }
+.externo { color: white; background-color: #16a34a; padding: 6px; border-left: 6px solid #14532d; }
+@media (max-width: 600px) { body { background: red; } }
+"""
+
+
 def conteudo_padrao() -> dict:
     """Arvore do disco: dict = pasta, bytes = arquivo."""
     return {
@@ -452,6 +513,8 @@ def conteudo_padrao() -> dict:
             "guia.html": GUIA_HTML.encode("utf-8"),
             "tabelas.html": TABELAS_HTML.encode("utf-8"),
             "teste.html": TESTE_HTML.encode("utf-8"),
+            "css.html": CSS_HTML.encode("utf-8"),
+            "estilo.css": ESTILO_CSS.encode("utf-8"),
         },
         "documentos": {
             "notas.txt": NOTAS.encode("utf-8"),

@@ -5,19 +5,65 @@
 //!
 //! Tolerante com HTML do mundo real: tags sem fechar, maiusculas,
 //! atributos com ou sem aspas, comentarios, doctype, CDATA. Conteudo de
-//! script, style e coisas que nao sabemos mostrar (svg, iframe...) e
-//! pulado. O texto sai em UTF-8 com os acentos: a pagina e lida como UTF-8
-//! (ou Windows-1252, se nao for UTF-8 valido) e fica o que a fonte tem
+//! script e coisas que nao sabemos mostrar (svg, iframe...) e pulado. O
+//! texto sai em UTF-8 com os acentos: a pagina e lida como UTF-8 (ou
+//! Windows-1252, se nao for UTF-8 valido) e fica o que a fonte tem
 //! (ASCII, Latin-1 e alguns simbolos); o resto vira um parecido ou '?'.
+//!
+//! CSS (css.rs): o Construtor guarda a pilha dos elementos abertos para
+//! casar os seletores e herdar o estilo. O que e de texto (cor, negrito,
+//! tamanho...) vai para cada Trecho; o que e de caixa (margem, recheio,
+//! borda, fundo, largura) vira uma Caixa do Documento, e cada Bloco sabe
+//! em quais caixas esta (o layout abre e fecha as caixas entre os blocos).
 
 use alloc::string::String;
 use alloc::vec::Vec;
+
+use super::css::{self, Cor, Estilo, Exibir, Folha, Marca, Medida};
 
 /// Bits de Trecho::estilo.
 pub const NEGRITO: u8 = 1 << 0;
 pub const ITALICO: u8 = 1 << 1;
 pub const SUBLINHADO: u8 = 1 << 2;
 pub const CODIGO: u8 = 1 << 3;
+/// font-family monospace pelo CSS (letra do <code>, sem a cor dele).
+pub const MONO: u8 = 1 << 4;
+/// text-decoration: none (tira o sublinhado do link).
+pub const SEM_SUBLINHADO: u8 = 1 << 5;
+/// Bits 6 e 7: tamanho pedido pelo CSS (0 = o que o bloco ja usa).
+pub const TAMANHO: u8 = 3 << 6;
+pub const TAMANHO_NORMAL: u8 = 1 << 6;
+pub const TAMANHO_TITULO: u8 = 2 << 6;
+pub const TAMANHO_GRANDE: u8 = 3 << 6;
+
+/// Cores de um trecho vindas do CSS (None = a cor padrao do navegador).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tinta {
+    pub cor: Option<Cor>,
+    /// Fundo atras do texto (background de <span>, <mark>...).
+    pub fundo: Option<Cor>,
+}
+
+/// Uma caixa do CSS: margem, borda, recheio, fundo e largura de um
+/// elemento de bloco. Medidas em px ou % (da largura de quem contem);
+/// margem Auto centraliza.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Caixa {
+    pub margem: [Medida; 4],
+    pub recheio: [Medida; 4],
+    pub borda: [i32; 4],
+    /// None = a cor do texto.
+    pub borda_cor: [Option<Cor>; 4],
+    pub fundo: Option<Cor>,
+    pub cor_texto: Option<Cor>,
+    pub largura: Option<Medida>,
+    pub largura_max: Option<Medida>,
+}
+
+/// Caixas demais (pagina maluca) viram blocos sem caixa.
+const MAX_CAIXAS: usize = 4096;
+/// Profundidade maxima da pilha de elementos.
+const MAX_PILHA: usize = 256;
 
 /// Limite de aninhamento de listas e citacoes (paginas malucas nao
 /// empurram o texto para fora da tela).
@@ -33,6 +79,7 @@ pub struct Trecho {
     pub estilo: u8,
     /// Indice em Documento::links.
     pub link: Option<usize>,
+    pub tinta: Tinta,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +131,12 @@ pub struct Bloco {
     /// Numero da tabela da linha: linhas seguidas da mesma tabela sao
     /// alinhadas em colunas. 0 = celula fora de <table>.
     pub tabela: u32,
+    /// text-align: 0 esquerda, 1 centro, 2 direita.
+    pub alinhar: u8,
+    /// line-height em px (0 = a da fonte).
+    pub altura_linha: i32,
+    /// Indices em Documento::caixas, de fora para dentro.
+    pub caixas: Vec<u16>,
 }
 
 pub struct Documento {
@@ -91,11 +144,25 @@ pub struct Documento {
     pub blocos: Vec<Bloco>,
     /// href de cada <a>, como estava na pagina (sem resolver).
     pub links: Vec<String>,
+    pub caixas: Vec<Caixa>,
+    /// Fundo da pagina (background do <body> ou do <html>).
+    pub fundo: Option<Cor>,
+    /// Cor do texto do <body> (para bordas sem cor fora de caixas).
+    pub cor_texto: Option<Cor>,
 }
 
 /// Le o HTML inteiro e devolve o documento pronto para diagramar.
 pub fn analisar(html: &str) -> Documento {
+    analisar_com_css(html, &[])
+}
+
+/// Como `analisar`, com folhas de estilo de fora (<link>) ja baixadas,
+/// na ordem em que aparecem; elas valem antes dos <style> da pagina.
+pub fn analisar_com_css(html: &str, folhas: &[String]) -> Documento {
     let mut c = Construtor::novo();
+    for folha in folhas {
+        c.folha.ler(folha);
+    }
     let mut l = Leitor { b: html.as_bytes(), pos: 0 };
     while let Some(ficha) = l.proxima() {
         match ficha {
@@ -105,8 +172,10 @@ pub fn analisar(html: &str) -> Documento {
                 c.abrir(&tag);
                 if let Some(fim) = conteudo_cru(&tag.nome) {
                     let conteudo = l.ate_fechar(fim);
-                    if tag.nome == "title" {
-                        c.definir_titulo(conteudo);
+                    match tag.nome.as_str() {
+                        "title" => c.definir_titulo(conteudo),
+                        "style" if folha_de_tela(&tag) => c.folha.ler(&para_texto(conteudo)),
+                        _ => {}
                     }
                 }
             }
@@ -114,6 +183,37 @@ pub fn analisar(html: &str) -> Documento {
         }
     }
     c.terminar()
+}
+
+/// Os href dos <link rel="stylesheet"> da pagina, na ordem (no maximo
+/// `maximo`), para quem carrega a pagina baixar antes de analisar.
+pub fn folhas_externas(html: &str, maximo: usize) -> Vec<String> {
+    let mut l = Leitor { b: html.as_bytes(), pos: 0 };
+    let mut hrefs = Vec::new();
+    while let Some(ficha) = l.proxima() {
+        let Ficha::Abre(tag) = ficha else { continue };
+        if let Some(fim) = conteudo_cru(&tag.nome) {
+            l.ate_fechar(fim);
+            continue;
+        }
+        if tag.nome == "body" || hrefs.len() >= maximo {
+            break;
+        }
+        let rel = tag.atributo("rel").unwrap_or("").to_ascii_lowercase();
+        let estilo = rel.split_ascii_whitespace().any(|r| r == "stylesheet") && !rel.contains("alternate");
+        if tag.nome == "link" && estilo && folha_de_tela(&tag) {
+            if let Some(href) = tag.atributo("href").filter(|h| !h.is_empty()) {
+                hrefs.push(href.into());
+            }
+        }
+    }
+    hrefs
+}
+
+/// media="print" (e outras que nao sao tela) nao valem aqui.
+fn folha_de_tela(tag: &Tag) -> bool {
+    let media = tag.atributo("media").unwrap_or("").to_ascii_lowercase();
+    matches!(media.trim(), "" | "all" | "screen")
 }
 
 /// Tags cujo conteudo e lido cru ate o fechamento (e nao e mostrado).
@@ -650,8 +750,30 @@ struct Lista {
     contador: u32,
 }
 
+/// Um elemento aberto na pilha (a Marca dele fica em Construtor::marcas,
+/// na mesma posicao, porque os seletores casam com uma fatia de Marcas).
+struct Aberto {
+    estilo: Estilo,
+    caixa: Option<u16>,
+    /// Tag de bloco com display: inline: nao parte o texto.
+    pulou_bloco: bool,
+    /// Tag de linha com display: block: parte o texto ao abrir e fechar.
+    bloco_css: bool,
+    /// O CSS diz a margem de cima ou de baixo: a margem padrao sai.
+    margem_css: bool,
+    /// background de um elemento de linha (vale tambem para os de dentro).
+    fundo_linha: Option<Cor>,
+}
+
 struct Construtor {
     doc: Documento,
+    folha: Folha,
+    pilha: Vec<Aberto>,
+    marcas: Vec<Marca>,
+    /// O bloco atual ja pegou as caixas e o alinhamento da pilha.
+    capturado: bool,
+    /// A tag que esta abrindo ou fechando tem margem no CSS.
+    sem_margem_padrao: bool,
     atual: Bloco,
     /// O ultimo caractere do bloco atual e espaco (ou o bloco esta vazio):
     /// espacos seguidos viram um so.
@@ -685,7 +807,19 @@ struct Construtor {
 impl Construtor {
     fn novo() -> Construtor {
         Construtor {
-            doc: Documento { titulo: String::new(), blocos: Vec::new(), links: Vec::new() },
+            doc: Documento {
+                titulo: String::new(),
+                blocos: Vec::new(),
+                links: Vec::new(),
+                caixas: Vec::new(),
+                fundo: None,
+                cor_texto: None,
+            },
+            folha: Folha::nova(),
+            pilha: Vec::new(),
+            marcas: Vec::new(),
+            capturado: false,
+            sem_margem_padrao: false,
             atual: bloco_vazio(TipoBloco::Paragrafo, 0, 0),
             ultimo_espaco: true,
             margem_pendente: false,
@@ -723,7 +857,65 @@ impl Construtor {
         if self.codigo > 0 || self.pre > 0 {
             e |= CODIGO;
         }
+        let Some(aberto) = self.pilha.last() else { return e };
+        // o que o CSS disse ganha do que as tags fazem
+        let s = &aberto.estilo;
+        let ligar = |e: u8, bit: u8, v: Option<bool>| match v {
+            Some(true) => e | bit,
+            Some(false) => e & !bit,
+            None => e,
+        };
+        e = ligar(e, NEGRITO, s.negrito);
+        e = ligar(e, ITALICO, s.italico);
+        match s.sublinhado {
+            Some(true) => e |= SUBLINHADO,
+            Some(false) => e = (e & !SUBLINHADO) | SEM_SUBLINHADO,
+            None => {}
+        }
+        match s.mono {
+            Some(true) => e |= MONO,
+            Some(false) => e &= !(CODIGO | MONO),
+            None => {}
+        }
+        if let Some(px) = s.tamanho {
+            e |= classe_de_tamanho(px);
+        }
         e
+    }
+
+    fn tinta(&self) -> Tinta {
+        self.pilha.last().map_or(Tinta::default(), |a| Tinta { cor: a.estilo.cor, fundo: a.fundo_linha })
+    }
+
+    /// Dentro de um display: none.
+    fn oculto(&self) -> bool {
+        self.pilha.last().is_some_and(|a| a.estilo.oculto)
+    }
+
+    /// O bloco atual fica nas caixas abertas agora, com o alinhamento e a
+    /// altura de linha do elemento de dentro. Uma vez so por bloco.
+    fn capturar(&mut self) {
+        if self.capturado {
+            return;
+        }
+        self.capturado = true;
+        self.atual.caixas = self.pilha.iter().filter_map(|a| a.caixa).collect();
+        if let Some(a) = self.pilha.last() {
+            self.atual.alinhar = a.estilo.alinhar.unwrap_or(0);
+            self.atual.altura_linha = match a.estilo.altura_linha {
+                Some(Medida::Numero(m)) => a.estilo.px * m / 1000,
+                Some(m) => m.px(a.estilo.px, 0).unwrap_or(0),
+                None => 0,
+            }
+            .clamp(0, 200);
+        }
+    }
+
+    /// Margem padrao do HTML (a nao ser que o CSS tenha falado da margem).
+    fn pedir_margem(&mut self) {
+        if !self.sem_margem_padrao {
+            self.margem_pendente = true;
+        }
     }
 
     fn recuo(&self) -> u8 {
@@ -732,9 +924,14 @@ impl Construtor {
 
     /// Termina o bloco atual (se tiver conteudo) e abre um anonimo.
     fn fechar_bloco(&mut self) {
+        // a regua (<hr>) nao tem texto: pega as caixas agora
+        if self.atual.tipo == TipoBloco::Regua {
+            self.capturar();
+        }
         let tipo = if self.pre > 0 { TipoBloco::Pre } else { TipoBloco::Paragrafo };
         let novo = bloco_vazio(tipo, self.recuo(), self.citacao);
         let mut bloco = core::mem::replace(&mut self.atual, novo);
+        self.capturado = false;
         self.ultimo_espaco = true;
         self.nova_celula = false;
         aparar_fim(&mut bloco);
@@ -753,7 +950,7 @@ impl Construtor {
     fn comecar(&mut self, tipo: TipoBloco, margem: bool) {
         self.fechar_bloco();
         if margem {
-            self.margem_pendente = true;
+            self.pedir_margem();
         }
         self.atual.tipo = tipo;
     }
@@ -763,17 +960,19 @@ impl Construtor {
         if texto.is_empty() {
             return;
         }
+        self.capturar();
         let estilo = self.estilo();
         let link = self.link;
+        let tinta = self.tinta();
         let grudar = !core::mem::take(&mut self.nova_celula);
         match self.atual.trechos.last_mut() {
-            Some(t) if grudar && t.estilo == estilo && t.link == link => t.texto.push_str(texto),
-            _ => self.atual.trechos.push(Trecho { texto: texto.into(), estilo, link }),
+            Some(t) if grudar && t.estilo == estilo && t.link == link && t.tinta == tinta => t.texto.push_str(texto),
+            _ => self.atual.trechos.push(Trecho { texto: texto.into(), estilo, link, tinta }),
         }
     }
 
     fn texto_cru(&mut self, cru: &[u8]) {
-        if self.na_cabeca {
+        if self.na_cabeca || self.oculto() {
             return;
         }
         let texto = decodificar(cru);
@@ -782,7 +981,7 @@ impl Construtor {
 
     /// Texto da pagina: espacos juntados (ou mantidos no <pre>).
     fn texto(&mut self, texto: &str) {
-        if self.na_cabeca {
+        if self.na_cabeca || self.oculto() {
             return;
         }
         if self.pre > 0 {
@@ -821,6 +1020,9 @@ impl Construtor {
 
     /// Quebra de linha forcada (<br>).
     fn quebra(&mut self) {
+        if self.oculto() {
+            return;
+        }
         if self.pre > 0 {
             self.acrescentar("\n");
             return;
@@ -846,6 +1048,158 @@ impl Construtor {
         if self.na_cabeca && !matches!(nome, "title" | "meta" | "link" | "script" | "style" | "base" | "noscript") {
             self.na_cabeca = false;
         }
+        self.fechar_implicitos(nome);
+        self.empilhar(tag);
+        let aberto = self.pilha.last().expect("acabou de empilhar");
+        let (pulou, bloco_css) = (aberto.pulou_bloco, aberto.bloco_css);
+        self.sem_margem_padrao = aberto.margem_css;
+        if pulou {
+            self.texto(" ");
+        } else {
+            if bloco_css {
+                self.fechar_bloco();
+            }
+            self.abrir_tag(tag);
+        }
+        self.sem_margem_padrao = false;
+        // tags sem fechamento (e as de conteudo cru) nao ficam abertas
+        if sem_fechamento(nome) || conteudo_cru(nome).is_some() {
+            self.desempilhar(self.pilha.len() - 1);
+        }
+    }
+
+    fn fechar(&mut self, nome: &str) {
+        let achado = self.marcas.iter().rposition(|m| m.tag == nome);
+        let aberto = achado.map(|i| &self.pilha[i]);
+        let (pulou, bloco_css) = aberto.map_or((false, false), |a| (a.pulou_bloco, a.bloco_css));
+        self.sem_margem_padrao = aberto.is_some_and(|a| a.margem_css);
+        if pulou {
+            self.texto(" ");
+        } else {
+            self.fechar_tag(nome);
+            if bloco_css {
+                self.fechar_bloco();
+            }
+        }
+        self.sem_margem_padrao = false;
+        if let Some(i) = achado {
+            self.desempilhar(i);
+        }
+    }
+
+    /// Tira da pilha o elemento `i` e todos os de dentro dele.
+    fn desempilhar(&mut self, i: usize) {
+        self.pilha.truncate(i);
+        self.marcas.truncate(i);
+    }
+
+    /// O que o HTML fecha sozinho: <li> fecha o <li> anterior da mesma
+    /// lista, <td> a celula anterior, um bloco fecha o <p> aberto...
+    fn fechar_implicitos(&mut self, nome: &str) {
+        let (alvos, barreiras): (&[&str], &[&str]) = match nome {
+            "li" => (&["li"], &["ul", "ol", "menu", "dir"]),
+            "dt" | "dd" => (&["dt", "dd"], &["dl"]),
+            "tr" => (&["tr"], &["table"]),
+            "td" | "th" => (&["td", "th"], &["tr", "table"]),
+            "option" => (&["option"], &["select"]),
+            _ if tag_de_bloco(nome) => (&["p"], &[]),
+            _ => return,
+        };
+        for i in (0..self.marcas.len()).rev() {
+            let tag = self.marcas[i].tag.as_str();
+            if alvos.contains(&tag) {
+                self.desempilhar(i);
+                return;
+            }
+            // o <p> so fecha se por cima dele so tem elementos de linha
+            if barreiras.contains(&tag) || (barreiras.is_empty() && tag_de_bloco(tag)) {
+                return;
+            }
+        }
+    }
+
+    /// Calcula o estilo do elemento e poe na pilha.
+    fn empilhar(&mut self, tag: &Tag) {
+        if self.pilha.len() >= MAX_PILHA {
+            // pagina maluca: o elemento de cima vale pelos de dentro
+            let topo = self.pilha.len() - 1;
+            self.desempilhar(topo);
+        }
+        let nome = tag.nome.as_str();
+        if nome == "body" && self.marcas.len() == 1 && self.marcas[0].tag == "html" {
+            // o <html> abriu antes do <style> da cabeca: agora as regras ja existem
+            let html = css::calcular(&self.folha, &self.marcas, &[], Estilo::RAIZ, css::PX_NORMAL);
+            self.doc.fundo = html.fundo;
+            self.pilha[0].estilo = html;
+        }
+        let pai = self.pilha.last();
+        let fundo_do_pai = pai.and_then(|a| a.fundo_linha);
+        let mut base = pai.map_or(Estilo::RAIZ, |a| a.estilo.herdado());
+        let px_pai = base.px;
+        padroes_da_tag(&mut base, tag);
+        let classes = tag.atributo("class").map(|c| c.split_ascii_whitespace().map(String::from).collect());
+        let id = tag.atributo("id").unwrap_or("").into();
+        self.marcas.push(Marca { tag: nome.into(), id, classes: classes.unwrap_or_default() });
+        let inline = tag.atributo("style").map(css::ler_inline).unwrap_or_default();
+        let estilo = css::calcular(&self.folha, &self.marcas, &inline, base, px_pai);
+        let de_tabela = matches!(nome, "td" | "th" | "tr" | "tbody" | "thead" | "tfoot" | "html" | "head");
+        let bloco = match estilo.exibir {
+            Exibir::Bloco => true,
+            Exibir::Linha | Exibir::Nenhum => false,
+            Exibir::Padrao => tag_de_bloco(nome) || nome == "body",
+        };
+        if matches!(nome, "body" | "html") {
+            // o fundo do <body> e o da pagina inteira
+            if estilo.fundo.is_some() && (nome == "body" || self.doc.fundo.is_none()) {
+                self.doc.fundo = estilo.fundo;
+            }
+            if nome == "body" {
+                self.doc.cor_texto = estilo.cor;
+            }
+        }
+        let caixa = if bloco && !de_tabela && !estilo.oculto && estilo.tem_caixa() {
+            self.nova_caixa(&estilo, nome == "body")
+        } else {
+            None
+        };
+        let cru = conteudo_cru(nome).is_some();
+        self.pilha.push(Aberto {
+            estilo,
+            caixa,
+            pulou_bloco: estilo.exibir == Exibir::Linha && tag_de_bloco(nome) && !de_tabela && nome != "table",
+            bloco_css: estilo.exibir == Exibir::Bloco && !tag_de_bloco(nome) && !de_tabela && !cru,
+            margem_css: estilo.margem_vertical(),
+            fundo_linha: if bloco { None } else { estilo.fundo.or(fundo_do_pai) },
+        });
+    }
+
+    /// Guarda a caixa do elemento (em e numeros ja em px).
+    fn nova_caixa(&mut self, e: &Estilo, corpo: bool) -> Option<u16> {
+        if self.doc.caixas.len() >= MAX_CAIXAS {
+            return None;
+        }
+        let px = |m: Medida| match m {
+            Medida::Em(v) | Medida::Numero(v) => Medida::Px(e.px * v / 1000),
+            outra => outra,
+        };
+        let largura = |m: Option<Medida>| m.filter(|&m| m != Medida::Auto).map(px);
+        let borda = core::array::from_fn(|i| if e.borda_visivel[i] { e.borda[i] } else { 0 });
+        self.doc.caixas.push(Caixa {
+            margem: e.margem.map(|m| px(m.unwrap_or(Medida::Px(0)))),
+            recheio: e.recheio.map(px),
+            borda,
+            borda_cor: e.borda_cor,
+            // o fundo do <body> ja e o da pagina
+            fundo: if corpo { None } else { e.fundo },
+            cor_texto: e.cor,
+            largura: largura(e.largura),
+            largura_max: largura(e.largura_max),
+        });
+        Some((self.doc.caixas.len() - 1) as u16)
+    }
+
+    fn abrir_tag(&mut self, tag: &Tag) {
+        let nome = tag.nome.as_str();
         if self.em_celula() && bloco_leve(nome) {
             // <td><p>texto</p></td>: o bloco de dentro nao parte a linha
             self.quebra_na_celula();
@@ -863,14 +1217,14 @@ impl Construtor {
                 self.comecar(TipoBloco::Titulo(nivel), true);
             }
             "br" => self.quebra(),
-            "hr" => {
+            "hr" if !self.oculto() => {
                 self.comecar(TipoBloco::Regua, true);
                 self.fechar_bloco();
-                self.margem_pendente = true;
+                self.pedir_margem();
             }
             "pre" | "listing" | "xmp" | "plaintext" => {
                 self.fechar_bloco();
-                self.margem_pendente = true;
+                self.pedir_margem();
                 self.pre += 1;
                 self.pular_nova_linha = true;
                 self.atual.tipo = TipoBloco::Pre;
@@ -894,7 +1248,7 @@ impl Construtor {
             "td" | "th" => self.abrir_celula(nome == "th"),
             "dl" => {
                 self.fechar_bloco();
-                self.margem_pendente = true;
+                self.pedir_margem();
             }
             "dt" => self.abrir_termo(),
             "dd" => self.abrir_definicao(),
@@ -912,7 +1266,7 @@ impl Construtor {
         }
     }
 
-    fn fechar(&mut self, nome: &str) {
+    fn fechar_tag(&mut self, nome: &str) {
         if self.em_celula() && bloco_leve(nome) {
             self.quebra_na_celula();
             return;
@@ -922,18 +1276,18 @@ impl Construtor {
             "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "caption" => {
                 self.sair_celula();
                 self.fechar_bloco();
-                self.margem_pendente = true;
+                self.pedir_margem();
             }
             "table" => {
                 self.sair_celula();
                 self.fechar_bloco();
                 self.pilha_tabelas.pop();
-                self.margem_pendente = true;
+                self.pedir_margem();
             }
             "dl" => {
                 self.fechar_termo();
                 self.fechar_definicao();
-                self.margem_pendente = true;
+                self.pedir_margem();
             }
             "dt" => self.fechar_termo(),
             "dd" => self.fechar_definicao(),
@@ -941,7 +1295,7 @@ impl Construtor {
                 self.fechar_bloco();
                 self.pre = self.pre.saturating_sub(1);
                 self.atual.tipo = if self.pre > 0 { TipoBloco::Pre } else { TipoBloco::Paragrafo };
-                self.margem_pendente = true;
+                self.pedir_margem();
             }
             "ul" | "ol" | "menu" | "dir" => {
                 self.fechar_bloco();
@@ -949,7 +1303,7 @@ impl Construtor {
                 self.listas.pop();
                 self.atual.recuo = self.recuo();
                 if self.listas.is_empty() {
-                    self.margem_pendente = true;
+                    self.pedir_margem();
                 }
             }
             "blockquote" => {
@@ -957,7 +1311,7 @@ impl Construtor {
                 self.citacao = self.citacao.saturating_sub(1);
                 self.atual.recuo = self.recuo();
                 self.atual.citacao = self.citacao;
-                self.margem_pendente = true;
+                self.pedir_margem();
             }
             "li" | "tr" => {
                 self.sair_celula();
@@ -980,7 +1334,7 @@ impl Construtor {
     fn abrir_lista(&mut self, tag: &Tag) {
         self.fechar_bloco();
         if self.listas.is_empty() {
-            self.margem_pendente = true;
+            self.pedir_margem();
         }
         let ordenada = tag.nome == "ol";
         let inicio = tag.atributo("start").and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
@@ -1001,6 +1355,8 @@ impl Construtor {
             }
             None => Marcador::Bolinha(1), // <li> fora de lista
         };
+        // list-style: none
+        let marcador = if self.pilha.last().is_some_and(|a| a.estilo.sem_marcador) { Marcador::Nenhum } else { marcador };
         self.atual.tipo = TipoBloco::Item;
         self.atual.marcador = marcador;
         self.atual.recuo = self.recuo().max(1);
@@ -1151,6 +1507,87 @@ fn bloco_vazio(tipo: TipoBloco, recuo: u8, citacao: u8) -> Bloco {
         trechos: Vec::new(),
         celulas: Vec::new(),
         tabela: 0,
+        alinhar: 0,
+        altura_linha: 0,
+        caixas: Vec::new(),
+    }
+}
+
+/// Tags que sao bloco no HTML (sem CSS).
+fn tag_de_bloco(nome: &str) -> bool {
+    matches!(
+        nome,
+        "p" | "div" | "section" | "article" | "header" | "footer" | "nav" | "main" | "aside" | "form" | "center"
+            | "figure" | "figcaption" | "address" | "fieldset" | "details" | "summary" | "legend" | "h1" | "h2"
+            | "h3" | "h4" | "h5" | "h6" | "dl" | "dt" | "dd" | "blockquote" | "ul" | "ol" | "menu" | "dir" | "li"
+            | "hr" | "pre" | "listing" | "xmp" | "plaintext" | "table" | "caption" | "noscript"
+    )
+}
+
+/// Tags que nunca tem fechamento (<br>, <img>...).
+fn sem_fechamento(nome: &str) -> bool {
+    matches!(
+        nome,
+        "br" | "hr" | "img" | "input" | "meta" | "link" | "area" | "base" | "col" | "embed" | "param" | "source"
+            | "track" | "wbr" | "keygen"
+    )
+}
+
+/// Tamanho de letra (px) -> a fonte que temos mais perto.
+fn classe_de_tamanho(px: i32) -> u8 {
+    match px {
+        ..=18 => TAMANHO_NORMAL,
+        19..=25 => TAMANHO_TITULO,
+        _ => TAMANHO_GRANDE,
+    }
+}
+
+/// O que a tag faz sozinha antes do CSS: <b> volta a ser negrito mesmo
+/// dentro de um font-weight: normal, <a> volta para a cor de link, os
+/// titulos tem o tamanho deles, e os atributos antigos (align, bgcolor,
+/// <font color>, hidden) valem como CSS fraco.
+fn padroes_da_tag(base: &mut Estilo, tag: &Tag) {
+    let nome = tag.nome.as_str();
+    match nome {
+        "b" | "strong" | "th" | "dt" => base.negrito = None,
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+            base.negrito = None;
+            base.tamanho = None;
+            base.px = match nome {
+                "h1" => 32,
+                "h2" | "h3" => 20,
+                _ => css::PX_NORMAL,
+            };
+        }
+        "i" | "em" | "cite" | "var" | "dfn" => base.italico = None,
+        "code" | "tt" | "kbd" | "samp" | "pre" => base.mono = None,
+        "u" | "ins" => base.sublinhado = None,
+        "a" => {
+            base.cor = None;
+            base.sublinhado = None;
+        }
+        "center" => base.alinhar = Some(1),
+        _ => {}
+    }
+    if nome != "img" {
+        match tag.atributo("align").map(str::to_ascii_lowercase).as_deref() {
+            Some("center" | "middle") => base.alinhar = Some(1),
+            Some("right") => base.alinhar = Some(2),
+            Some("left" | "justify") => base.alinhar = Some(0),
+            _ => {}
+        }
+    }
+    let cor = |nome_atributo: &str| tag.atributo(nome_atributo).and_then(|v| css::ler_cor(&v.to_ascii_lowercase())).flatten();
+    if let Some(c) = cor("bgcolor") {
+        base.fundo = Some(c);
+    }
+    if nome == "font" || nome == "body" {
+        if let Some(c) = cor(if nome == "font" { "color" } else { "text" }) {
+            base.cor = Some(c);
+        }
+    }
+    if tag.atributo("hidden").is_some() {
+        base.oculto = true;
     }
 }
 

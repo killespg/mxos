@@ -24,7 +24,11 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::html::{Bloco, Documento, Marcador, TipoBloco, Trecho, CODIGO, MAX_CELULAS, NEGRITO, SUBLINHADO};
+use super::css::{self, BAIXO, CIMA, DIREITA, ESQUERDA};
+use super::html::{
+    Bloco, Caixa, Documento, Marcador, Tinta, TipoBloco, Trecho, CODIGO, MAX_CELULAS, MONO, NEGRITO, SEM_SUBLINHADO,
+    SUBLINHADO, TAMANHO, TAMANHO_GRANDE, TAMANHO_TITULO,
+};
 use crate::fonte::{self, Fonte};
 use crate::gui::grafico::Retangulo;
 
@@ -50,6 +54,7 @@ pub struct Pedaco {
     pub texto: String,
     pub estilo: u8,
     pub link: Option<usize>,
+    pub tinta: Tinta,
 }
 
 pub type Linha = Vec<Pedaco>;
@@ -57,8 +62,22 @@ pub type Linha = Vec<Pedaco>;
 /// Uma palavra pode ter varios estilos ("<b>neg</b>rito"): partes coladas.
 struct Parte<'a> {
     texto: &'a str,
+    jeito: Jeito,
+}
+
+/// Estilo, link e cores de um pedaco: pedacos vizinhos com o mesmo jeito
+/// viram um so.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Jeito {
     estilo: u8,
     link: Option<usize>,
+    tinta: Tinta,
+}
+
+impl Jeito {
+    fn de(t: &Trecho) -> Jeito {
+        Jeito { estilo: t.estilo, link: t.link, tinta: t.tinta }
+    }
 }
 
 /// Monta as linhas de um bloco que cabem em `largura`.
@@ -82,23 +101,22 @@ impl<'m> Quebrador<'m> {
 
     /// Escreve na linha atual, juntando com o pedaco anterior se puder.
     /// Nao quebra: quem chama garante que cabe.
-    fn por(&mut self, texto: &str, estilo: u8, link: Option<usize>) {
+    fn por(&mut self, texto: &str, j: Jeito) {
         if texto.is_empty() {
             return;
         }
         let x = self.x;
-        let largura = (self.medir)(texto, estilo);
+        let largura = (self.medir)(texto, j.estilo);
         self.x += largura;
         if let Some(p) = self.atual.last_mut()
-            && p.estilo == estilo
-            && p.link == link
+            && (Jeito { estilo: p.estilo, link: p.link, tinta: p.tinta }) == j
             && p.x + p.largura == x
         {
             p.texto.push_str(texto);
             p.largura += largura;
             return;
         }
-        self.atual.push(Pedaco { x, largura, texto: texto.into(), estilo, link });
+        self.atual.push(Pedaco { x, largura, texto: texto.into(), estilo: j.estilo, link: j.link, tinta: j.tinta });
     }
 
     /// Quantos bytes do comeco de `texto` cabem no resto da linha. No
@@ -115,30 +133,30 @@ impl<'m> Quebrador<'m> {
     }
 
     /// Escreve quebrando a forca onde a linha acaba (palavra gigante, pre).
-    fn por_cortando(&mut self, mut texto: &str, estilo: u8, link: Option<usize>) {
+    fn por_cortando(&mut self, mut texto: &str, j: Jeito) {
         while !texto.is_empty() {
-            let corte = self.quanto_cabe(texto, estilo);
+            let corte = self.quanto_cabe(texto, j.estilo);
             if corte == 0 {
                 self.nova_linha();
                 continue;
             }
-            self.por(&texto[..corte], estilo, link);
+            self.por(&texto[..corte], j);
             texto = &texto[corte..];
         }
     }
 
     /// Uma palavra inteira, com o espaco que vinha antes dela (se houver).
-    fn palavra(&mut self, partes: &[Parte], espaco: Option<(u8, Option<usize>)>) {
-        let tamanho: i32 = partes.iter().map(|p| (self.medir)(p.texto, p.estilo)).sum();
+    fn palavra(&mut self, partes: &[Parte], espaco: Option<Jeito>) {
+        let tamanho: i32 = partes.iter().map(|p| (self.medir)(p.texto, p.jeito.estilo)).sum();
         let com_espaco = espaco.filter(|_| self.x > 0);
-        let largura_espaco = com_espaco.map_or(0, |(estilo, _)| (self.medir)(" ", estilo));
+        let largura_espaco = com_espaco.map_or(0, |j| (self.medir)(" ", j.estilo));
         if self.x > 0 && self.x + largura_espaco + tamanho > self.largura {
             self.nova_linha();
-        } else if let Some((estilo, link)) = com_espaco {
-            self.por(" ", estilo, link);
+        } else if let Some(j) = com_espaco {
+            self.por(" ", j);
         }
         for p in partes {
-            self.por_cortando(p.texto, p.estilo, p.link);
+            self.por_cortando(p.texto, p.jeito);
         }
     }
 
@@ -154,7 +172,7 @@ impl<'m> Quebrador<'m> {
 pub fn quebrar(trechos: &[Trecho], largura: i32, medir: Medida) -> Vec<Linha> {
     let mut q = Quebrador::novo(largura, medir);
     let mut partes: Vec<Parte> = Vec::new();
-    let mut espaco: Option<(u8, Option<usize>)> = None;
+    let mut espaco: Option<Jeito> = None;
     for t in trechos {
         let mut resto = t.texto.as_str();
         while !resto.is_empty() {
@@ -168,13 +186,13 @@ pub fn quebrar(trechos: &[Trecho], largura: i32, medir: Medida) -> Vec<Linha> {
                     q.nova_linha();
                     espaco = None;
                 } else if q.x > 0 || espaco.is_some() {
-                    espaco = Some((t.estilo, t.link));
+                    espaco = Some(Jeito::de(t));
                 }
                 resto = &resto[1..];
                 continue;
             }
             let fim = resto.find([' ', '\n']).unwrap_or(resto.len());
-            partes.push(Parte { texto: &resto[..fim], estilo: t.estilo, link: t.link });
+            partes.push(Parte { texto: &resto[..fim], jeito: Jeito::de(t) });
             resto = &resto[fim..];
         }
     }
@@ -192,7 +210,7 @@ pub fn quebrar_pre(trechos: &[Trecho], largura: i32, medir: Medida) -> Vec<Linha
             if i > 0 {
                 q.nova_linha();
             }
-            q.por_cortando(pedaco, t.estilo, t.link);
+            q.por_cortando(pedaco, Jeito::de(t));
         }
     }
     q.terminar()
@@ -311,7 +329,11 @@ fn tabela_texto(saida: &mut String, linhas: &[Bloco], recuo: usize, largura: usi
 fn fim_da_tabela(blocos: &[Bloco], i: usize) -> usize {
     let primeira = &blocos[i];
     let mesma = |b: &Bloco| {
-        b.tipo == TipoBloco::Linha && b.tabela == primeira.tabela && b.recuo == primeira.recuo && !b.margem
+        b.tipo == TipoBloco::Linha
+            && b.tabela == primeira.tabela
+            && b.recuo == primeira.recuo
+            && !b.margem
+            && b.caixas == primeira.caixas
     };
     i + 1 + blocos[i + 1..].iter().take_while(|b| mesma(b)).count()
 }
@@ -527,13 +549,15 @@ impl Letra {
 }
 
 /// A fonte de um trecho com `estilo` num bloco do `tipo`.
+/// O tamanho pedido pelo CSS (bits TAMANHO) ganha do tipo do bloco.
 pub fn letra(tipo: TipoBloco, estilo: u8) -> Letra {
-    match tipo {
-        TipoBloco::Pre => Letra::Mono,
-        TipoBloco::Titulo(1) => Letra::Grande,
-        TipoBloco::Titulo(2 | 3) => Letra::Titulo,
-        TipoBloco::Titulo(_) => Letra::Negrito,
-        _ if estilo & CODIGO != 0 => Letra::Mono,
+    if tipo == TipoBloco::Pre || estilo & (CODIGO | MONO) != 0 {
+        return Letra::Mono;
+    }
+    match (estilo & TAMANHO, tipo) {
+        (TAMANHO_GRANDE, _) | (0, TipoBloco::Titulo(1)) => Letra::Grande,
+        (TAMANHO_TITULO, _) | (0, TipoBloco::Titulo(2 | 3)) => Letra::Titulo,
+        (0, TipoBloco::Titulo(_)) => Letra::Negrito,
         _ if estilo & NEGRITO != 0 => Letra::Negrito,
         _ => Letra::Normal,
     }
@@ -543,7 +567,9 @@ pub fn letra(tipo: TipoBloco, estilo: u8) -> Letra {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Item {
     /// Texto com a caneta em `x` e a linha de base em `base`.
-    Texto { x: i32, base: i32, texto: String, letra: Letra, estilo: u8, link: Option<usize> },
+    Texto { x: i32, base: i32, texto: String, letra: Letra, estilo: u8, link: Option<usize>, tinta: Tinta },
+    /// Caixa do CSS: fundo e bordas (cima, direita, baixo, esquerda).
+    Caixa { r: Retangulo, fundo: Option<u32>, bordas: [i32; 4], cores: [Option<u32>; 4] },
     /// Linha horizontal de 1 px (hr, sublinhado de titulo).
     Regua { x: i32, y: i32, largura: i32 },
     /// Bolinha de lista. `cheia` = nivel 1.
@@ -572,7 +598,9 @@ impl Item {
             }
             Item::Regua { y, .. } => (*y, y + 1),
             Item::Bolinha { cy, raio, .. } => (cy - raio, cy + raio + 1),
-            Item::FundoPre(r) | Item::Barra(r) | Item::FundoCelula(r) | Item::Grade(r) => (r.y, r.y + r.altura),
+            Item::FundoPre(r) | Item::Barra(r) | Item::FundoCelula(r) | Item::Grade(r) | Item::Caixa { r, .. } => {
+                (r.y, r.y + r.altura)
+            }
         }
     }
 }
@@ -600,14 +628,18 @@ pub struct Pagina {
     pub caixas_de_link: Vec<(Retangulo, usize)>,
     /// href de cada link (copiado do Documento, sem resolver).
     pub links: Vec<String>,
+    /// Fundo da pagina pedido pelo CSS (None = branco).
+    pub fundo: Option<u32>,
+    /// Cor do texto do <body> pedida pelo CSS.
+    pub cor_texto: Option<u32>,
 }
 
 impl Pagina {
-    /// Fecha a faixa dos itens a partir de `inicio` (se o bloco pos algum).
-    fn marcar_faixa(&mut self, inicio: usize) {
-        let Some(primeiro) = self.itens.get(inicio) else { return };
+    /// A faixa dos itens[inicio..fim] (se o bloco pos algum).
+    fn marcar_faixa(&mut self, inicio: usize, fim: usize) {
+        let Some(primeiro) = self.itens.get(inicio).filter(|_| inicio < fim) else { return };
         let (mut topo, mut base) = primeiro.faixa();
-        for item in &self.itens[inicio + 1..] {
+        for item in &self.itens[inicio + 1..fim] {
             let (t, b) = item.faixa();
             topo = topo.min(t);
             base = base.max(b);
@@ -638,6 +670,121 @@ fn espaco_antes(tipo: TipoBloco) -> i32 {
     }
 }
 
+/// Faixa horizontal onde vai o conteudo: a pagina ou o miolo de uma caixa.
+#[derive(Clone, Copy, Debug)]
+struct Area {
+    esq: i32,
+    dir: i32,
+}
+
+impl Area {
+    fn largura(&self) -> i32 {
+        self.dir - self.esq
+    }
+}
+
+/// Uma caixa do CSS aberta enquanto os blocos de dentro sao diagramados.
+struct CaixaAberta {
+    indice: u16,
+    /// Onde o fundo e as bordas vao entrar (antes do texto de dentro).
+    item: usize,
+    x: i32,
+    largura: i32,
+    topo: i32,
+    /// Recheio e borda de baixo.
+    fim_de_baixo: i32,
+    margem_baixo: i32,
+    area_de_fora: Area,
+}
+
+/// Abre e fecha as caixas do CSS entre um bloco e outro.
+struct Caixas<'d> {
+    doc: &'d Documento,
+    abertas: Vec<CaixaAberta>,
+    area: Area,
+    /// Acabou de abrir uma caixa: o primeiro bloco de dentro nao ganha o
+    /// espaco de antes (como a margem que encosta no topo da caixa).
+    colado: bool,
+}
+
+impl<'d> Caixas<'d> {
+    /// Deixa abertas exatamente as caixas de `cadeia` e poe o espaco antes
+    /// do bloco. Devolve o y onde o bloco comeca.
+    fn ajustar(&mut self, p: &mut Pagina, cadeia: &[u16], espaco: i32, mut y: i32) -> i32 {
+        let comum = self.abertas.iter().zip(cadeia).take_while(|(a, c)| a.indice == **c).count();
+        while self.abertas.len() > comum {
+            y = self.fechar(p, y);
+        }
+        if cadeia.len() > comum {
+            y += espaco;
+            for &c in &cadeia[comum..] {
+                y = self.abrir(p, c, y);
+            }
+            self.colado = true;
+        } else if !self.colado {
+            y += espaco;
+        }
+        y
+    }
+
+    fn abrir(&mut self, p: &mut Pagina, indice: u16, mut y: i32) -> i32 {
+        let Some(c) = self.doc.caixas.get(indice as usize) else { return y };
+        let fora = self.area;
+        let disponivel = fora.largura();
+        let px = |m: css::Medida| m.px(0, disponivel);
+        // margem None = auto (centraliza quando a largura e menor)
+        let margem = c.margem.map(|m| px(m).map(|v| v.clamp(0, 2000)));
+        let recheio = c.recheio.map(|m| px(m).unwrap_or(0).clamp(0, 2000));
+        let horizontal = recheio[DIREITA] + recheio[ESQUERDA] + c.borda[DIREITA] + c.borda[ESQUERDA];
+        let (me, md) = (margem[ESQUERDA].unwrap_or(0), margem[DIREITA].unwrap_or(0));
+        let mut largura = match c.largura.and_then(px) {
+            Some(w) => w + horizontal,
+            None => disponivel - me - md,
+        };
+        if let Some(maxima) = c.largura_max.and_then(px) {
+            largura = largura.min(maxima + horizontal);
+        }
+        largura = largura.min(disponivel).max(horizontal + 16);
+        let sobra = (disponivel - largura).max(0);
+        let x = match (margem[ESQUERDA], margem[DIREITA]) {
+            (None, None) => fora.esq + sobra / 2,
+            (None, Some(d)) => fora.esq + (sobra - d).max(0),
+            (Some(e), _) => fora.esq + e.min(sobra),
+        };
+        y += margem[CIMA].unwrap_or(0);
+        let item = p.itens.len();
+        // o fundo e as bordas sao acertados no fechar, quando a altura e conhecida
+        p.itens.push(Item::Caixa { r: Retangulo::novo(x, y, largura, 0), fundo: None, bordas: [0; 4], cores: [None; 4] });
+        self.abertas.push(CaixaAberta {
+            indice,
+            item,
+            x,
+            largura,
+            topo: y,
+            fim_de_baixo: recheio[BAIXO] + c.borda[BAIXO],
+            margem_baixo: margem[BAIXO].unwrap_or(0),
+            area_de_fora: fora,
+        });
+        let esq = x + c.borda[ESQUERDA] + recheio[ESQUERDA];
+        let dir = (x + largura - c.borda[DIREITA] - recheio[DIREITA]).max(esq + 8);
+        self.area = Area { esq, dir };
+        y + c.borda[CIMA] + recheio[CIMA]
+    }
+
+    fn fechar(&mut self, p: &mut Pagina, mut y: i32) -> i32 {
+        let Some(a) = self.abertas.pop() else { return y };
+        let c: &Caixa = &self.doc.caixas[a.indice as usize];
+        y += a.fim_de_baixo;
+        // borda sem cor: a cor do texto da caixa (ou da pagina)
+        let cores = c.borda_cor.map(|cor| cor.or(c.cor_texto).or(p.cor_texto));
+        let r = Retangulo::novo(a.x, a.topo, a.largura, y - a.topo);
+        p.itens[a.item] = Item::Caixa { r, fundo: c.fundo, bordas: c.borda, cores };
+        self.area = a.area_de_fora;
+        self.colado = false;
+        y + a.margem_baixo
+    }
+}
+
 /// Diagrama o documento para uma janela de `largura` px.
 pub fn diagramar(doc: &Documento, largura: i32) -> Pagina {
     let largura = largura.max(96);
@@ -649,20 +796,34 @@ pub fn diagramar(doc: &Documento, largura: i32) -> Pagina {
         faixas: Vec::new(),
         caixas_de_link: Vec::new(),
         links: doc.links.clone(),
+        fundo: doc.fundo,
+        cor_texto: doc.cor_texto,
     };
+    let pagina = Area { esq: MARGEM, dir: largura - MARGEM };
+    let mut caixas = Caixas { doc, abertas: Vec::new(), area: pagina, colado: false };
     let mut y = MARGEM;
+    let mut inicios = Vec::with_capacity(doc.blocos.len() + 1);
     let mut i = 0;
     while i < doc.blocos.len() {
-        let inicio = p.itens.len();
-        if doc.blocos[i].tipo == TipoBloco::Linha {
+        inicios.push(p.itens.len());
+        let bloco = &doc.blocos[i];
+        let espaco = if bloco.margem && y > MARGEM { espaco_antes(bloco.tipo) } else { 0 };
+        y = caixas.ajustar(&mut p, &bloco.caixas, espaco, y);
+        caixas.colado = false;
+        if bloco.tipo == TipoBloco::Linha {
             let fim = fim_da_tabela(&doc.blocos, i);
-            y = diagramar_tabela(&mut p, &doc.blocos[i..fim], y);
+            y = diagramar_tabela(&mut p, &doc.blocos[i..fim], y, caixas.area);
             i = fim;
         } else {
-            y = diagramar_bloco(&mut p, &doc.blocos[i], y);
+            y = diagramar_bloco(&mut p, bloco, y, caixas.area);
             i += 1;
         }
-        p.marcar_faixa(inicio);
+    }
+    // as caixas que ainda estao abertas fecham no fim da pagina
+    y = caixas.ajustar(&mut p, &[], 0, y);
+    inicios.push(p.itens.len());
+    for k in 0..inicios.len() - 1 {
+        p.marcar_faixa(inicios[k], inicios[k + 1]);
     }
     p.acertar_topos();
     p.altura = y + MARGEM;
@@ -670,9 +831,9 @@ pub fn diagramar(doc: &Documento, largura: i32) -> Pagina {
 }
 
 /// x onde comeca o texto de um bloco com `recuo` niveis (no maximo
-/// metade da janela).
-fn esquerda(p: &Pagina, recuo: u8) -> i32 {
-    MARGEM + (recuo as i32 * RECUO_PX).min(p.largura / 2)
+/// metade da area).
+fn esquerda(area: Area, recuo: u8) -> i32 {
+    area.esq + (recuo as i32 * RECUO_PX).min(area.largura() / 2)
 }
 
 /// (subida, descida) de uma linha: o maximo das fontes dos pedacos (linha
@@ -688,36 +849,38 @@ fn metricas_da_linha(linha: &Linha, tipo: TipoBloco) -> (i32, i32) {
 }
 
 /// Poe os pedacos de uma linha com o comeco em `x0` e o alto em `topo`,
-/// guardando a caixa de cada pedaco que e link. Devolve (base, altura).
-fn por_linha(p: &mut Pagina, linha: Linha, x0: i32, topo: i32, tipo: TipoBloco) -> (i32, i32) {
+/// guardando a caixa de cada pedaco que e link. `altura_minima` e o
+/// line-height (0 = o das fontes): a sobra fica metade em cima, metade
+/// embaixo. Devolve (base, altura).
+fn por_linha(p: &mut Pagina, linha: Linha, x0: i32, topo: i32, tipo: TipoBloco, altura_minima: i32) -> (i32, i32) {
     let (subida, descida) = metricas_da_linha(&linha, tipo);
-    let base = topo + subida;
+    let sobra = (altura_minima - subida - descida).max(0);
+    let base = topo + subida + sobra / 2;
     for pedaco in linha {
         let x = x0 + pedaco.x;
         let letra = letra(tipo, pedaco.estilo);
         if let Some(link) = pedaco.link {
-            let caixa = Retangulo::novo(x, topo, pedaco.largura, subida + descida);
+            let caixa = Retangulo::novo(x, topo, pedaco.largura, subida + descida + sobra);
             p.caixas_de_link.push((caixa, link));
         }
-        if letra == Letra::Mono && tipo != TipoBloco::Pre && !pedaco.texto.trim().is_empty() {
+        let codigo = pedaco.estilo & CODIGO != 0;
+        if letra == Letra::Mono && tipo != TipoBloco::Pre && codigo && !pedaco.texto.trim().is_empty() {
             let (s, d) = Letra::Mono.metricas();
             let fundo = Retangulo::novo(x - FOLGA_CODIGO, base - s + 1, pedaco.largura + 2 * FOLGA_CODIGO, s + d - 2);
             p.itens.push(Item::FundoPre(fundo));
         }
         // o <pre> inteiro e codigo: fica na cor do texto, sem o vermelho do <code>
         let estilo = if tipo == TipoBloco::Pre { pedaco.estilo & !CODIGO } else { pedaco.estilo };
-        p.itens.push(Item::Texto { x, base, texto: pedaco.texto, letra, estilo, link: pedaco.link });
+        p.itens.push(Item::Texto { x, base, texto: pedaco.texto, letra, estilo, link: pedaco.link, tinta: pedaco.tinta });
     }
-    (base, subida + descida)
+    (base, subida + descida + sobra)
 }
 
-/// Coloca um bloco a partir de `y` e devolve o y depois dele.
-fn diagramar_bloco(p: &mut Pagina, bloco: &Bloco, mut y: i32) -> i32 {
-    if bloco.margem && y > MARGEM {
-        y += espaco_antes(bloco.tipo);
-    }
-    let x0 = esquerda(p, bloco.recuo);
-    let direita = p.largura - MARGEM;
+/// Coloca um bloco a partir de `y` (o espaco antes ja foi posto) dentro
+/// de `area` e devolve o y depois dele.
+fn diagramar_bloco(p: &mut Pagina, bloco: &Bloco, mut y: i32, area: Area) -> i32 {
+    let x0 = esquerda(area, bloco.recuo);
+    let direita = area.dir;
     let topo = y;
 
     if bloco.tipo == TipoBloco::Regua {
@@ -737,7 +900,15 @@ fn diagramar_bloco(p: &mut Pagina, bloco: &Bloco, mut y: i32) -> i32 {
         y += FOLGA_PRE_Y;
     }
     for (i, linha) in linhas.into_iter().enumerate() {
-        let (base, altura) = por_linha(p, linha, x_texto, y, tipo);
+        // text-align: a sobra da linha vai toda para a esquerda (direita)
+        // ou metade para cada lado (centro)
+        let sobra = if pre { 0 } else { (largura - largura_da_linha(&linha)).max(0) };
+        let deslocamento = match bloco.alinhar {
+            1 => sobra / 2,
+            2 => sobra,
+            _ => 0,
+        };
+        let (base, altura) = por_linha(p, linha, x_texto + deslocamento, y, tipo, bloco.altura_linha);
         if i == 0 {
             marcador(p, bloco.marcador, x0, base, letra(tipo, 0));
         }
@@ -767,20 +938,17 @@ fn altura_das_linhas(linhas: &[Linha]) -> i32 {
         .sum()
 }
 
-/// Coloca as linhas de uma tabela a partir de `y` como uma grade e
-/// devolve o y depois dela.
-fn diagramar_tabela(p: &mut Pagina, linhas: &[Bloco], mut y: i32) -> i32 {
-    if linhas[0].margem && y > MARGEM {
-        y += ESPACO_BLOCO;
-    }
-    let x0 = esquerda(p, linhas[0].recuo);
+/// Coloca as linhas de uma tabela a partir de `y` (o espaco antes ja foi
+/// posto) como uma grade e devolve o y depois dela.
+fn diagramar_tabela(p: &mut Pagina, linhas: &[Bloco], mut y: i32, area: Area) -> i32 {
+    let x0 = esquerda(area, linhas[0].recuo);
     let celulas: Vec<Vec<(&[Trecho], bool)>> = linhas.iter().map(|b| celulas_da_linha(b, &b.trechos)).collect();
     let n = numero_de_colunas(&celulas);
     let medida = |texto: &str, estilo: u8| letra(TipoBloco::Linha, estilo).fonte().largura(texto);
     let (natural, minima) = medir_colunas(&celulas, n, &medida);
     // o texto fica com o que sobra das bordas e folgas
     let gasto = (n as i32 + 1) * BORDA_TABELA + n as i32 * 2 * FOLGA_CELULA;
-    let disponivel = (p.largura - MARGEM - x0 - gasto).max(n as i32 * 8);
+    let disponivel = (area.dir - x0 - gasto).max(n as i32 * 8);
     let larguras = repartir(&natural, &minima, disponivel);
     let (quebradas, larguras) = quebrar_tabela(&celulas, &larguras, &medida);
     let colunas_px: Vec<i32> = larguras.iter().map(|&w| w + 2 * FOLGA_CELULA).collect();
@@ -800,7 +968,7 @@ fn diagramar_tabela(p: &mut Pagina, linhas: &[Bloco], mut y: i32) -> i32 {
             }
             let mut topo_linha = y + FOLGA_VERTICAL;
             for l in celula {
-                let (_, h) = por_linha(p, l, x + FOLGA_CELULA, topo_linha, TipoBloco::Linha);
+                let (_, h) = por_linha(p, l, x + FOLGA_CELULA, topo_linha, TipoBloco::Linha, 0);
                 topo_linha += h;
             }
             x += colunas_px[c] + BORDA_TABELA;
@@ -833,7 +1001,7 @@ fn marcador(p: &mut Pagina, m: Marcador, x0: i32, base: i32, letra: Letra) {
         Marcador::Numero(n) => {
             let texto = format!("{n}.");
             let x = x0 - f.largura(&texto) - 6;
-            p.itens.push(Item::Texto { x, base, texto, letra, estilo: 0, link: None });
+            p.itens.push(Item::Texto { x, base, texto, letra, estilo: 0, link: None, tinta: Tinta::default() });
         }
     }
 }
@@ -852,3 +1020,4 @@ pub fn link_em(pagina: &Pagina, x: i32, y: i32) -> Option<String> {
 pub const ESTILO_NEGRITO: u8 = NEGRITO;
 pub const ESTILO_SUBLINHADO: u8 = SUBLINHADO;
 pub const ESTILO_CODIGO: u8 = CODIGO;
+pub const ESTILO_SEM_SUBLINHADO: u8 = SEM_SUBLINHADO;

@@ -1,12 +1,15 @@
-//! Navegador do MXOS, escrito do zero e leve: le HTML (html.rs),
-//! diagrama em linhas (layout.rs) e desenha numa Superficie (render.rs).
-//! Tambem tem um modo texto para a serial: o comando "navegar".
+//! Navegador do MXOS, escrito do zero e leve: le HTML (html.rs) com um
+//! CSS simples (css.rs), diagrama em linhas (layout.rs) e desenha numa
+//! Superficie (render.rs). Tambem tem um modo texto para a serial: o
+//! comando "navegar".
 //!
 //! Enderecos aceitos:
 //!   disco:/paginas/index.html   arquivo do disco FAT32 (armazenamento)
 //!   http://host[:porta]/x       pagina da rede (so http, sem https)
 //!
-//! Sem JavaScript, sem CSS, sem imagens (aparece o texto alternativo).
+//! Sem JavaScript e sem imagens (aparece o texto alternativo). O CSS vem
+//! de <style>, style="..." e <link rel="stylesheet"> (baixado aqui, do
+//! disco ou por http, antes de analisar a pagina).
 //!
 //! O app da area de trabalho (gui/apps/navegador.rs) usa `abrir`, que
 //! nunca falha: erro, https e arquivo que nao e texto viram uma pagina
@@ -15,6 +18,7 @@
 // Nem todo item publico e usado fora daqui (os testes no PC usam).
 #![allow(dead_code)]
 
+pub mod css;
 pub mod html;
 pub mod layout;
 pub mod render;
@@ -36,6 +40,11 @@ pub use render::desenhar;
 
 /// Tempo maximo para uma pagina chegar pela rede.
 const TEMPO_LIMITE_MS: u64 = 10_000;
+/// Folhas de estilo de fora por pagina, o tempo de cada uma e o tamanho
+/// maximo que lemos de cada.
+const MAX_FOLHAS: usize = 4;
+const TEMPO_LIMITE_FOLHA_MS: u64 = 5_000;
+const MAX_TAMANHO_FOLHA: usize = 256 * 1024;
 /// Largura do texto no comando "navegar".
 const COLUNAS_SERIAL: usize = 78;
 /// Bytes do comeco de um arquivo olhados para saber se e texto.
@@ -78,6 +87,33 @@ pub fn abrir(url: &str) -> Aberta {
         }
         Err(motivo) => Aberta { html: pagina_de_erro(url, motivo), url_final: url.into(), erro: Some(motivo) },
     }
+}
+
+/// Analisa a pagina ja com as folhas de estilo dos <link>, resolvidas
+/// contra `url_final`. Folha que nao vem (erro, https...) e esquecida.
+pub fn documento(html: &str, url_final: &str) -> Documento {
+    let folhas: Vec<String> = html::folhas_externas(html, MAX_FOLHAS)
+        .iter()
+        .filter_map(|href| carregar_folha(&resolver_url(url_final, href)).ok())
+        .collect();
+    html::analisar_com_css(html, &folhas)
+}
+
+/// O texto de uma folha de estilo (sem embrulhar em HTML).
+fn carregar_folha(url: &str) -> Result<String, &'static str> {
+    let dados = if let Some(caminho) = sem_prefixo(url, "disco:") {
+        let caminho = decodificar_porcento(caminho.split(['#', '?']).next().unwrap_or(""));
+        crate::armazenamento::ler(&caminho).map_err(|e| e.descricao())?
+    } else if sem_prefixo(url, "http://").is_some() {
+        let resposta = crate::rede::http_get(&codificar_url(url), TEMPO_LIMITE_FOLHA_MS).map_err(|e| e.descricao())?;
+        if resposta.status >= 400 {
+            return Err("a folha de estilo não veio");
+        }
+        resposta.corpo
+    } else {
+        return Err("folha de estilo só pelo disco ou por http://");
+    };
+    Ok(html::para_texto(&dados[..dados.len().min(MAX_TAMANHO_FOLHA)]))
 }
 
 /// (HTML, endereco final) de `url`.
@@ -459,7 +495,7 @@ fn navegar(url: &str, saida: &mut dyn Write) {
             return;
         }
     };
-    let doc = analisar(&pagina);
+    let doc = documento(&pagina, &url_final);
     let (corpo, links) = texto(&doc, COLUNAS_SERIAL);
     let titulo = if doc.titulo.is_empty() { url } else { doc.titulo.as_str() };
     let _ = writeln!(saida, "{}", "=".repeat(COLUNAS_SERIAL));

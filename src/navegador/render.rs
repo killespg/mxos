@@ -12,7 +12,7 @@
 //! direita a cada 4 px acima da linha de base).
 
 use super::html::ITALICO;
-use super::layout::{Item, Letra, Pagina, ESTILO_CODIGO, ESTILO_NEGRITO, ESTILO_SUBLINHADO};
+use super::layout::{Item, Letra, Pagina, ESTILO_CODIGO, ESTILO_NEGRITO, ESTILO_SEM_SUBLINHADO, ESTILO_SUBLINHADO};
 use crate::fonte::{self, Glifo};
 use crate::gui::grafico::{Cor, Retangulo, Superficie};
 
@@ -35,7 +35,7 @@ pub fn desenhar(pagina: &Pagina, s: &mut Superficie, area: Retangulo, rolagem: i
     if recorte.vazio() {
         return;
     }
-    s.retangulo(recorte, COR_FUNDO);
+    s.retangulo(recorte, pagina.fundo.unwrap_or(COR_FUNDO));
     // deslocamento pagina -> superficie
     let dx = area.x;
     let dy = area.y - rolagem;
@@ -45,7 +45,7 @@ pub fn desenhar(pagina: &Pagina, s: &mut Superficie, area: Retangulo, rolagem: i
         if base <= cima || topo >= baixo {
             continue;
         }
-        desenhar_item(s, recorte, item, dx, dy);
+        desenhar_item(s, recorte, item, dx, dy, pagina.cor_texto);
     }
 }
 
@@ -65,23 +65,30 @@ fn itens_entre(pagina: &Pagina, cima: i32, baixo: i32) -> &[Item] {
     pagina.itens.get(inicio..fim.max(inicio)).unwrap_or(&[])
 }
 
-fn desenhar_item(s: &mut Superficie, recorte: Retangulo, item: &Item, dx: i32, dy: i32) {
+/// `cor_pagina`: a cor do texto do <body> pedida pelo CSS.
+fn desenhar_item(s: &mut Superficie, recorte: Retangulo, item: &Item, dx: i32, dy: i32, cor_pagina: Option<Cor>) {
     match item {
-        Item::Texto { x, base, texto, letra, estilo, link } => {
-            let cor = if link.is_some() {
-                COR_LINK
-            } else if estilo & ESTILO_CODIGO != 0 {
-                COR_CODIGO
-            } else {
-                COR_TEXTO
+        Item::Texto { x, base, texto, letra, estilo, link, tinta } => {
+            // a cor do CSS ganha; sem ela, link azul, <code> vermelho e o texto da pagina
+            let cor = match tinta.cor {
+                Some(c) => c,
+                None if link.is_some() => COR_LINK,
+                None if estilo & ESTILO_CODIGO != 0 => COR_CODIGO,
+                None => cor_pagina.unwrap_or(COR_TEXTO),
             };
-            let caneta = Caneta { recorte, cor, italico: estilo & ITALICO != 0 };
             let (x, base) = (x + dx, base + dy);
+            if let Some(fundo) = tinta.fundo {
+                let f = letra.fonte();
+                let r = Retangulo::novo(x, base - f.ascendente, f.largura(texto), f.altura_linha);
+                s.retangulo(r.intersecao(&recorte), fundo);
+            }
+            let caneta = Caneta { recorte, cor, italico: estilo & ITALICO != 0 };
             let largura = caneta.escrever(s, x, base, texto, *letra);
             if *letra == Letra::Mono && estilo & ESTILO_NEGRITO != 0 {
                 caneta.escrever(s, x + 1, base, texto, *letra);
             }
-            if link.is_some() || estilo & ESTILO_SUBLINHADO != 0 {
+            let sublinhado = (link.is_some() && estilo & ESTILO_SEM_SUBLINHADO == 0) || estilo & ESTILO_SUBLINHADO != 0;
+            if sublinhado {
                 let linha = Retangulo::novo(x, base + 2, largura, 1);
                 s.retangulo(linha.intersecao(&recorte), cor);
             }
@@ -95,6 +102,24 @@ fn desenhar_item(s: &mut Superficie, recorte: Retangulo, item: &Item, dx: i32, d
         Item::Barra(r) => s.retangulo(r.deslocado(dx, dy).intersecao(&recorte), COR_CITACAO),
         Item::FundoCelula(r) => s.retangulo(r.deslocado(dx, dy).intersecao(&recorte), COR_CABECALHO),
         Item::Grade(r) => s.retangulo(r.deslocado(dx, dy).intersecao(&recorte), COR_GRADE),
+        Item::Caixa { r, fundo, bordas, cores } => {
+            let r = r.deslocado(dx, dy);
+            if let Some(f) = fundo {
+                s.retangulo(r.intersecao(&recorte), *f);
+            }
+            // cima, direita, baixo, esquerda
+            let lados = [
+                Retangulo::novo(r.x, r.y, r.largura, bordas[0]),
+                Retangulo::novo(r.direita() - bordas[1], r.y, bordas[1], r.altura),
+                Retangulo::novo(r.x, r.baixo() - bordas[2], r.largura, bordas[2]),
+                Retangulo::novo(r.x, r.y, bordas[3], r.altura),
+            ];
+            for (lado, cor) in lados.iter().zip(cores) {
+                if lado.largura > 0 && lado.altura > 0 {
+                    s.retangulo(lado.intersecao(&recorte), cor.or(cor_pagina).unwrap_or(COR_TEXTO));
+                }
+            }
+        }
     }
 }
 
