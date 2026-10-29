@@ -89,6 +89,15 @@ não começar do zero.
 
 ## Estado no momento da passagem
 
-Ver a seção "Diário" do `PLANO.md`: a rodada de acentos (0.8) foi interrompida
-com 3 de 5 partes concluídas; Tarefas/Drivers/Configurações e o navegador
-precisam de conferência (passo 0 do plano).
+Versão 0.9: os passos 0 a 5 do `PLANO.md` estão feitos (acentos conferidos, CSS no
+navegador, processos em EL0, carregador de ELF, ABI do Linux e BusyBox com `sh` e
+`vi` na janela do terminal). Ver o "Diário" e as "Pendências para depois" no
+`PLANO.md`.
+
+## Neste PC (Windows, segunda sessão)
+
+- Projeto em `C:\dev\mxos` (caminho curto). Rust, QEMU e Python 3.12 instalados pelo
+  winget. Sem Visual Studio: os testes do FAT32 rodam com a toolchain GNU
+  (`cargo +stable-x86_64-pc-windows-gnu test --release` em `ferramentas/teste_fat32`).
+- Programa travado sem mensagem: o PC da CPU sai no monitor do QEMU (`info registers`)
+  e o `llvm-objdump` (`rustup component add llvm-tools`) mostra a função.

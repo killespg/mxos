@@ -679,19 +679,21 @@ mod processos {
     }
 }
 
-/// Separa os argumentos por espacos; "entre aspas" fica junto.
+/// Separa os argumentos por espacos; "entre aspas" ou 'entre apostrofos'
+/// fica junto (como no sh).
 fn separar_argumentos(linha: &str) -> Vec<String> {
     let mut partes = Vec::new();
     let mut atual = String::new();
-    let mut aspas = false;
+    let mut aspas: Option<char> = None;
     let mut tem = false;
     for c in linha.chars() {
         match c {
-            '"' => {
-                aspas = !aspas;
+            '"' | '\'' if aspas.is_none() => {
+                aspas = Some(c);
                 tem = true;
             }
-            ' ' if !aspas => {
+            c if aspas == Some(c) => aspas = None,
+            ' ' if aspas.is_none() => {
                 if tem {
                     partes.push(core::mem::take(&mut atual));
                     tem = false;

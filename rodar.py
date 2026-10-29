@@ -20,7 +20,7 @@ Uso:
                                     mover X Y                 ponteiro em (X, Y) da tela
                                     clicar [esquerdo|direito|meio]
                                     arrastar X1 Y1 X2 Y2      aperta em 1, solta em 2
-                                    tecla QCODE               ex.: ret, esc, tab, f1, up
+                                    tecla QCODE               ex.: ret, esc, tab, f1, up, ctrl+c
                                     digitar TEXTO             teclado americano, sem ';'; letras
                                                               acentuadas e o c cedilha saem pelas
                                                               teclas mortas do ABNT2
@@ -336,13 +336,17 @@ class Acoes:
         self.botao("left", False)
 
     def tecla(self, qcode: str, shift: bool = False) -> None:
+        # "ctrl+c", "shift+tab": os modificadores ficam apertados durante a tecla
+        *modificadores, qcode = qcode.split("+")
         if shift:
-            self.qmp.eventos(evento_tecla("shift", True))
+            modificadores.append("shift")
+        for m in modificadores:
+            self.qmp.eventos(evento_tecla(m, True))
         self.qmp.eventos(evento_tecla(qcode, True))
         time.sleep(self.PAUSA)
         self.qmp.eventos(evento_tecla(qcode, False))
-        if shift:
-            self.qmp.eventos(evento_tecla("shift", False))
+        for m in reversed(modificadores):
+            self.qmp.eventos(evento_tecla(m, False))
         time.sleep(self.PAUSA)
 
     def digitar(self, texto: str) -> None:

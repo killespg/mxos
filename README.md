@@ -17,6 +17,7 @@ python rodar.py --teste "ip;http http://example.com" --espera 10  # espera até 
 python rodar.py --teste "" --acoes "mover 30 752;clicar;esperar 300" --captura saida/menu.png  # mouse e teclado pelo QMP
 python rodar.py --disco saida/outro.img --disco-novo --teste "ls /documentos"  # outra imagem (cada QEMU precisa da sua)
 python rodar.py --mxq                        # gera saida/mxos-mxq.img para a TV box
+python rodar.py --teste "executar sh -c 'ls / | wc -l'"   # programa de Linux (BusyBox) no MXOS
 ```
 
 Precisa do Rust (`rustup`) e do QEMU. O alvo `aarch64-unknown-none` é instalado sozinho pelo `rust-toolchain.toml`.
@@ -37,7 +38,7 @@ serial e antes da `--captura`, com as ações separadas por `;`:
 | `mover X Y` | põe o ponteiro no pixel (X, Y) da tela (o tablet vai de 0 a 32767; o `rodar.py` converte) |
 | `clicar [esquerdo\|direito\|meio]` | aperta e solta o botão (padrão: esquerdo) |
 | `arrastar X1 Y1 X2 Y2` | aperta em (X1, Y1), anda em 10 passos e solta em (X2, Y2) |
-| `tecla QCODE` | aperta e solta uma tecla pelo nome do QEMU: `ret`, `esc`, `tab`, `backspace`, `up`, `f1`, `a`... |
+| `tecla QCODE` | aperta e solta uma tecla pelo nome do QEMU: `ret`, `esc`, `tab`, `backspace`, `up`, `f1`, `a`...; com modificador: `ctrl+c`, `shift+tab` |
 | `digitar TEXTO` | digita o texto no layout do MXOS (ABNT2 por padrão; `--layout us` para o americano), com maiúsculas, símbolos e acentos; não aceita `;` (veja abaixo) |
 | `esperar MS` | espera MS milissegundos |
 
@@ -245,6 +246,50 @@ gravado: /documentos/Olá.txt (21 bytes)
 mxos> cat /documentos/Anotações.txt
 ```
 
+## Programas de Linux e BusyBox (0.9)
+
+O MXOS roda programas de **Linux aarch64 estáticos** sem mudar nada: o mesmo binário que roda num Raspberry Pi com
+Linux roda aqui. Não é emulador: o código é ARM64 nativo, e o MXOS responde às chamadas de sistema como o Linux
+responderia (números, estruturas e erros iguais). Programas dinâmicos (que precisam do `ld-linux` e de `.so`)
+ainda não rodam.
+
+```
+mxos> executar sh -l                        # shell do BusyBox (ash) na janela do terminal
+~ # cd /documentos
+/documentos # ls -l
+-rwxr-xr-x    1 root     root           635 Oct 29 04:16 Anotações.txt
+/documentos # cat notas.txt | grep FAT | wc -l
+/documentos # vi notas.txt                  # o vi do BusyBox, com :wq gravando no FAT32
+/documentos # exit
+mxos> executar df -h                        # sem /bin/df: o BusyBox faz o papel (como os links do Linux)
+mxos> executar /bin/ola um "dois três"      # programa de Rust + musl (ferramentas/ola)
+```
+
+- **O que está no disco**: `/bin/busybox` (o `busybox-static` 1.37 arm64 do Debian, GPLv2, licença em
+  `ferramentas/BusyBox-LICENCA.txt`; `ferramentas/extrair_deb.py` tira o binário do `.deb`), `/bin/ola` e
+  `/etc/passwd`, `/etc/group`, `/etc/hostname`, `/etc/profile`. Tudo de `ferramentas/binarios/` vai para `/bin`.
+- **`executar PROGRAMA [args] [&]`**: sem `/` procura em `/bin`; um programa que não existe em `/bin`, `/sbin`,
+  `/usr/bin` ou `/usr/sbin` vira um applet do BusyBox. Aspas (`"..."` e `'...'`) juntam argumentos; `&` no fim roda
+  no fundo. Enquanto o programa roda, o teclado é dele (setas, Home, End, Delete e Ctrl+letra também).
+- **Testado**: `sh` interativo (histórico com as setas, `cd`, `for`, pipes, `&&`), `vi`, `ls`, `cat`, `grep`, `sed`,
+  `awk`, `find`, `xargs`, `sort`, `head`, `wc`, `md5sum`, `tar`, `gzip`/`gunzip`, `df`, `free`, `ps`, `uptime`,
+  `date`, `uname`, `id`, `env`, `sleep` e Ctrl+C (mata o comando; o shell, que trata o SIGINT, continua).
+- **Terminal**: o console da janela entende as sequências ANSI que o shell e o `vi` usam (mover o cursor, apagar
+  linha e tela, cores, tela alternativa) e responde ao `ESC[6n` (posição do cursor) com a posição de verdade.
+- **Ainda não**: rede pelos programas (sockets), threads (`clone` com `CLONE_THREAD`), entrega de sinais para
+  tratadores do programa (o padrão vale; quem trata é ignorado), links simbólicos, permissões (o FAT32 não guarda).
+  O comando `syscalls` lista o que os programas pediram e o MXOS não tem.
+
+### Como funciona por dentro
+
+| Parte | O que faz |
+|---|---|
+| `src/processo/elf.rs` | Lê o ELF64, mapeia os `PT_LOAD` com as permissões certas e monta a pilha inicial do Linux (argc, argv, envp, auxv com `AT_PHDR`, `AT_ENTRY`, `AT_RANDOM`, `AT_HWCAP`...) |
+| `src/processo/chamadas.rs` | As chamadas do Linux aarch64: arquivos (`openat`, `read`, `write`, `lseek`, `getdents64`, `newfstatat`, `mkdirat`, `unlinkat`, `renameat`...), tubos, `dup3`, `fcntl`, `ioctl` de terminal (termios, tamanho da janela, grupo), `ppoll`, memória (`brk`, `mmap`, `munmap`, `mprotect`), processos (`clone`/fork, `execve` com `#!`, `wait4`, `exit_group`, `kill`), tempo, `uname`, `prlimit64`, `getrandom`... |
+| `src/processo/arquivos.rs` | O que um descritor aponta: terminal, `/dev/null`, `/dev/zero`, `/dev/urandom`, arquivo do FAT32 (lido inteiro no open, gravado no último close), pasta, tubo |
+| `src/processo/proc.rs` | `/proc` feito na hora: `meminfo`, `mounts`, `uptime`, `cpuinfo`, `stat`, `PID/stat`, `PID/cmdline`, `self/exe`... |
+| `ferramentas/ola/` | Programa de teste em Rust (`aarch64-unknown-linux-musl`), ligado pelo `rust-lld` (sem gcc no PC) |
+
 ## Processos (EL0) e chamadas de sistema
 
 Programas rodam em EL0, cada um com a própria memória, e falam com o kernel por `svc` com os números e as regras do
@@ -318,7 +363,10 @@ A página `disco:/paginas/css.html` (com `estilo.css` por `<link>`) mostra tudo 
 5. ~~Aplicativos da área de trabalho: gerenciador de arquivos e discos, gerenciador de tarefas, navegador,
    personalização, configurações e painel de drivers~~ (feito na 0.7).
 6. ~~Fontes com antialiasing e acentos em todo o sistema~~ (feito na 0.8).
-7. ~~Processos em EL0 e chamadas de sistema (`svc`)~~ (feito).
-8. FAT32 no cartão SD da TV box (o FAT32 já existe; falta o driver do SD da Amlogic).
-9. Carregador de executáveis: ELF primeiro, depois PE (`.exe`) compilado para ARM64.
-10. `.exe` de Windows x86: precisa de um tradutor de instruções x86 para ARM e de uma reimplementação da API do Windows (o que o Box64 e o Wine fazem juntos). É o projeto mais longo da lista.
+7. ~~Processos em EL0 e chamadas de sistema (`svc`)~~ (feito na 0.9).
+8. ~~CSS no navegador~~ (feito na 0.9).
+9. ~~Carregador de ELF e compatibilidade com programas de Linux aarch64 (BusyBox)~~ (feito na 0.9). Falta: sockets
+   (rede para os programas), threads, sinais com tratador e programas dinâmicos (`ld-linux`).
+10. FAT32 no cartão SD da TV box (o FAT32 já existe; falta o driver do SD da Amlogic).
+11. PE (`.exe`) compilado para ARM64.
+12. `.exe` de Windows x86: precisa de um tradutor de instruções x86 para ARM e de uma reimplementação da API do Windows (o que o Box64 e o Wine fazem juntos). É o projeto mais longo da lista.

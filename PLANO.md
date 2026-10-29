@@ -251,7 +251,7 @@ A rodada de acentos foi interrompida no meio. Compila limpo (QEMU e mxq), mas:
   `/LEIAME.TXT`, grava `/documentos/do_linux.txt`, lê o teclado com acento (`ola ler`) e sai com código 3
   (`ola erro`). Nenhuma chamada faltando (`syscalls`).
 
-### Passo 4 (em andamento): ABI do Linux
+### Passo 4 (feito): ABI do Linux
 
 - `chamadas.rs` reescrito com os números do Linux aarch64: arquivos e pastas do FAT32 (`arquivos.rs`: lido
   inteiro no open, gravado no último close/fsync), /dev/null, /dev/zero, /dev/urandom, /dev/tty, tubos,
@@ -262,3 +262,26 @@ A rodada de acentos foi interrompida no meio. Compila limpo (QEMU e mxq), mas:
 - Chamada que espera (teclado, tubo, filho) é repetida a cada volta do laço; dormir só acorda na hora.
 - Terminal: termios de verdade (TCGETS devolve o que o programa pôs), ICRNL, modo cru, Ctrl+C para o grupo
   do terminal (quem tem tratador recebe o ^C como tecla, para o shell do BusyBox).
+
+### Passo 5 (feito): BusyBox
+
+- `busybox-static_1.37.0-6+b9_arm64.deb` do Debian; `ferramentas/extrair_deb.py` tira `./usr/bin/busybox`
+  (Python puro: ar + tarfile com xz). Vai para `ferramentas/binarios/busybox` e daí para `/bin`.
+- Rodou de primeira (só pediu `rseq`, que a glibc dispensa). Depois entraram: applets sem link (`/bin/ls`
+  inexistente vira o BusyBox com argv[0] = ls), `/proc` mínimo (`proc.rs`) para df/free/ps/uptime, `sendfile`,
+  `readlinkat` do `/proc/self/exe`, `/etc/passwd` e cia no disco, `LANG=C.UTF-8` (acentos no `ls`).
+- Terminal: o console (`video/tela.rs`) ganhou um parser ANSI (CUP, CUU/CUD/CUF/CUB, ED, EL, SGR com 16 cores,
+  ?25, tela alternativa); o shell do MXOS responde ao `ESC[6n` com a posição de verdade do cursor. A janela do
+  terminal manda setas, Home, End, Delete, PgUp/PgDn e Ctrl+letra para o processo.
+- Ctrl+C manda SIGINT ao grupo do terminal: o `sleep` morre (130); o `sh`, que tem tratador, continua.
+- Conferido por captura: `sh -l` na janela (histórico com as setas), `vi` editando e gravando com `:wq`.
+- `teste_fat32`: listas novas (bin, etc) e o espaço livre agora é comparado com o que o verificador em Python
+  conta (não é mais um número fixo que quebra quando um binário muda).
+- Versão 0.9.
+
+### Pendências para depois
+
+- Sockets (o `wget` e o `ping` do BusyBox precisam), threads, entrega de sinais com quadro de sinal, links
+  simbólicos, programas dinâmicos.
+- Na TV box os processos ainda não são compilados (o módulo `processo` depende do disco do QEMU).
+- O `--teste` do `rodar.py` separa comandos por `;`: para mandar `;` para o sh use `&&` ou um script.
