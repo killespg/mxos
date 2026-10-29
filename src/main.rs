@@ -32,6 +32,8 @@ mod som;
 mod terminal;
 mod timer;
 mod uart;
+#[cfg(feature = "mxq")]
+mod usb;
 mod virtio;
 mod video;
 mod x11;
@@ -93,6 +95,12 @@ mod qemu {
     }
 
     pub fn iniciar(mut terminal: Terminal, el_boot: u64) -> Terminal {
+        // TV box: o pendrive (disco "/"), teclado e mouse sao USB
+        #[cfg(feature = "mxq")]
+        match crate::usb::iniciar() {
+            Ok(linha) => diga(&mut terminal, format_args!("usb     : {linha}")),
+            Err(motivo) => diga(&mut terminal, format_args!("usb     : desligado ({motivo})")),
+        }
         iniciar_disco(&mut terminal);
         iniciar_rede(&mut terminal);
         let (Ok(video), Some(framebuffer)) = (terminal.video(), terminal.tela_do_framebuffer()) else {

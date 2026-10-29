@@ -179,9 +179,9 @@ pub fn iniciar() -> Result<InfoDisco, Erro> {
 /// Varre os slots do maior para o menor: assim "vda" e o primeiro
 /// -device da linha de comando do QEMU.
 fn procurar_discos(estado: &mut Estado) {
-    // TV box: o cartao SD e a eMMC (controlador da Amlogic)
+    // TV box: o pendrive primeiro (vira "/"), depois o cartao SD e a eMMC
     #[cfg(feature = "mxq")]
-    for disco in meson_sd::achar() {
+    for disco in crate::usb::discos().into_iter().chain(meson_sd::achar()) {
         montar(estado, disco);
     }
     let mut letra = b'a';

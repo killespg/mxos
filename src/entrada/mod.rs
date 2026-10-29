@@ -73,7 +73,8 @@ const LOTE: usize = 64;
 
 /// Um dispositivo e o grupo de eventos de ponteiro ainda sem EV_SYN.
 struct Fonte {
-    disp: DispositivoEntrada,
+    /// None = teclado e mouse USB da TV box (crate::usb).
+    disp: Option<DispositivoEntrada>,
     /// Houve ABS/REL de posicao desde o ultimo EV_SYN.
     moveu: bool,
     /// Botoes e roda deste grupo, soltos no EV_SYN depois da posicao.
@@ -100,9 +101,13 @@ impl Entrada {
         let mut ultimo_erro = "nenhum virtio-input (QEMU: -device virtio-keyboard-device -device virtio-tablet-device)";
         for disp in procurar_todos() {
             match DispositivoEntrada::iniciar(disp) {
-                Ok(d) => fontes.push(Fonte { disp: d, moveu: false, adiados: Vec::new() }),
+                Ok(d) => fontes.push(Fonte { disp: Some(d), moveu: false, adiados: Vec::new() }),
                 Err(e) => ultimo_erro = e.descricao(),
             }
+        }
+        #[cfg(feature = "mxq")]
+        if crate::usb::tem_entrada() {
+            fontes.push(Fonte { disp: None, moveu: false, adiados: Vec::new() });
         }
         if fontes.is_empty() {
             return Err(ultimo_erro);
@@ -137,16 +142,19 @@ impl Entrada {
 
     /// Nome (ID_NAME) de cada dispositivo.
     pub fn nomes(&self) -> Vec<String> {
-        self.fontes.iter().map(|f| String::from(f.disp.nome())).collect()
+        self.fontes.iter().map(|f| f.disp.as_ref().map_or(String::from("teclado/mouse USB"), |d| String::from(d.nome()))).collect()
     }
 
     /// Uma linha por dispositivo: nome, tipo e slot (painel de drivers).
     pub fn descricoes(&self) -> Vec<String> {
         self.fontes
             .iter()
-            .map(|f| {
-                let slot = f.disp.dispositivo().slot_qemu_virt().unwrap_or(0);
-                format!("{} ({}, slot {})", f.disp.nome(), f.disp.tipo().descricao(), slot)
+            .map(|f| match &f.disp {
+                Some(d) => {
+                    let slot = d.dispositivo().slot_qemu_virt().unwrap_or(0);
+                    format!("{} ({}, slot {})", d.nome(), d.tipo().descricao(), slot)
+                }
+                None => String::from("teclado e mouse USB (HID, protocolo de boot)"),
             })
             .collect()
     }
@@ -164,17 +172,24 @@ impl Entrada {
     /// Le um lote de cada dispositivo e avisa cada um uma vez so.
     fn ler_dispositivos(&mut self) {
         for i in 0..self.fontes.len() {
+            if self.fontes[i].disp.is_none() {
+                #[cfg(feature = "mxq")]
+                for cru in crate::usb::colher_entrada() {
+                    self.traduzir(i, cru);
+                }
+                continue;
+            }
             let mut lidos = 0;
             while lidos < LOTE {
-                let Some(cru) = self.fontes[i].disp.colher() else { break };
+                let Some(cru) = self.fontes[i].disp.as_mut().and_then(|d| d.colher()) else { break };
                 self.traduzir(i, cru);
                 lidos += 1;
             }
-            let fonte = &mut self.fontes[i];
+            let Some(disp) = self.fontes[i].disp.as_mut() else { continue };
             if lidos > 0 {
-                fonte.disp.confirmar_interrupcao();
+                disp.confirmar_interrupcao();
             }
-            fonte.disp.avisar();
+            disp.avisar();
         }
     }
 
@@ -221,9 +236,10 @@ impl Entrada {
     /// Tablet: posicao absoluta escalada para a tela.
     fn absoluto(&mut self, i: usize, codigo: u16, valor: i32) {
         let fonte = &mut self.fontes[i];
+        let Some(disp) = &fonte.disp else { return };
         match codigo {
-            ABS_X => self.x = fonte.disp.faixa_x.escalar(valor, self.largura),
-            ABS_Y => self.y = fonte.disp.faixa_y.escalar(valor, self.altura),
+            ABS_X => self.x = disp.faixa_x.escalar(valor, self.largura),
+            ABS_Y => self.y = disp.faixa_y.escalar(valor, self.altura),
             _ => return,
         }
         fonte.moveu = true;
