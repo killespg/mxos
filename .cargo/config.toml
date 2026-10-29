@@ -1,0 +1,9 @@
+[build]
+target = "aarch64-unknown-none"
+
+[target.aarch64-unknown-none]
+# linker.ld decide onde o kernel fica na memoria.
+# strict-align: com a MMU desligada toda a RAM e tratada como "memoria de
+# dispositivo", e um acesso desalinhado gera excecao. Isso proibe o
+# compilador de gerar esses acessos.
+rustflags = ["-C", "link-arg=-Tlinker.ld", "-C", "target-feature=+strict-align"]

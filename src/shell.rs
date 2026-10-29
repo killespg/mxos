@@ -1,0 +1,559 @@
+//! Shell do MXOS: recebe uma tecla de cada vez, monta a linha e executa o
+//! comando no Enter. Quem entrega as teclas e o laco da serial (`rodar`) ou
+//! a janela do terminal da area de trabalho (gui::apps::terminal).
+
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt::{self, Write};
+use core::hint::black_box;
+use core::ptr;
+
+use crate::psci::{self, Via};
+use crate::terminal::Terminal;
+use crate::uart;
+use crate::{cpu, gic, heap, irq, mapa, mmu, plataforma, timer};
+
+const VERSAO: &str = concat!(env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"));
+pub const PROMPT: &str = "mxos> ";
+/// Bytes da linha (UTF-8: um acento ocupa dois).
+const TAM_LINHA: usize = 256;
+const ESPERA_MAXIMA_MS: u64 = 60_000;
+
+macro_rules! diga {
+    ($shell:expr, $($arg:tt)*) => {{ let _ = writeln!($shell.console, $($arg)*); }};
+}
+
+macro_rules! escreva {
+    ($shell:expr, $($arg:tt)*) => {{ let _ = write!($shell.console, $($arg)*); }};
+}
+
+/// Mostra um tamanho em bytes, KB ou MB.
+struct Bytes(usize);
+
+impl fmt::Display for Bytes {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let texto = match self.0 {
+            b if b >= 10 << 20 => format!("{} MB", b >> 20),
+            b if b >= 1 << 10 => format!("{} KB", b >> 10),
+            b => format!("{b} bytes"),
+        };
+        f.pad(&texto) // respeita alinhamento, ex.: {:>8}
+    }
+}
+
+/// O shell e dono do terminal: assim pode morar dentro de uma janela.
+pub struct Shell {
+    console: Terminal,
+    el_boot: u64,
+    psci: Via,
+    /// Linha sendo digitada, em UTF-8 (so caracteres imprimiveis inteiros).
+    linha: [u8; TAM_LINHA],
+    tamanho: usize,
+    /// Comeco de um caractere UTF-8 que ainda nao chegou inteiro.
+    pendente: [u8; 4],
+    pendentes: usize,
+    ultimo_foi_cr: bool,
+}
+
+impl Shell {
+    pub fn nova(terminal: Terminal, el_boot: u64) -> Shell {
+        // Quem entrega o kernel em EL2 (U-Boot, QEMU com virtualization=on)
+        // atende o PSCI por SMC; o QEMU em EL1 atende por HVC.
+        let psci = if cfg!(feature = "mxq") || el_boot >= 2 { Via::Smc } else { Via::Hvc };
+        // as configuracoes reiniciam e desligam sem passar pelo shell
+        psci::definir_via(psci);
+        anotar_video(&terminal);
+        Shell {
+            console: terminal,
+            el_boot,
+            psci,
+            linha: [0; TAM_LINHA],
+            tamanho: 0,
+            pendente: [0; 4],
+            pendentes: 0,
+            ultimo_foi_cr: false,
+        }
+    }
+
+    #[cfg_attr(feature = "mxq", allow(dead_code))]
+    pub fn terminal(&mut self) -> &mut Terminal {
+        &mut self.console
+    }
+
+    /// O que ja foi digitado na linha atual (para redesenhar o prompt).
+    #[cfg_attr(feature = "mxq", allow(dead_code))]
+    pub fn linha_atual(&self) -> &str {
+        // so guardamos caracteres UTF-8 inteiros, entao a conversao nunca falha
+        core::str::from_utf8(&self.linha[..self.tamanho]).unwrap_or("")
+    }
+
+    /// Modo so serial: banner e depois uma tecla de cada vez, para sempre.
+    /// Entre uma tecla e outra a CPU dorme; a rede e atendida a cada acordada.
+    pub fn rodar(mut self) -> ! {
+        self.banner();
+        loop {
+            let byte = irq::esperar(|| {
+                processar_fundo();
+                self.console.tentar_receber()
+            });
+            self.tecla(byte);
+        }
+    }
+
+    pub fn banner(&mut self) {
+        diga!(self, "");
+        diga!(self, "MXOS {VERSAO} — kernel ARM64 escrito do zero em Rust");
+        diga!(
+            self,
+            "Plataforma: {}  |  MMU ligada  |  heap de {}  |  timer a {} Hz",
+            plataforma::NOME,
+            Bytes(heap::estatisticas().total),
+            timer::HZ
+        );
+        match self.console.video() {
+            Ok(v) => diga!(self, "Vídeo: {}x{} ({}), este terminal também aparece na tela", v.largura, v.altura, v.nome),
+            Err(motivo) => diga!(self, "Vídeo: desligado ({motivo})"),
+        }
+        diga!(self, "Digite \"help\" (ou \"ajuda\") para ver os comandos.");
+        diga!(self, "");
+        escreva!(self, "{PROMPT}");
+    }
+
+    /// Edicao de linha: imprimivel (ASCII ou UTF-8, um byte de cada vez),
+    /// backspace (8 ou 127, apaga o caractere inteiro) e Enter (\r, \n ou
+    /// \r\n, que conta uma vez so). No Enter executa e mostra o prompt.
+    pub fn tecla(&mut self, byte: u8) {
+        // terminais mandam \r, \n ou \r\n no Enter: \r\n conta como um so
+        if byte == b'\n' && self.ultimo_foi_cr {
+            self.ultimo_foi_cr = false;
+            return;
+        }
+        self.ultimo_foi_cr = byte == b'\r';
+
+        if byte < 0x80 {
+            // um ASCII no meio de um UTF-8 descarta o caractere quebrado
+            self.pendentes = 0;
+        }
+        match byte {
+            b'\r' | b'\n' => self.enter(),
+            // backspace (8) ou delete (127), depende do terminal
+            8 | 127 => self.apagar_caractere(),
+            32..=126 => self.acrescentar(&[byte]),
+            0x80.. => self.juntar_utf8(byte),
+            _ => {}
+        }
+    }
+
+    /// Junta os bytes de um caractere UTF-8; quando ele fecha (e e valido e
+    /// imprimivel), vai para a linha.
+    fn juntar_utf8(&mut self, byte: u8) {
+        if byte >= 0xC0 {
+            self.pendente[0] = byte;
+            self.pendentes = 1;
+            return;
+        }
+        // continuacao sem comeco: lixo
+        if self.pendentes == 0 || self.pendentes >= 4 {
+            self.pendentes = 0;
+            return;
+        }
+        self.pendente[self.pendentes] = byte;
+        self.pendentes += 1;
+        let precisa = match self.pendente[0] {
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            _ => 4,
+        };
+        if self.pendentes < precisa {
+            return;
+        }
+        let bytes = self.pendente;
+        let tamanho = core::mem::take(&mut self.pendentes);
+        let valido = core::str::from_utf8(&bytes[..tamanho]).is_ok_and(|t| !t.chars().any(char::is_control));
+        if valido {
+            self.acrescentar(&bytes[..tamanho]);
+        }
+    }
+
+    /// Poe um caractere inteiro (seus bytes UTF-8) na linha e faz o eco.
+    fn acrescentar(&mut self, bytes: &[u8]) {
+        let fim = self.tamanho + bytes.len();
+        if fim > TAM_LINHA {
+            return;
+        }
+        self.linha[self.tamanho..fim].copy_from_slice(bytes);
+        self.tamanho = fim;
+        for &byte in bytes {
+            self.console.enviar(byte);
+        }
+    }
+
+    /// Tira o ultimo caractere (todos os bytes dele) e apaga uma celula.
+    fn apagar_caractere(&mut self) {
+        if self.tamanho == 0 {
+            return;
+        }
+        self.tamanho -= 1;
+        // volta pelos bytes de continuacao (10xxxxxx) ate o primeiro do caractere
+        while self.tamanho > 0 && self.linha[self.tamanho] & 0xC0 == 0x80 {
+            self.tamanho -= 1;
+        }
+        escreva!(self, "\x08 \x08");
+    }
+
+    fn enter(&mut self) {
+        diga!(self, "");
+        // copia: o comando pode usar o shell inteiro enquanto le a linha
+        let linha = self.linha;
+        let tamanho = core::mem::take(&mut self.tamanho);
+        let texto = core::str::from_utf8(&linha[..tamanho]).unwrap_or("");
+        self.executar(texto.trim());
+        escreva!(self, "{PROMPT}");
+    }
+
+    fn executar(&mut self, linha: &str) {
+        let (comando, argumentos) = match linha.split_once(' ') {
+            Some((comando, resto)) => (comando, resto.trim_start()),
+            None => (linha, ""),
+        };
+
+        match comando {
+            "" => {}
+            "help" | "ajuda" => self.ajuda(),
+            "echo" => diga!(self, "{argumentos}"),
+            "info" => self.info(),
+            "uptime" => self.uptime(),
+            "mem" => self.memoria(),
+            "mmu" => self.mmu(),
+            "traduzir" => self.traduzir(argumentos),
+            "heap" => self.testar_heap(),
+            "irq" => self.irq(),
+            "esperar" => self.esperar(argumentos),
+            "video" => self.video(),
+            "som" => self.som(),
+            "clear" | "limpar" => self.console.limpar(),
+            "erro" => self.erro(argumentos),
+            "reboot" | "reiniciar" => {
+                diga!(self, "Reiniciando…");
+                psci::chamar(self.psci, psci::REINICIAR);
+                diga!(self, "O firmware não reiniciou.");
+            }
+            "desligar" | "sair" => {
+                diga!(self, "Desligando…");
+                psci::chamar(self.psci, psci::DESLIGAR);
+                diga!(self, "O firmware não desligou.");
+            }
+            "halt" | "parar" => {
+                diga!(self, "MXOS parado. Pode desligar a energia.");
+                cpu::parar();
+            }
+            _ => self.de_modulo(comando, argumentos),
+        }
+    }
+
+    /// Disco, rede e navegador (so no QEMU) tem os proprios comandos: cada
+    /// um diz se atendeu. So depois disso o comando e dado como desconhecido.
+    fn de_modulo(&mut self, comando: &str, argumentos: &str) {
+        if !comando_de_modulo(&mut self.console, comando, argumentos) {
+            diga!(self, "comando não encontrado: {comando}  (use \"help\")");
+        }
+    }
+
+    fn ajuda(&mut self) {
+        diga!(self, "Comandos:");
+        diga!(self, "  help          mostra esta lista");
+        diga!(self, "  echo T        imprime o texto T");
+        diga!(self, "  info          dados do hardware e do kernel");
+        diga!(self, "  uptime        tempo desde que ligou");
+        diga!(self, "  mem           mapa de memória do kernel e uso do heap");
+        diga!(self, "  mmu           estado da MMU e das tabelas de páginas");
+        diga!(self, "  traduzir E    mostra como a MMU traduz o endereço E (hex)");
+        diga!(self, "  heap          testa Vec, String e Box no alocador");
+        diga!(self, "  irq           contadores de interrupções e tempo de CPU ociosa");
+        diga!(self, "  esperar MS    dorme MS milissegundos no WFI (acorda pelo timer)");
+        diga!(self, "  video         liga o vídeo (ramfb no QEMU) e mostra o estado");
+        diga!(self, "  som           toca uma melodia (virtio-sound, só no QEMU)");
+        self.ajuda_modulos();
+        diga!(self, "  clear         limpa a tela");
+        diga!(self, "  erro [tipo]   dispara uma exceção: brk, pilha, codigo, nulo");
+        diga!(self, "  reboot        reinicia (PSCI)");
+        diga!(self, "  desligar      desliga (PSCI)");
+        diga!(self, "  halt          congela a CPU");
+    }
+
+    #[cfg(not(feature = "mxq"))]
+    fn ajuda_modulos(&mut self) {
+        diga!(self, "  ls [C]        lista a pasta C do disco (sem C: a raiz)");
+        diga!(self, "  cat A         mostra o arquivo A");
+        diga!(self, "  escrever A T  grava o texto T no arquivo A (cria ou troca)");
+        diga!(self, "  mkdir P       cria a pasta P");
+        diga!(self, "  rm C          apaga um arquivo ou uma pasta vazia");
+        diga!(self, "  mv DE PARA    renomeia ou move (caminho com espaço vai entre aspas)");
+        diga!(self, "  df            espaço usado e livre no disco");
+        diga!(self, "  discos        lista os discos (virtio-blk, FAT32)");
+        diga!(self, "  ip            configuração da rede (virtio-net, DHCP)");
+        diga!(self, "  ping H        mede o tempo de ida e volta até o host H");
+        diga!(self, "  dns N         resolve o nome N para um IP");
+        diga!(self, "  http U        baixa a URL U (só http://) e mostra o começo");
+        diga!(self, "  navegar U     abre a página U em modo texto (http:// ou disco:/)");
+        diga!(self, "  drivers       dispositivos achados e o driver de cada um");
+        diga!(self, "  tarefas       janelas abertas, com o tempo de CPU e a memória de cada uma");
+    }
+
+    #[cfg(feature = "mxq")]
+    fn ajuda_modulos(&mut self) {}
+
+    fn info(&mut self) {
+        let midr = cpu::midr();
+        let freq = cpu::frequencia_timer();
+        let k = mapa::kernel();
+        let psci = psci::chamar(self.psci, psci::VERSAO);
+
+        diga!(self, "MXOS {VERSAO}");
+        diga!(self, "  plataforma   : {}", plataforma::NOME);
+        diga!(self, "  cpu          : {} (MIDR 0x{midr:08x})", cpu::nome_cpu(midr));
+        diga!(self, "  privilégio   : entregue em EL{}, rodando em EL{}", self.el_boot, cpu::el_atual());
+        diga!(self, "  timer        : {}.{} MHz", freq / 1_000_000, freq / 100_000 % 10);
+        diga!(self, "  interrupções : GICv2, {} linhas, timer a {} Hz", gic::linhas(), timer::HZ);
+        diga!(self, "  serial       : {}", uart::NOME);
+        diga!(self, "  kernel       : 0x{:08x} - 0x{:08x} ({} com as pilhas)", k.inicio, k.fim, Bytes(k.fim - k.inicio));
+        diga!(self, "  psci         : v{}.{} via {}", psci >> 16 & 0xFFFF, psci & 0xFFFF, self.psci.nome());
+        match self.console.video() {
+            Ok(v) => diga!(self, "  vídeo        : {}x{}, {}", v.largura, v.altura, v.nome),
+            Err(motivo) => diga!(self, "  vídeo        : desligado ({motivo})"),
+        }
+    }
+
+    fn video(&mut self) {
+        let ligado = self.console.ligar_video();
+        anotar_video(&self.console);
+        match ligado {
+            Ok(v) => {
+                diga!(self, "vídeo ligado: {}x{}, {}", v.largura, v.altura, v.nome);
+                diga!(self, "  framebuffer : 0x{:08x} ({} no heap)", v.base, Bytes(v.largura * v.altura * 4));
+                diga!(self, "  console     : texto 8x16 (JetBrains Mono), tudo que sai na serial sai na tela");
+            }
+            Err(motivo) => diga!(self, "vídeo desligado: {motivo}"),
+        }
+    }
+
+    #[cfg(not(feature = "mxq"))]
+    fn som(&mut self) {
+        if let Err(e) = crate::som::tocar_melodia(&mut self.console) {
+            diga!(self, "som: {}", e.descricao());
+        }
+    }
+
+    #[cfg(feature = "mxq")]
+    fn som(&mut self) {
+        diga!(self, "som: na TV box o áudio sai pelo HDMI, e esse driver ainda não existe");
+    }
+
+    fn uptime(&mut self) {
+        let freq = cpu::frequencia_timer();
+        let ticks = cpu::contador();
+        let segundos = ticks / freq;
+        let milissegundos = ticks % freq * 1000 / freq;
+        diga!(
+            self,
+            "ligado há {}h {:02}m {:02}.{:03}s",
+            segundos / 3600,
+            segundos / 60 % 60,
+            segundos % 60,
+            milissegundos
+        );
+    }
+
+    fn irq(&mut self) {
+        let c = irq::contadores();
+        // em milesimos, para mostrar uma casa decimal sem ponto flutuante
+        let ocioso = if c.desde_inicio == 0 { 0 } else { c.ocioso * 1000 / c.desde_inicio };
+        diga!(self, "GICv2 com {} linhas, distribuidor em 0x{:08x}", gic::linhas(), plataforma::GIC_DISTRIBUIDOR);
+        diga!(self, "  INTID  origem         vezes");
+        diga!(self, "  {:>5}  timer     {:>10}", plataforma::IRQ_TIMER, c.timer);
+        diga!(self, "  {:>5}  serial    {:>10}  ({} bytes recebidos)", plataforma::IRQ_SERIAL, c.serial, c.bytes_serial);
+        diga!(self, "      -  outras    {:>10}", c.outras);
+        diga!(self, "      -  espúrias  {:>10}", c.espurias);
+        diga!(
+            self,
+            "CPU ociosa (dormindo no WFI): {}.{}% do tempo desde que as interrupções ligaram",
+            ocioso / 10,
+            ocioso % 10
+        );
+    }
+
+    fn esperar(&mut self, argumento: &str) {
+        // sem Ctrl+C ainda: um limite evita travar o shell sem querer
+        let Some(ms) = argumento.parse::<u64>().ok().filter(|&ms| ms <= ESPERA_MAXIMA_MS) else {
+            diga!(self, "uso: esperar <ms>   (0 a {ESPERA_MAXIMA_MS})  ex.: esperar 1000");
+            return;
+        };
+        let freq = cpu::frequencia_timer();
+        let (contador, tiques) = (cpu::contador(), timer::tiques());
+        timer::esperar_ms(ms);
+        let micros = (cpu::contador() - contador) * 1_000_000 / freq;
+        let passaram = timer::tiques() - tiques;
+        diga!(self, "pediu {ms} ms: passaram {}.{:03} ms de verdade e {passaram} tiques do timer", micros / 1000, micros % 1000);
+    }
+
+    fn regiao(&mut self, inicio: usize, fim: usize, nome: &str, permissao: &str) {
+        diga!(self, "  0x{inicio:08x} - 0x{fim:08x}  {nome:<17} {:>8}  {permissao}", Bytes(fim - inicio));
+    }
+
+    fn memoria(&mut self) {
+        let k = mapa::kernel();
+        let h = heap::estatisticas();
+        diga!(self, "Kernel:");
+        self.regiao(k.inicio, k.codigo_fim, "código", "lê e executa");
+        self.regiao(k.codigo_fim, k.constantes_fim, "constantes", "só lê");
+        self.regiao(k.constantes_fim, k.guarda, "dados e BSS", "lê e escreve");
+        self.regiao(k.guarda, k.pilha_inicio, "página de guarda", "sem mapeamento");
+        self.regiao(k.pilha_inicio, k.pilha_fim, "pilha", "lê e escreve");
+        self.regiao(k.pilha_fim, k.pilha_excecao_fim, "pilha de exceção", "lê e escreve");
+        diga!(self, "Heap:");
+        self.regiao(h.inicio, h.inicio + h.total, "heap", "lê e escreve");
+        diga!(
+            self,
+            "  em uso: {} em {} alocações | livre: {} em {} bloco(s), maior de {}",
+            Bytes(h.total - h.livre),
+            h.alocacoes,
+            Bytes(h.livre),
+            h.blocos_livres,
+            Bytes(h.maior_bloco)
+        );
+    }
+
+    fn mmu(&mut self) {
+        let e = mmu::estado();
+        let sim = |ligado: bool| if ligado { "ligado" } else { "desligado" };
+        let mmu = if e.mmu { "ligada" } else { "desligada" };
+        diga!(self, "MMU {mmu} | cache de dados {} | cache de instruções {}", sim(e.cache_dados), sim(e.cache_instrucoes));
+        diga!(self, "  endereços virtuais : {} bits, páginas de 4 KB, 3 níveis de tabela", e.bits_virtuais);
+        diga!(self, "  endereços físicos  : {} bits", e.bits_fisicos);
+        diga!(self, "  tabela raiz        : 0x{:08x} (TTBR0_EL1)", e.raiz);
+        diga!(self, "  tabelas usadas     : {} de {} (4 KB cada)", e.tabelas, mmu::MAX_TABELAS);
+        diga!(self, "  mapa da {}:", plataforma::NOME);
+        for &(inicio, fim) in plataforma::DISPOSITIVOS {
+            diga!(self, "    0x{inicio:09x} - 0x{fim:09x}  periféricos (sem cache, nunca executa)");
+        }
+        diga!(self, "    0x{:09x} - 0x{:09x}  RAM (com cache)", plataforma::RAM_INICIO, plataforma::RAM_FIM);
+        diga!(self, "  o resto (inclusive o endereço 0) fica sem mapeamento");
+    }
+
+    fn traduzir(&mut self, argumento: &str) {
+        let numero = argumento.trim_start_matches("0x").trim_start_matches("0X");
+        let Ok(virtual_) = u64::from_str_radix(numero, 16) else {
+            diga!(self, "uso: traduzir <endereço em hex>   ex.: traduzir 0x09000000");
+            return;
+        };
+        match mmu::traduzir(virtual_) {
+            None => diga!(self, "0x{virtual_:x} → sem mapeamento (acessar gera exceção)"),
+            Some(t) => {
+                let tipo = match t.tipo_memoria {
+                    mmu::MAIR_NORMAL => "RAM com cache",
+                    mmu::MAIR_DISPOSITIVO => "periférico",
+                    _ => "outro",
+                };
+                let escrita = if t.escrita { "lê e escreve" } else { "só lê" };
+                diga!(self, "0x{virtual_:x} → físico 0x{:x} | {tipo} | {escrita}", t.fisico);
+            }
+        }
+    }
+
+    fn testar_heap(&mut self) {
+        let antes = heap::estatisticas();
+        {
+            let mut numeros: Vec<u64> = (1..=10_000).collect();
+            let soma: u64 = numeros.iter().sum();
+            numeros.retain(|n| n % 7 == 0);
+            let mut nomes: Vec<String> = Vec::new();
+            for i in 1..=5 {
+                nomes.push(format!("processo-{i}"));
+            }
+            let buffer = Box::new([0xABu8; 4096]);
+
+            diga!(self, "Vec<u64>    : soma de 1 a 10000 = {soma}; {} múltiplos de 7", numeros.len());
+            diga!(self, "Vec<String> : {}", nomes.join(", "));
+            diga!(self, "Box<[u8]>   : 4 KB em 0x{:x}, primeiro byte 0x{:X}", buffer.as_ptr() as usize, buffer[0]);
+            let durante = heap::estatisticas();
+            diga!(self, "durante     : {} em uso em {} alocações", Bytes(durante.total - durante.livre), durante.alocacoes);
+        }
+        let depois = heap::estatisticas();
+        let devolvido = depois.livre == antes.livre && depois.blocos_livres == antes.blocos_livres;
+        diga!(
+            self,
+            "depois      : {} em uso, {} bloco(s) livre(s) → {}",
+            Bytes(depois.total - depois.livre),
+            depois.blocos_livres,
+            if devolvido { "tudo devolvido e juntado" } else { "VAZAMENTO DE MEMÓRIA" }
+        );
+    }
+
+    fn erro(&mut self, tipo: &str) {
+        match tipo {
+            "" | "brk" => {
+                diga!(self, "Disparando um ponto de parada (brk)…");
+                cpu::ponto_de_parada();
+            }
+            "pilha" => {
+                diga!(self, "Chamando uma função recursiva até estourar a pilha…");
+                recursao(0);
+            }
+            "codigo" | "código" => {
+                diga!(self, "Tentando escrever por cima do código do kernel…");
+                let codigo = cpu::ponto_de_parada as *const () as *mut u32;
+                unsafe { ptr::write_volatile(black_box(codigo), 0) };
+            }
+            "nulo" => {
+                diga!(self, "Lendo o endereço 0 (ponteiro nulo)…");
+                let nulo = black_box(0usize) as *const u64;
+                let valor = unsafe { ptr::read_volatile(nulo) };
+                diga!(self, "leu {valor}?!");
+            }
+            _ => diga!(self, "tipos: brk, pilha, codigo, nulo"),
+        }
+    }
+}
+
+/// O que roda cada vez que a CPU acorda esperando tecla no modo serial.
+#[cfg(not(feature = "mxq"))]
+fn processar_fundo() {
+    crate::rede::processar();
+}
+
+#[cfg(feature = "mxq")]
+fn processar_fundo() {}
+
+#[cfg(not(feature = "mxq"))]
+fn comando_de_modulo(saida: &mut Terminal, nome: &str, argumentos: &str) -> bool {
+    crate::armazenamento::comando(nome, argumentos, &mut *saida)
+        || crate::rede::comando(nome, argumentos, &mut *saida)
+        || crate::navegador::comando(nome, argumentos, &mut *saida)
+        || crate::drivers::comando(nome, argumentos, &mut *saida)
+}
+
+#[cfg(feature = "mxq")]
+fn comando_de_modulo(_saida: &mut Terminal, _nome: &str, _argumentos: &str) -> bool {
+    false
+}
+
+/// O painel de drivers (so no QEMU) mostra o video que o terminal ligou.
+#[cfg(not(feature = "mxq"))]
+fn anotar_video(terminal: &Terminal) {
+    crate::drivers::definir_video(terminal.video().ok());
+}
+
+#[cfg(feature = "mxq")]
+fn anotar_video(_terminal: &Terminal) {}
+
+/// Cada chamada ocupa ~1 KB de pilha; com 64 KB, logo bate na pagina de guarda.
+#[inline(never)]
+fn recursao(nivel: u64) -> u64 {
+    let espaco = black_box([nivel; 128]);
+    if nivel == u64::MAX {
+        return 0;
+    }
+    recursao(nivel + 1) + espaco[7]
+}

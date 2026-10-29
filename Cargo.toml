@@ -1,0 +1,23 @@
+[package]
+name = "mxos"
+version = "0.8.0"
+edition = "2024"
+description = "MXOS: kernel ARM64 escrito do zero em Rust para a TV box MXQ PRO 4K"
+
+[[bin]]
+name = "mxos"
+test = false
+bench = false
+
+[features]
+# Compila para a TV box (Amlogic S905W) em vez do QEMU virt.
+mxq = []
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1

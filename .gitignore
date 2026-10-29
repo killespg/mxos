@@ -1,0 +1,4 @@
+target/
+/saida
+__pycache__/
+*.ppm

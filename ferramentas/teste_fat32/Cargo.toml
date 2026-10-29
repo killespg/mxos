@@ -1,0 +1,13 @@
+# Testes do src/armazenamento/fat32.rs no PC (std), sobre imagens criadas
+# pelo ferramentas/criar_disco.py e conferidas pelo modo --verificar dele.
+#
+#   cd ferramentas/teste_fat32
+#   cargo test --release
+[package]
+name = "teste_fat32"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# pacote independente: nao faz parte do kernel
+[workspace]
