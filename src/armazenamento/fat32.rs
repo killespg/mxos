@@ -722,6 +722,7 @@ impl Fat32 {
     }
 
     /// Devolve o disco (para resetar o dispositivo, por exemplo).
+    #[allow(dead_code)]
     pub fn desmontar(mut self) -> Box<dyn Disco> {
         let _ = self.concluir();
         self.disco

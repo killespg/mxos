@@ -569,6 +569,13 @@ fn ler(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize) -> Fi
             nova_posicao = fim;
             dados[inicio..fim].to_vec()
         }
+        Tipo::Bloco(nome, setores) => match arquivos::ler_bloco(nome, *setores, posicao, tamanho) {
+            Ok(v) => {
+                nova_posicao = posicao + v.len();
+                v
+            }
+            Err(e) => return Fim::Valor(-e),
+        },
     };
     d.posicao = nova_posicao;
     drop(d);
@@ -631,6 +638,15 @@ fn escrever_dados(t: &mut Tabela, i: usize, fd: u64, dados: &[u8]) -> Fim {
             tb.buffer.extend(&dados[..n]);
             return Fim::Valor(n as i64);
         }
+        Tipo::Bloco(nome, setores) => {
+            return match arquivos::escrever_bloco(nome, *setores, posicao, dados) {
+                Ok(n) => {
+                    d.posicao = posicao + n;
+                    Fim::Valor(n as i64)
+                }
+                Err(e) => Fim::Valor(-e),
+            };
+        }
         Tipo::Disco(a) => {
             let conteudo = match a.dados_mut() {
                 Ok(c) => c,
@@ -676,8 +692,11 @@ fn vetor(t: &mut Tabela, i: usize, fd: u64, iov: usize, quantos: usize, escrita:
 fn pread(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize, posicao: usize) -> R {
     let aberto = t.processos[i].linux.fd(fd)?;
     let d = aberto.borrow();
-    let Tipo::Disco(a) = &d.tipo else { return Err(ESPIPE) };
-    let v = a.ler(posicao, tamanho.min(1 << 20))?;
+    let v = match &d.tipo {
+        Tipo::Disco(a) => a.ler(posicao, tamanho.min(1 << 20))?,
+        Tipo::Bloco(nome, setores) => arquivos::ler_bloco(nome, *setores, posicao, tamanho.min(1 << 20))?,
+        _ => return Err(ESPIPE),
+    };
     drop(d);
     escrever_mem(t, i, endereco, &v)?;
     Ok(v.len() as i64)
@@ -687,6 +706,9 @@ fn pwrite(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize, po
     let dados = ler_mem(t, i, endereco, tamanho.min(1 << 20))?;
     let aberto = t.processos[i].linux.fd(fd)?;
     let mut d = aberto.borrow_mut();
+    if let Tipo::Bloco(nome, setores) = &d.tipo {
+        return arquivos::escrever_bloco(nome, *setores, posicao, &dados).map(|n| n as i64);
+    }
     let Tipo::Disco(a) = &mut d.tipo else { return Err(ESPIPE) };
     let conteudo = a.dados_mut()?;
     let fim = posicao + dados.len();
@@ -703,6 +725,7 @@ fn lseek(t: &mut Tabela, i: usize, fd: u64, deslocamento: i64, de_onde: u64) -> 
     let mut d = aberto.borrow_mut();
     let tamanho = match &d.tipo {
         Tipo::Disco(a) => a.tamanho() as i64,
+        Tipo::Bloco(_, setores) => *setores as i64 * 512,
         Tipo::Gerado(dados) => dados.len() as i64,
         Tipo::Pasta { itens, .. } => itens.len() as i64,
         Tipo::Nulo | Tipo::Zero => 0,
@@ -929,6 +952,14 @@ fn stat_do_aberto(d: &Descricao) -> [u8; 128] {
             s[16..20].copy_from_slice(&0o010600u32.to_le_bytes());
             s
         }
+        Tipo::Bloco(nome, _) => {
+            // dispositivo de bloco 254:n (virtio), tamanho pelo ioctl
+            let mut s = estrutura_stat(nome, false, 0, true);
+            s[16..20].copy_from_slice(&0o060660u32.to_le_bytes());
+            let n = nome.as_bytes().last().map_or(0, |c| c.wrapping_sub(b'a')) as u64;
+            s[32..40].copy_from_slice(&(254u64 << 8 | n << 4).to_le_bytes());
+            s
+        }
         _ => estrutura_stat("/dev/tty", false, 0, true),
     }
 }
@@ -982,6 +1013,19 @@ const TIOCGWINSZ: u64 = 0x5413;
 const FIONREAD: u64 = 0x541B;
 const FIONBIO: u64 = 0x5421;
 
+/// ioctl de disco cru: tamanhos (o mke2fs pergunta assim).
+fn ioctl_bloco(t: &mut Tabela, i: usize, setores: u64, pedido: u64, endereco: usize) -> R {
+    match pedido {
+        0x8008_1272 => escrever_mem(t, i, endereco, &(setores * 512).to_le_bytes())?, // BLKGETSIZE64
+        0x1260 => escrever_mem(t, i, endereco, &setores.to_le_bytes())?,           // BLKGETSIZE
+        0x1268 | 0x127B | 0x1278 => escrever_mem(t, i, endereco, &512u32.to_le_bytes())?, // tamanho do setor
+        0x1279 | 0x127A | 0x125E => escrever_mem(t, i, endereco, &0u32.to_le_bytes())?,
+        0x1261 | 0x125F => {} // BLKFLSBUF, BLKRRPART
+        _ => return Err(ENOTTY),
+    }
+    Ok(0)
+}
+
 fn ioctl(t: &mut Tabela, i: usize, fd: u64, pedido: u64, endereco: usize) -> Fim {
     let r = (|| -> R {
         let aberto = t.processos[i].linux.fd(fd)?;
@@ -991,6 +1035,9 @@ fn ioctl(t: &mut Tabela, i: usize, fd: u64, pedido: u64, endereco: usize) -> Fim
             let mut d = aberto.borrow_mut();
             d.flags = if liga { d.flags | O_NONBLOCK } else { d.flags & !O_NONBLOCK };
             return Ok(0);
+        }
+        if let Tipo::Bloco(_, setores) = aberto.borrow().tipo {
+            return ioctl_bloco(t, i, setores, pedido, endereco);
         }
         if !matches!(aberto.borrow().tipo, Tipo::Terminal) {
             return Err(ENOTTY);

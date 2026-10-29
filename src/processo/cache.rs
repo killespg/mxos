@@ -33,7 +33,7 @@ const ADIANTAR: usize = 16;
 
 pub struct Arquivo {
     pub tamanho: usize,
-    cadeia: Vec<u32>,
+    abertura: armazenamento::Abertura,
     quadros: RefCell<Vec<Option<Rc<Box<Quadro>>>>>,
     usado: RefCell<u64>,
 }
@@ -58,7 +58,7 @@ impl Arquivo {
             }
             let mut dados = alloc::vec![0u8; n * PAGINA];
             let valido = (self.tamanho - k * PAGINA).min(n * PAGINA);
-            armazenamento::ler_trecho(&self.cadeia, k * PAGINA, &mut dados[..valido]).map_err(errno)?;
+            armazenamento::ler_trecho(&self.abertura, k * PAGINA, &mut dados[..valido]).map_err(errno)?;
             for (j, pedaco) in dados.chunks_exact(PAGINA).enumerate() {
                 let quadro = memoria::quadro_novo();
                 // quadro novo: ninguem mais o tem
@@ -160,11 +160,11 @@ pub fn abrir(caminho: &str) -> Result<Rc<Arquivo>, i64> {
     if let Some(a) = cache().arquivos.get(&k) {
         return Ok(a.clone());
     }
-    let (tamanho, cadeia) = armazenamento::abrir_leitura(caminho).map_err(errno)?;
+    let (tamanho, abertura) = armazenamento::abrir_leitura(caminho).map_err(errno)?;
     let paginas = tamanho.div_ceil(PAGINA);
     let a = Rc::new(Arquivo {
         tamanho,
-        cadeia,
+        abertura,
         quadros: RefCell::new(alloc::vec![None; paginas]),
         usado: RefCell::new(proximo_uso()),
     });

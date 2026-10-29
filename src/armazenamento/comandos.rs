@@ -1,5 +1,5 @@
 //! Comandos do shell para o disco: ls, cat, escrever, mkdir, rm, mv, df,
-//! discos. Os caminhos comecam sempre na raiz ("paginas" = "/paginas").
+//! discos, montar e desmontar (ext4 em /mnt/<disco>). Os caminhos comecam sempre na raiz ("paginas" = "/paginas").
 
 use alloc::format;
 use alloc::string::String;
@@ -37,6 +37,10 @@ pub fn comando(nome: &str, args: &str, saida: &mut dyn Write) -> bool {
         "mv" => mv(args, saida),
         "df" => df(saida),
         "discos" => discos(saida),
+        "montar" => super::montar_disco(args).map(|_| {
+            let _ = writeln!(saida, "{args} montado em /mnt/{args} (só leitura)");
+        }),
+        "desmontar" => super::desmontar_disco(args),
         _ => return false,
     };
     if let Err(e) = resultado {

@@ -10,6 +10,7 @@
 //!   Tubo              pipe: um buffer com contagem de quem le e escreve
 //!   Soquete           socket de rede (soquetes.rs)
 //!   Evento, Epoll     eventfd e epoll (espera.rs)
+//!   Bloco             disco cru (/dev/vdb): le e escreve setores direto
 //!
 //! Um open cria uma Descricao (com a posicao); dup, fork e herancas so
 //! copiam o Rc, como no Linux (a posicao e dividida).
@@ -43,6 +44,7 @@ pub const EINVAL: i64 = 22;
 pub const EMFILE: i64 = 24;
 pub const ENOTTY: i64 = 25;
 pub const ENOSPC: i64 = 28;
+pub const EROFS: i64 = 30;
 pub const ESPIPE: i64 = 29;
 pub const EPIPE: i64 = 32;
 pub const ERANGE: i64 = 34;
@@ -62,6 +64,7 @@ pub fn errno(e: Erro) -> i64 {
         Erro::Cheio => ENOSPC,
         Erro::NomeInvalido => EINVAL,
         Erro::Disco | Erro::Corrompido(_) => EIO,
+        Erro::SoLeitura => EROFS,
     }
 }
 
@@ -148,6 +151,8 @@ pub enum Tipo {
     Gerado(Vec<u8>),
     Soquete(Soquete),
     Evento(Rc<RefCell<super::espera::Contador>>),
+    /// Disco cru: nome e tamanho em setores de 512 bytes.
+    Bloco(String, u64),
     Epoll(super::espera::Lista),
 }
 
@@ -253,8 +258,47 @@ pub fn dispositivo(caminho: &str) -> Option<Tipo> {
         "/dev/zero" => Tipo::Zero,
         "/dev/urandom" | "/dev/random" => Tipo::Aleatorio,
         "/dev/tty" | "/dev/console" | "/dev/tty0" | "/dev/ttyS0" => Tipo::Terminal,
-        _ => return None,
+        _ => {
+            let nome = caminho.strip_prefix("/dev/")?;
+            let (_, setores) = armazenamento::crus().into_iter().find(|(n, _)| n == nome)?;
+            Tipo::Bloco(String::from(nome), setores)
+        }
     })
+}
+
+/// Le `tamanho` bytes do disco cru a partir de `posicao`.
+pub fn ler_bloco(nome: &str, setores: u64, posicao: usize, tamanho: usize) -> Result<Vec<u8>, i64> {
+    let total = setores as usize * 512;
+    let inicio = posicao.min(total);
+    let fim = inicio.saturating_add(tamanho).min(total);
+    if inicio == fim {
+        return Ok(Vec::new());
+    }
+    let primeiro = inicio / 512;
+    let mut b = alloc::vec![0u8; (fim.div_ceil(512) - primeiro) * 512];
+    armazenamento::ler_cru(nome, primeiro as u64, &mut b).map_err(errno)?;
+    let de = inicio - primeiro * 512;
+    Ok(b[de..de + (fim - inicio)].to_vec())
+}
+
+/// Escreve no disco cru a partir de `posicao` (setores pela metade sao
+/// lidos antes, para nao estragar o resto deles).
+pub fn escrever_bloco(nome: &str, setores: u64, posicao: usize, dados: &[u8]) -> Result<usize, i64> {
+    let total = setores as usize * 512;
+    if posicao >= total {
+        return Err(ENOSPC);
+    }
+    let fim = (posicao + dados.len()).min(total);
+    let primeiro = posicao / 512;
+    let ultimo = fim.div_ceil(512);
+    let mut b = alloc::vec![0u8; (ultimo - primeiro) * 512];
+    if posicao % 512 != 0 || fim % 512 != 0 {
+        armazenamento::ler_cru(nome, primeiro as u64, &mut b).map_err(errno)?;
+    }
+    let de = posicao - primeiro * 512;
+    b[de..de + (fim - posicao)].copy_from_slice(&dados[..fim - posicao]);
+    armazenamento::escrever_cru(nome, primeiro as u64, &b).map_err(errno)?;
+    Ok(fim - posicao)
 }
 
 /// Pastas que existem mesmo sem estar no disco.
@@ -327,6 +371,9 @@ fn listar(caminho: &str) -> Result<Vec<ItemDePasta>, i64> {
     if caminho == "/dev" {
         for nome in ["null", "zero", "urandom", "random", "tty", "console"] {
             itens.push(ItemDePasta { nome: nome.into(), pasta: false });
+        }
+        for (nome, _) in armazenamento::crus() {
+            itens.push(ItemDePasta { nome, pasta: false });
         }
         return Ok(itens);
     }
