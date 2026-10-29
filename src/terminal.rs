@@ -25,15 +25,34 @@ pub struct Terminal {
     framebuffer: Option<Tela>,
     /// Por que o video nao ligou (mostrado pelo shell).
     motivo: &'static str,
+    /// false = so o console (shells extras do terminal com abas: a serial
+    /// fica com o shell principal).
+    com_serial: bool,
 }
 
 impl Terminal {
     pub const fn new() -> Self {
-        Terminal { serial: Uart::new(), tela: None, video: None, framebuffer: None, motivo: "ainda não foi ligado" }
+        Terminal { serial: Uart::new(), tela: None, video: None, framebuffer: None, motivo: "ainda não foi ligado", com_serial: true }
+    }
+
+    /// Terminal so de tela, com este console (um painel do terminal com abas).
+    #[cfg_attr(feature = "mxq", allow(dead_code))]
+    pub fn so_console(console: Console) -> Self {
+        Terminal {
+            serial: Uart::new(),
+            tela: Some(console),
+            video: None,
+            framebuffer: None,
+            motivo: "painel do terminal",
+            com_serial: false,
+        }
     }
 
     /// Byte da serial, se chegou algum. Nao dorme.
     pub fn tentar_receber(&mut self) -> Option<u8> {
+        if !self.com_serial {
+            return None;
+        }
         self.serial.tentar_receber()
     }
 
@@ -52,7 +71,9 @@ impl Terminal {
 
     /// Eco de uma tecla nos dois lugares.
     pub fn enviar(&mut self, byte: u8) {
-        self.serial.enviar(byte);
+        if self.com_serial {
+            self.serial.enviar(byte);
+        }
         if let Some(console) = &mut self.tela {
             console.escrever_byte(byte);
         }
@@ -92,7 +113,9 @@ impl Terminal {
 
 impl fmt::Write for Terminal {
     fn write_str(&mut self, texto: &str) -> fmt::Result {
-        self.serial.write_str(texto)?;
+        if self.com_serial {
+            self.serial.write_str(texto)?;
+        }
         if let Some(console) = &mut self.tela {
             console.write_str(texto)?;
         }

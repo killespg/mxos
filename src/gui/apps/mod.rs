@@ -23,6 +23,7 @@ pub mod drivers;
 pub mod editor;
 pub mod janela_x;
 pub mod linux;
+pub mod multiterminal;
 pub mod navegador;
 pub mod pintura;
 pub mod sobre;
@@ -44,6 +45,7 @@ pub fn registrar_apps_basicos(g: &mut Gerenciador) {
         g.registrar_app("NetSurf", Icone::Navegador, linux::criar_netsurf);
     }
     g.registrar_app("Editor de texto", Icone::Texto, editor::criar);
+    g.registrar_app(multiterminal::TITULO, Icone::Terminal, multiterminal::criar);
     g.registrar_app("Tarefas", Icone::Tarefas, tarefas::criar);
     g.registrar_app("Drivers", Icone::Chip, drivers::criar);
     g.registrar_app("Configurações", Icone::Engrenagem, configuracoes::criar);

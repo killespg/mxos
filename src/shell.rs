@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use core::fmt::{self, Write};
 use core::hint::black_box;
 use core::ptr;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::psci::{self, Via};
 use crate::terminal::Terminal;
@@ -57,7 +58,25 @@ pub struct Shell {
     ultimo_foi_cr: bool,
     /// Processo em primeiro plano: o prompt so volta quando ele termina.
     esperando: Option<u32>,
+    /// 1 = o shell principal (serial); os paineis do terminal com abas
+    /// ganham 2, 3...
+    id: u32,
 }
+
+impl Drop for Shell {
+    /// Painel fechado com um programa rodando: o tty fica livre.
+    fn drop(&mut self) {
+        let _ = DONO.compare_exchange(self.id, 0, Ordering::Relaxed, Ordering::Relaxed);
+    }
+}
+
+/// Proximo id de shell.
+static PROXIMO_ID: AtomicU32 = AtomicU32::new(1);
+/// O shell com um programa em primeiro plano (0 = nenhum): so ele le a
+/// saida e manda teclas para os processos (o tty e um so).
+static DONO: AtomicU32 = AtomicU32::new(0);
+/// Nivel de excecao do boot (para os shells extras escolherem o PSCI).
+static EL_BOOT: AtomicU32 = AtomicU32::new(1);
 
 impl Shell {
     pub fn nova(terminal: Terminal, el_boot: u64) -> Shell {
@@ -67,6 +86,19 @@ impl Shell {
         // as configuracoes reiniciam e desligam sem passar pelo shell
         psci::definir_via(psci);
         anotar_video(&terminal);
+        EL_BOOT.store(el_boot as u32, Ordering::Relaxed);
+        Shell::montar(terminal, el_boot, psci)
+    }
+
+    /// Shell extra so de tela (um painel do terminal com abas).
+    #[cfg_attr(feature = "mxq", allow(dead_code))]
+    pub fn painel(console: crate::video::tela::Console) -> Shell {
+        let el_boot = EL_BOOT.load(Ordering::Relaxed) as u64;
+        let psci = if cfg!(feature = "mxq") || el_boot >= 2 { Via::Smc } else { Via::Hvc };
+        Shell::montar(Terminal::so_console(console), el_boot, psci)
+    }
+
+    fn montar(terminal: Terminal, el_boot: u64, psci: Via) -> Shell {
         Shell {
             console: terminal,
             el_boot,
@@ -77,7 +109,20 @@ impl Shell {
             pendentes: 0,
             ultimo_foi_cr: false,
             esperando: None,
+            id: PROXIMO_ID.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    /// Outro shell esta com um programa em primeiro plano?
+    fn outro_e_dono(&self) -> bool {
+        let dono = DONO.load(Ordering::Relaxed);
+        dono != 0 && dono != self.id
+    }
+
+    /// Comecou um programa em primeiro plano: a saida e as teclas sao deste shell.
+    fn tomar_tty(&mut self, pid: u32) {
+        self.esperando = Some(pid);
+        DONO.store(self.id, Ordering::Relaxed);
     }
 
     #[cfg_attr(feature = "mxq", allow(dead_code))]
@@ -132,6 +177,11 @@ impl Shell {
     /// alguma coisa na tela.
     pub fn atender_processos(&mut self) -> bool {
         processos::rodar();
+        // sem programa em primeiro plano, a saida (de quem roda no fundo) e do principal
+        let dono = DONO.load(Ordering::Relaxed);
+        if (dono == 0 && self.id != 1) || (dono != 0 && dono != self.id) {
+            return false;
+        }
         let saida = processos::tirar_saida();
         let mut mudou = !saida.is_empty();
         if mudou {
@@ -152,6 +202,7 @@ impl Shell {
         if let Some(pid) = self.esperando {
             if let Some(codigo) = processos::terminou(pid) {
                 self.esperando = None;
+                DONO.store(0, Ordering::Relaxed);
                 if codigo != 0 {
                     diga!(self, "[processo {pid} saiu com o código {codigo}]");
                 }
@@ -160,6 +211,13 @@ impl Shell {
             }
         }
         mudou
+    }
+
+    /// Abertura de um painel do terminal com abas.
+    #[cfg_attr(feature = "mxq", allow(dead_code))]
+    pub fn banner_curto(&mut self) {
+        diga!(self, "MXOS {VERSAO} — shell {} (\"ajuda\" lista os comandos)", self.id);
+        escreva!(self, "{PROMPT}");
     }
 
     pub fn banner(&mut self) {
@@ -599,9 +657,13 @@ impl Shell {
             Some(resto) => (resto.trim(), true),
             None => (argumentos.trim(), false),
         };
+        if !fundo && self.outro_e_dono() {
+            diga!(self, "processo: outro painel já está com um programa em primeiro plano");
+            return;
+        }
         match processos::criar_teste(modo, !fundo) {
             Ok(pid) if fundo => diga!(self, "[{pid}] rodando no fundo"),
-            Ok(pid) => self.esperando = Some(pid),
+            Ok(pid) => self.tomar_tty(pid),
             Err(motivo) => diga!(self, "processo: {motivo}  (modos: ola, conta, falha, eco; & no fim roda no fundo)"),
         }
     }
@@ -619,9 +681,13 @@ impl Shell {
             return;
         };
         let resto: Vec<&str> = resto.iter().map(String::as_str).collect();
+        if !fundo && self.outro_e_dono() {
+            diga!(self, "executar: outro painel já está com um programa em primeiro plano");
+            return;
+        }
         match processos::executar(programa, &resto, !fundo) {
             Ok(pid) if fundo => diga!(self, "[{pid}] rodando no fundo"),
-            Ok(pid) => self.esperando = Some(pid),
+            Ok(pid) => self.tomar_tty(pid),
             Err(motivo) => diga!(self, "executar: {motivo}"),
         }
     }

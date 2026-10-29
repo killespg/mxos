@@ -902,7 +902,7 @@ Arquivo: {nome}
             // trechos coloridos; o que sobra entre eles sai na cor normal
             let estado = self.estados.get(i).copied().unwrap_or(realce::NORMAL);
             let mut ultimo = inicio;
-            let mut pintar = |a: usize, b: usize, cor: u32, s: &mut Superficie| {
+            let pintar = |a: usize, b: usize, cor: u32, s: &mut Superficie| {
                 let (a, b) = (a.max(inicio), b.min(fim));
                 if a < b {
                     let col = linha[inicio..a].chars().count() as i32;
