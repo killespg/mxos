@@ -19,6 +19,8 @@
 mod comandos;
 mod ext4;
 mod fat32;
+#[cfg(feature = "mxq")]
+mod meson_sd;
 mod virtio_blk;
 
 use alloc::boxed::Box;
@@ -177,6 +179,11 @@ pub fn iniciar() -> Result<InfoDisco, Erro> {
 /// Varre os slots do maior para o menor: assim "vda" e o primeiro
 /// -device da linha de comando do QEMU.
 fn procurar_discos(estado: &mut Estado) {
+    // TV box: o cartao SD e a eMMC (controlador da Amlogic)
+    #[cfg(feature = "mxq")]
+    for disco in meson_sd::achar() {
+        montar(estado, disco);
+    }
     let mut letra = b'a';
     for slot in (0..virtio_mmio::SLOTS_QEMU_VIRT).rev() {
         let base = virtio_mmio::BASE_QEMU_VIRT + slot * virtio_mmio::PASSO_QEMU_VIRT;
@@ -186,7 +193,7 @@ fn procurar_discos(estado: &mut Estado) {
         let nome = format!("vd{}", letra as char);
         letra = letra.saturating_add(1).min(b'z');
         match VirtioBlk::iniciar(dispositivo, nome.clone()) {
-            Ok(disco) => montar(estado, disco),
+            Ok(disco) => montar(estado, Box::new(disco)),
             Err(e) => {
                 estado.erro_montagem.get_or_insert(e);
                 estado.outros.push(InfoDisco {
@@ -205,8 +212,7 @@ fn procurar_discos(estado: &mut Estado) {
 
 /// Monta o disco: ext4 em /mnt/<nome>; FAT32 em "/" se ainda nao ha
 /// volume. O resto fica cru (/dev/<nome>).
-fn montar(estado: &mut Estado, disco: VirtioBlk) {
-    let disco: Box<dyn Disco> = Box::new(disco);
+fn montar(estado: &mut Estado, disco: Box<dyn Disco>) {
     let disco = match tentar_ext4(disco) {
         Ok(fs) => {
             let nome = String::from(fs.nome_disco());

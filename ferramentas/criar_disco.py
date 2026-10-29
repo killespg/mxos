@@ -1143,6 +1143,15 @@ class Verificador:
         sys.exit(f"ERRO: arquivo nao encontrado: {caminho}")
 
 
+def gravar_pasta(destino: pathlib.Path, arvore: dict) -> None:
+    destino.mkdir(parents=True, exist_ok=True)
+    for nome, valor in arvore.items():
+        if isinstance(valor, dict):
+            gravar_pasta(destino / nome, valor)
+        else:
+            (destino / nome).write_bytes(valor)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Cria ou confere o disco FAT32 do MXOS.")
     parser.add_argument("imagem", nargs="?", help="imagem a criar")
@@ -1151,6 +1160,7 @@ def main() -> int:
     parser.add_argument("--sem-mbr", action="store_true", help="FAT32 no disco inteiro (superfloppy)")
     parser.add_argument("--tamanho-mb", type=int, default=TAMANHO_PADRAO // (1024 * 1024))
     parser.add_argument("--raiz", metavar="PASTA", help="arvore extra (pacotes do Debian) por cima da padrao")
+    parser.add_argument("--pasta", metavar="PASTA", help="em vez da imagem, grava a arvore numa pasta (para copiar num cartao SD)")
     opcoes = parser.parse_args()
     # nomes com acento no console do Windows: o que nao couber vira "?"
     sys.stdout.reconfigure(errors="replace")
@@ -1163,6 +1173,13 @@ def main() -> int:
             sys.stdout.buffer.write(v.ler(opcoes.ler))
             return 0
         return v.verificar()
+    if opcoes.pasta:
+        arvore = conteudo_padrao()
+        if opcoes.raiz:
+            arvore = com_raiz(arvore, pathlib.Path(opcoes.raiz))
+        gravar_pasta(pathlib.Path(opcoes.pasta), arvore)
+        print(f"ok: {opcoes.pasta}")
+        return 0
     if not opcoes.imagem:
         parser.error("diga a imagem a criar ou use --verificar IMG")
     arvore = conteudo_padrao()
