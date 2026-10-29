@@ -58,6 +58,11 @@ impl Terminal {
         }
     }
 
+    /// (coluna, linha) do cursor no console da tela, se houver.
+    pub fn posicao(&self) -> Option<(usize, usize)> {
+        self.tela.as_ref().map(|c| c.posicao())
+    }
+
     pub fn limpar(&mut self) {
         let _ = fmt::Write::write_str(&mut self.serial, "\x1b[2J\x1b[H");
         if let Some(console) = &mut self.tela {

@@ -193,7 +193,8 @@ fn despachar(t: &mut Tabela, i: usize, numero: u64, a: [u64; 6]) -> Fim {
         67 => pread(t, i, a[0], a[1] as usize, a[2] as usize, a[3] as usize),
         68 => pwrite(t, i, a[0], a[1] as usize, a[2] as usize, a[3] as usize),
         73 => return ppoll(t, i, a[0] as usize, a[1] as usize, a[2] as usize),
-        78 => Err(EINVAL), // readlinkat: nao ha links simbolicos
+        78 => readlinkat(t, i, a[0] as i64, a[1] as usize, a[2] as usize, a[3] as usize),
+        71 => return sendfile(t, i, a[0], a[1], a[2] as usize, a[3] as usize),
         79 => newfstatat(t, i, a[0] as i64, a[1] as usize, a[2] as usize, a[3]),
         80 => fstat(t, i, a[0], a[1] as usize),
         81 => Ok(0),
@@ -313,6 +314,7 @@ fn openat(t: &mut Tabela, i: usize, dirfd: i64, endereco: usize, flags: u32) -> 
         "/dev/stdin" | "/dev/fd/0" => t.processos[i].linux.fd(0)?,
         "/dev/stdout" | "/dev/fd/1" => t.processos[i].linux.fd(1)?,
         "/dev/stderr" | "/dev/fd/2" => t.processos[i].linux.fd(2)?,
+        c if c == "/proc" || c.starts_with("/proc/") => super::proc::abrir(t, i, c)?,
         _ => arquivos::abrir(&caminho, flags)?,
     };
     t.processos[i].linux.novo_fd(aberto, flags & O_CLOEXEC != 0, 0).map(|fd| fd as i64)
@@ -445,11 +447,11 @@ fn ler(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize) -> Fi
             let n = tamanho.min(tb.buffer.len());
             tb.buffer.drain(..n).collect()
         }
-        Tipo::Disco(a) => {
-            let inicio = posicao.min(a.dados.len());
-            let fim = (inicio + tamanho).min(a.dados.len());
+        Tipo::Disco(ArquivoDisco { dados, .. }) | Tipo::Gerado(dados) => {
+            let inicio = posicao.min(dados.len());
+            let fim = (inicio + tamanho).min(dados.len());
             nova_posicao = fim;
-            a.dados[inicio..fim].to_vec()
+            dados[inicio..fim].to_vec()
         }
     };
     d.posicao = nova_posicao;
@@ -484,6 +486,7 @@ fn escrever_dados(t: &mut Tabela, i: usize, fd: u64, dados: &[u8]) -> Fim {
         Tipo::Terminal => t.escrever(dados),
         Tipo::Nulo | Tipo::Zero | Tipo::Aleatorio => {}
         Tipo::Pasta { .. } => return Fim::Valor(-EISDIR),
+        Tipo::Gerado(_) => return Fim::Valor(-EACCES),
         Tipo::Tubo(tubo, _) => {
             let mut tb = tubo.borrow_mut();
             if tb.leitores == 0 {
@@ -572,6 +575,7 @@ fn lseek(t: &mut Tabela, i: usize, fd: u64, deslocamento: i64, de_onde: u64) -> 
     let mut d = aberto.borrow_mut();
     let tamanho = match &d.tipo {
         Tipo::Disco(a) => a.dados.len() as i64,
+        Tipo::Gerado(dados) => dados.len() as i64,
         Tipo::Pasta { itens, .. } => itens.len() as i64,
         Tipo::Nulo | Tipo::Zero => 0,
         _ => return Err(ESPIPE),
@@ -653,7 +657,7 @@ fn getcwd(t: &mut Tabela, i: usize, endereco: usize, tamanho: usize) -> R {
 
 fn chdir(t: &mut Tabela, i: usize, endereco: usize) -> R {
     let caminho = caminho_em(t, i, AT_FDCWD, endereco)?;
-    match arquivos::info(&caminho)? {
+    match info(t, i, &caminho)? {
         (true, _) => {
             t.processos[i].linux.pasta = caminho;
             Ok(0)
@@ -704,7 +708,59 @@ fn renameat(t: &mut Tabela, i: usize, dirfd_de: i64, de: usize, dirfd_para: i64,
 
 fn faccessat(t: &mut Tabela, i: usize, dirfd: i64, endereco: usize) -> R {
     let caminho = caminho_em(t, i, dirfd, endereco)?;
-    arquivos::info(&caminho).map(|_| 0)
+    info(t, i, &caminho).map(|_| 0)
+}
+
+/// O que ha em `caminho`, com o /proc (que nao esta no disco).
+fn info(t: &Tabela, i: usize, caminho: &str) -> Result<(bool, u64), i64> {
+    if caminho == "/proc" || caminho.starts_with("/proc/") {
+        return super::proc::info(t, i, caminho);
+    }
+    arquivos::info(caminho)
+}
+
+/// readlinkat: so o /proc/self/exe (e /proc/PID/exe) e link.
+fn readlinkat(t: &mut Tabela, i: usize, dirfd: i64, endereco: usize, destino: usize, tamanho: usize) -> R {
+    let caminho = caminho_em(t, i, dirfd, endereco)?;
+    let alvo = super::proc::link(t, i, &caminho).ok_or(EINVAL)?;
+    let n = alvo.len().min(tamanho);
+    escrever_mem(t, i, destino, &alvo.as_bytes()[..n])?;
+    Ok(n as i64)
+}
+
+/// sendfile(saida, entrada, &posicao, quantos): copia de um arquivo.
+fn sendfile(t: &mut Tabela, i: usize, saida: u64, entrada: u64, posicao: usize, quantos: usize) -> Fim {
+    let aberto = match t.processos[i].linux.fd(entrada) {
+        Ok(a) => a,
+        Err(e) => return Fim::Valor(-e),
+    };
+    let mut d = aberto.borrow_mut();
+    let inicio = if posicao != 0 {
+        match ler_u64(t, i, posicao) {
+            Ok(p) => p as usize,
+            Err(e) => return Fim::Valor(-e),
+        }
+    } else {
+        d.posicao
+    };
+    let dados = match &d.tipo {
+        Tipo::Disco(ArquivoDisco { dados, .. }) | Tipo::Gerado(dados) => {
+            let ini = inicio.min(dados.len());
+            dados[ini..(ini + quantos.min(1 << 20)).min(dados.len())].to_vec()
+        }
+        _ => return Fim::Valor(-EINVAL),
+    };
+    if posicao == 0 {
+        d.posicao = inicio + dados.len();
+    }
+    drop(d);
+    if posicao != 0 {
+        let nova = (inicio + dados.len()) as u64;
+        if let Err(e) = escrever_mem(t, i, posicao, &nova.to_le_bytes()) {
+            return Fim::Valor(-e);
+        }
+    }
+    escrever_dados(t, i, saida, &dados)
 }
 
 /// struct stat do aarch64 (128 bytes).
@@ -734,6 +790,7 @@ fn estrutura_stat(caminho: &str, pasta: bool, tamanho: u64, dispositivo: bool) -
 fn stat_do_aberto(d: &Descricao) -> [u8; 128] {
     match &d.tipo {
         Tipo::Disco(a) => estrutura_stat(&a.caminho, false, a.dados.len() as u64, false),
+        Tipo::Gerado(dados) => estrutura_stat("/proc", false, dados.len() as u64, false),
         Tipo::Pasta { caminho, .. } => estrutura_stat(caminho, true, 0, false),
         Tipo::Tubo(..) => {
             let mut s = estrutura_stat("tubo", false, 0, false);
@@ -757,7 +814,7 @@ fn newfstatat(t: &mut Tabela, i: usize, dirfd: i64, endereco: usize, destino: us
         return fstat(t, i, dirfd as u64, destino);
     }
     let caminho = caminho_em(t, i, dirfd, endereco)?;
-    let (pasta, tamanho) = arquivos::info(&caminho)?;
+    let (pasta, tamanho) = info(t, i, &caminho)?;
     let s = estrutura_stat(&caminho, pasta, tamanho, arquivos::dispositivo(&caminho).is_some());
     escrever_mem(t, i, destino, &s)?;
     Ok(0)
@@ -1305,8 +1362,20 @@ fn execve(t: &mut Tabela, i: usize, caminho: usize, argv: usize, envp: usize) ->
 /// Carrega `caminho` no lugar do programa do processo `i` (execve).
 /// Scripts com "#!" rodam pelo interpretador.
 pub fn trocar_programa(t: &mut Tabela, i: usize, caminho: &str, mut argumentos: Vec<Vec<u8>>, ambiente: Vec<Vec<u8>>) -> Result<(), i64> {
-    let mut caminho = caminho.to_owned();
-    let mut dados = armazenamento::ler(&caminho).map_err(errno)?;
+    let mut caminho = match super::proc::link(t, i, caminho) {
+        Some(exe) => exe,
+        None => caminho.to_owned(),
+    };
+    let mut dados = match armazenamento::ler(&caminho) {
+        Ok(d) => d,
+        // "/bin/ls" sem arquivo: o BusyBox faz o papel (como os links do Linux)
+        Err(armazenamento::Erro::NaoAchado) if pasta_de_programas(&caminho) => {
+            let dados = armazenamento::ler("/bin/busybox").map_err(|_| ENOENT)?;
+            caminho = String::from("/bin/busybox");
+            dados
+        }
+        Err(e) => return Err(errno(e)),
+    };
     if dados.starts_with(b"#!") {
         let linha = dados[2..].split(|&b| b == b'\n').next().unwrap_or(&[]);
         let linha = String::from_utf8_lossy(linha).trim().to_owned();
@@ -1334,7 +1403,12 @@ pub fn trocar_programa(t: &mut Tabela, i: usize, caminho: &str, mut argumentos: 
     let p = &mut t.processos[i];
     p.espaco = espaco;
     p.contexto = Contexto::novo(programa.entrada, sp);
-    p.nome = caminho.rsplit('/').next().unwrap_or(&caminho).to_owned();
+    // o nome e o do argv[0] (o applet do BusyBox), como no ps do Linux
+    let primeiro = argumentos.first().map(|a| String::from_utf8_lossy(a).into_owned()).unwrap_or_default();
+    let nome = if primeiro.is_empty() { caminho.clone() } else { primeiro };
+    p.nome = nome.rsplit('/').next().unwrap_or(&nome).chars().take(15).collect();
+    p.exe = caminho.clone();
+    p.cmdline = argumentos.iter().flat_map(|a| a.iter().copied().chain([0])).collect();
     let l = &mut p.linux;
     l.brk_inicio = programa.fim.next_multiple_of(PAGINA);
     l.brk = l.brk_inicio;
@@ -1354,6 +1428,12 @@ pub fn trocar_programa(t: &mut Tabela, i: usize, caminho: &str, mut argumentos: 
         t.acordar_vfork(pai);
     }
     Ok(())
+}
+
+/// Pastas onde um programa que nao existe vira applet do BusyBox.
+fn pasta_de_programas(caminho: &str) -> bool {
+    let pasta = caminho.rsplit_once('/').map_or("", |(p, _)| p);
+    matches!(pasta, "/bin" | "/sbin" | "/usr/bin" | "/usr/sbin") && !caminho.ends_with("/busybox")
 }
 
 /// wait4(pid, &status, opcoes, rusage).

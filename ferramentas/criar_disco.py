@@ -518,6 +518,13 @@ def conteudo_padrao() -> dict:
     """Arvore do disco: dict = pasta, bytes = arquivo."""
     return {
         "bin": programas(),
+        # para os programas de Linux (ls -l, id, whoami e o prompt do sh)
+        "etc": {
+            "passwd": b"root:x:0:0:root:/:/bin/sh\n",
+            "group": b"root:x:0:\n",
+            "hostname": b"mxos\n",
+            "profile": "# lido pelo sh -l do BusyBox\nexport PS1='\\w # '\necho \"BusyBox no MXOS: help lista os comandos do shell, busybox --list os programas.\"\n".encode("utf-8"),
+        },
         "LEIAME.TXT": LEIAME.encode("utf-8"),
         "config": {},
         "paginas": {

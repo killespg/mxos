@@ -101,7 +101,7 @@ fn le_a_imagem_do_python() {
     let imagem = imagem_nova("leitura.img", &[]);
     let mut fs = montar(&imagem);
     assert_eq!(fs.rotulo(), "MXOS");
-    assert_eq!(nomes(&mut fs, "/"), ["LEIAME.TXT", "config", "paginas", "documentos"]);
+    assert_eq!(nomes(&mut fs, "/"), ["bin", "etc", "LEIAME.TXT", "config", "paginas", "documentos"]);
     assert_eq!(nomes(&mut fs, "/paginas"), ["index.html", "sobre.html", "guia.html", "tabelas.html", "teste.html", "css.html", "estilo.css"]);
     assert_eq!(nomes(&mut fs, "/documentos"), ["notas.txt", "Lista de compras.txt", "Anotações.txt"]);
     assert!(nomes(&mut fs, "/config").is_empty());
@@ -119,15 +119,24 @@ fn le_a_imagem_do_python() {
     assert_eq!(fs.listar("/LEIAME.TXT").err(), Some(Erro::NaoEPasta));
     assert_eq!(fs.ler("/nada.txt"), Err(Erro::NaoAchado));
     assert_eq!(fs.ler("/nada/x.txt"), Err(Erro::NaoAchado));
-    let livre_python = 126_945u64 * 512;
-    assert_eq!(fs.bytes_livres(), livre_python);
+    // o espaco livre tem de bater com o que o verificador em Python conta
+    // ("... clusters de 512 bytes, N livres (...)")
+    let (_, saida) = python(&["--verificar", temporario("leitura.img").to_str().unwrap()]);
+    let texto = String::from_utf8_lossy(&saida);
+    let livres: u64 = texto
+        .split(" livres")
+        .next()
+        .and_then(|antes| antes.rsplit(' ').next())
+        .and_then(|n| n.parse().ok())
+        .expect("o verificador não disse quantos clusters estão livres");
+    assert_eq!(fs.bytes_livres(), livres * 512);
 }
 
 #[test]
 fn superfloppy() {
     let imagem = imagem_nova("superfloppy.img", &["--sem-mbr"]);
     let mut fs = montar(&imagem);
-    assert_eq!(nomes(&mut fs, "/"), ["LEIAME.TXT", "config", "paginas", "documentos"]);
+    assert_eq!(nomes(&mut fs, "/"), ["bin", "etc", "LEIAME.TXT", "config", "paginas", "documentos"]);
     fs.escrever("/config/tema.cfg", b"tema=Azul\n").unwrap();
     drop(fs);
     verificar(&imagem, "superfloppy.img");
@@ -327,7 +336,7 @@ fn operacoes_aleatorias() {
         }
     }
     let lista = verificar(&imagem, "aleatorio.img");
-    let originais = 11; // arquivos que ja vinham na imagem
+    let originais = 17; // com /bin (ola, busybox) e /etc // arquivos que ja vinham na imagem
     assert_eq!(lista.iter().filter(|l| l.starts_with("ARQ ")).count(), modelo.len() + originais);
 }
 

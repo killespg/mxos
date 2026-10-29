@@ -12,6 +12,10 @@ use alloc::boxed::Box;
 use core::cell::UnsafeCell;
 
 use crate::gui::grafico::Superficie;
+use crate::entrada::teclado::{
+    self, KEY_DELETE, KEY_DOWN, KEY_END, KEY_HOME, KEY_LEFT, KEY_LEFTCTRL, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT,
+    KEY_RIGHTCTRL, KEY_UP,
+};
 use crate::gui::janelas::{App, EventoApp};
 use crate::shell::{PROMPT, Shell};
 use crate::video::tela::{Console, Cor, Escala};
@@ -61,6 +65,8 @@ pub fn criar() -> Box<dyn App> {
 pub struct AppTerminal {
     /// None so depois de fechar (o shell volta para GUARDADO).
     shell: Option<Shell>,
+    /// Ctrl apertado (Ctrl+C, Ctrl+D... vao para o processo).
+    ctrl: bool,
     /// Box: o Console aponta para estes pixels, que nunca mudam de lugar.
     superficie: Box<Superficie>,
 }
@@ -95,7 +101,7 @@ impl AppTerminal {
         preparar(&mut console);
         // o console antigo (tela cheia do boot) e descartado aqui
         let _ = shell.terminal().trocar_console(Some(console));
-        AppTerminal { shell: Some(shell), superficie }
+        AppTerminal { shell: Some(shell), superficie, ctrl: false }
     }
 
     /// Tira o console da janela (os pixels vao embora com ela) e guarda o shell.
@@ -132,6 +138,36 @@ impl App for AppTerminal {
                 true
             }
             (EventoApp::Processos, Some(shell)) => shell.atender_processos(),
+            (EventoApp::Tecla { codigo: KEY_LEFTCTRL | KEY_RIGHTCTRL, pressionada }, _) => {
+                self.ctrl = pressionada;
+                false
+            }
+            // teclas especiais so fazem sentido para um programa de Linux
+            (EventoApp::Tecla { codigo, pressionada: true }, Some(shell)) if shell.ocupado() => {
+                let sequencia: &[u8] = match codigo {
+                    KEY_UP => b"\x1b[A",
+                    KEY_DOWN => b"\x1b[B",
+                    KEY_RIGHT => b"\x1b[C",
+                    KEY_LEFT => b"\x1b[D",
+                    KEY_HOME => b"\x1b[H",
+                    KEY_END => b"\x1b[F",
+                    KEY_DELETE => b"\x1b[3~",
+                    KEY_PAGEUP => b"\x1b[5~",
+                    KEY_PAGEDOWN => b"\x1b[6~",
+                    _ => match teclado::letra(codigo).filter(|_| self.ctrl) {
+                        // Ctrl+letra: o caractere de controle (Ctrl+C = 3)
+                        Some(letra) => {
+                            shell.tecla(letra & 0x1F);
+                            return true;
+                        }
+                        None => return false,
+                    },
+                };
+                for &byte in sequencia {
+                    shell.tecla(byte);
+                }
+                true
+            }
             _ => false,
         }
     }

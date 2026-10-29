@@ -85,6 +85,8 @@ pub enum Tipo {
     Pasta { caminho: String, itens: Vec<ItemDePasta> },
     /// O tubo e o lado (true = escrita).
     Tubo(Rc<RefCell<Tubo>>, bool),
+    /// Arquivo feito na hora pelo kernel (/proc): so leitura.
+    Gerado(Vec<u8>),
 }
 
 pub struct Descricao {
@@ -192,7 +194,7 @@ pub fn dispositivo(caminho: &str) -> Option<Tipo> {
 
 /// Pastas que existem mesmo sem estar no disco.
 fn pasta_virtual(caminho: &str) -> bool {
-    matches!(caminho, "/" | "/dev")
+    matches!(caminho, "/" | "/dev" | "/proc")
 }
 
 /// O que ha em `caminho`: Some(pasta, tamanho). None = nao existe.
@@ -265,8 +267,10 @@ fn listar(caminho: &str) -> Result<Vec<ItemDePasta>, i64> {
     }
     let lista = armazenamento::listar(caminho).map_err(errno)?;
     itens.extend(lista.into_iter().map(|i| ItemDePasta { nome: i.nome, pasta: i.pasta }));
-    if caminho == "/" && !itens.iter().any(|i| i.nome.eq_ignore_ascii_case("dev")) {
-        itens.push(ItemDePasta { nome: "dev".into(), pasta: true });
+    for virtual_ in ["dev", "proc"] {
+        if caminho == "/" && !itens.iter().any(|i| i.nome.eq_ignore_ascii_case(virtual_)) {
+            itens.push(ItemDePasta { nome: virtual_.into(), pasta: true });
+        }
     }
     Ok(itens)
 }

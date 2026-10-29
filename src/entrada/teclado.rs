@@ -436,7 +436,7 @@ fn controle(codigo: u16) -> Option<u8> {
 }
 
 /// Letra minuscula da posicao (igual no americano e no ABNT2).
-fn letra(codigo: u16) -> Option<u8> {
+pub fn letra(codigo: u16) -> Option<u8> {
     let fileira = |inicio: u16, letras: &[u8]| {
         codigo.checked_sub(inicio).and_then(|i| letras.get(i as usize).copied())
     };

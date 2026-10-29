@@ -85,6 +85,12 @@ impl Shell {
         &mut self.console
     }
 
+    /// Um processo em primeiro plano esta com o teclado.
+    #[cfg_attr(feature = "mxq", allow(dead_code))]
+    pub fn ocupado(&self) -> bool {
+        self.esperando.is_some()
+    }
+
     /// O que ja foi digitado na linha atual (para redesenhar o prompt).
     #[cfg_attr(feature = "mxq", allow(dead_code))]
     pub fn linha_atual(&self) -> &str {
@@ -129,8 +135,19 @@ impl Shell {
         let saida = processos::tirar_saida();
         let mut mudou = !saida.is_empty();
         if mudou {
-            let texto = String::from_utf8_lossy(&saida);
-            escreva!(self, "{texto}");
+            // "ESC[6n": o programa pergunta onde esta o cursor (o shell do
+            // BusyBox faz isso antes do prompt); a resposta vai como teclas
+            let pergunta = b"\x1b[6n";
+            let mut resto: &[u8] = &saida;
+            while let Some(p) = resto.windows(pergunta.len()).position(|j| j == pergunta) {
+                escreva!(self, "{}", String::from_utf8_lossy(&resto[..p]));
+                let (coluna, linha) = self.console.posicao().unwrap_or((0, 0));
+                for byte in format!("\x1b[{};{}R", linha + 1, coluna + 1).bytes() {
+                    processos::tecla(byte);
+                }
+                resto = &resto[p + pergunta.len()..];
+            }
+            escreva!(self, "{}", String::from_utf8_lossy(resto));
         }
         if let Some(pid) = self.esperando {
             if let Some(codigo) = processos::terminou(pid) {

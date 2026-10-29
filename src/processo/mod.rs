@@ -27,6 +27,7 @@ pub mod arquivos;
 pub mod chamadas;
 pub mod elf;
 pub mod memoria;
+pub mod proc;
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
@@ -52,7 +53,7 @@ const MAX_PROCESSOS: usize = 64;
 /// ASIDs de 8 bits; o 0 e do kernel.
 const MAX_ASID: u16 = 255;
 /// Ambiente dos programas que o shell do MXOS roda.
-const AMBIENTE: [&str; 5] = ["PATH=/bin:/", "HOME=/", "TERM=vt100", "USER=root", "PS1=\\w # "];
+const AMBIENTE: [&str; 6] = ["PATH=/bin:/", "HOME=/", "TERM=vt100", "USER=root", "LANG=C.UTF-8", "PS1=\\w # "];
 
 // ---------------------------------------------------------------------
 // Contexto (o mesmo layout que o vetores.s usa)
@@ -159,6 +160,12 @@ pub struct Processo {
     pub tempo_cpu: u64,
     /// Estado das chamadas de sistema do Linux (arquivos, brk...).
     pub linux: chamadas::Linux,
+    /// Caminho do programa (o /proc/self/exe).
+    pub exe: String,
+    /// Argumentos separados por 0 (o /proc/PID/cmdline).
+    pub cmdline: Vec<u8>,
+    /// cpu::contador quando o processo nasceu.
+    pub inicio: u64,
 }
 
 /// Fotografia de um processo (comando "processos", app Tarefas).
@@ -368,7 +375,19 @@ impl Tabela {
         self.proximo_pid += 1;
         let mut linux = chamadas::Linux::com_terminal();
         linux.grupo = pid;
-        let p = Processo { pid, pai, nome, estado: Estado::Pronto, contexto, espaco, tempo_cpu: 0, linux };
+        let p = Processo {
+            pid,
+            pai,
+            nome,
+            estado: Estado::Pronto,
+            contexto,
+            espaco,
+            tempo_cpu: 0,
+            linux,
+            exe: String::new(),
+            cmdline: Vec::new(),
+            inicio: cpu::contador(),
+        };
         self.processos.push(Box::new(p));
         pid
     }
