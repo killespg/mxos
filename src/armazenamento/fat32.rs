@@ -1187,6 +1187,41 @@ impl Fat32 {
         Ok(dados)
     }
 
+    /// Tamanho e cadeia de clusters de um arquivo, para ler aos pedacos
+    /// (`ler_trecho`) sem trazer o arquivo inteiro.
+    pub fn abrir_leitura(&mut self, caminho: &str) -> Result<(usize, Vec<u32>), Erro> {
+        let (pasta, nome, _) = self.pai_e_nome(caminho)?;
+        let e = achar(&pasta, nome).ok_or(Erro::NaoAchado)?;
+        if e.e_pasta() {
+            return Err(Erro::EPasta);
+        }
+        let tamanho = e.tamanho as usize;
+        let mut cadeia = self.cadeia(e.cluster)?;
+        let precisa = self.geo.clusters_para(tamanho);
+        if cadeia.len() < precisa {
+            return Err(Erro::Corrompido("arquivo maior que a cadeia"));
+        }
+        cadeia.truncate(precisa);
+        Ok((tamanho, cadeia))
+    }
+
+    /// Le `destino.len()` bytes do arquivo de cadeia `cadeia`, a partir do
+    /// byte `inicio`. O que passa do fim da cadeia fica como estava.
+    pub fn ler_trecho(&mut self, cadeia: &[u32], inicio: usize, destino: &mut [u8]) -> Result<(), Erro> {
+        let bpc = self.geo.bytes_por_cluster;
+        let primeiro = inicio / bpc;
+        let ultimo = (inicio + destino.len()).div_ceil(bpc).min(cadeia.len());
+        if primeiro >= ultimo {
+            return Ok(());
+        }
+        let mut lido = vec![0u8; (ultimo - primeiro) * bpc];
+        self.ler_clusters(&cadeia[primeiro..ultimo], &mut lido)?;
+        let de = inicio - primeiro * bpc;
+        let n = destino.len().min(lido.len() - de);
+        destino[..n].copy_from_slice(&lido[de..de + n]);
+        Ok(())
+    }
+
     /// Cria ou substitui um arquivo.
     pub fn escrever(&mut self, caminho: &str, dados: &[u8]) -> Result<(), Erro> {
         if dados.len() > u32::MAX as usize {

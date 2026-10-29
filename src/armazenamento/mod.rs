@@ -244,8 +244,19 @@ pub fn ler(caminho: &str) -> Result<Vec<u8>, Erro> {
     com_volume(|fs| fs.ler(caminho))
 }
 
+/// Tamanho e clusters de um arquivo, para ler so os pedacos que precisa.
+pub fn abrir_leitura(caminho: &str) -> Result<(usize, Vec<u32>), Erro> {
+    com_volume(|fs| fs.abrir_leitura(caminho))
+}
+
+/// Um pedaco de um arquivo aberto com `abrir_leitura`.
+pub fn ler_trecho(cadeia: &[u32], inicio: usize, destino: &mut [u8]) -> Result<(), Erro> {
+    com_volume(|fs| fs.ler_trecho(cadeia, inicio, destino))
+}
+
 /// Cria ou substitui o arquivo. A pasta tem de existir.
 pub fn escrever(caminho: &str, dados: &[u8]) -> Result<(), Erro> {
+    crate::processo::cache::esquecer(caminho);
     com_volume(|fs| fs.escrever(caminho, dados))
 }
 
@@ -255,11 +266,14 @@ pub fn criar_pasta(caminho: &str) -> Result<(), Erro> {
 
 /// Apaga um arquivo ou uma pasta vazia.
 pub fn apagar(caminho: &str) -> Result<(), Erro> {
+    crate::processo::cache::esquecer(caminho);
     com_volume(|fs| fs.apagar(caminho))
 }
 
 /// Renomeia ou move: `para` e o caminho novo completo e nao pode existir.
 pub fn renomear(de: &str, para: &str) -> Result<(), Erro> {
+    crate::processo::cache::esquecer(de);
+    crate::processo::cache::esquecer(para);
     com_volume(|fs| fs.renomear(de, para))
 }
 

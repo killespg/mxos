@@ -66,6 +66,11 @@ pub trait App {
     fn pedidos(&mut self) -> Vec<Pedido> {
         Vec::new()
     }
+    /// Programa de Linux para rodar no lugar de abrir a janela (argv):
+    /// a janela vem depois, pelo X11 (apps/linux.rs).
+    fn lancar(&self) -> Option<Vec<String>> {
+        None
+    }
 }
 
 /// O que um app pede ao gerenciador de janelas (ver App::pedidos).
@@ -645,6 +650,13 @@ impl Gerenciador {
 
     /// Abre uma janela com o canto em (x, y) (ajustado para caber) e foca.
     pub fn abrir(&mut self, app: Box<dyn App>, x: i32, y: i32) -> usize {
+        if let Some(argv) = app.lancar() {
+            let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+            if let Err(e) = crate::processo::executar(&argv[0], &args, false) {
+                crate::processo::avisar_no_terminal(&alloc::format!("\nnão consegui abrir {}: {e}\n", argv[0]));
+            }
+            return 0;
+        }
         let t = tema::atual();
         let (largura, altura) = app.tamanho();
         // o conteudo nunca passa da tela, nem que o app peca mais

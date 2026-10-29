@@ -497,6 +497,11 @@ impl Shell {
             h.blocos_livres,
             Bytes(h.maior_bloco)
         );
+        #[cfg(not(feature = "mxq"))]
+        {
+            let (arquivos, kb) = crate::processo::cache::resumo();
+            diga!(self, "  cache de arquivos: {} em {} arquivo(s) (dividido pelos programas)", Bytes(kb * 1024), arquivos);
+        }
     }
 
     fn mmu(&mut self) {

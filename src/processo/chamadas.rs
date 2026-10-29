@@ -556,7 +556,14 @@ fn ler(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize) -> Fi
             let n = tamanho.min(tb.buffer.len());
             tb.buffer.drain(..n).collect()
         }
-        Tipo::Disco(ArquivoDisco { dados, .. }) | Tipo::Gerado(dados) => {
+        Tipo::Disco(a) => match a.ler(posicao, tamanho) {
+            Ok(v) => {
+                nova_posicao = posicao.min(a.tamanho()) + v.len();
+                v
+            }
+            Err(e) => return Fim::Valor(-e),
+        },
+        Tipo::Gerado(dados) => {
             let inicio = posicao.min(dados.len());
             let fim = (inicio + tamanho).min(dados.len());
             nova_posicao = fim;
@@ -625,12 +632,16 @@ fn escrever_dados(t: &mut Tabela, i: usize, fd: u64, dados: &[u8]) -> Fim {
             return Fim::Valor(n as i64);
         }
         Tipo::Disco(a) => {
-            let inicio = if anexar { a.dados.len() } else { posicao };
+            let conteudo = match a.dados_mut() {
+                Ok(c) => c,
+                Err(e) => return Fim::Valor(-e),
+            };
+            let inicio = if anexar { conteudo.len() } else { posicao };
             let fim = inicio + dados.len();
-            if a.dados.len() < fim {
-                a.dados.resize(fim, 0);
+            if conteudo.len() < fim {
+                conteudo.resize(fim, 0);
             }
-            a.dados[inicio..fim].copy_from_slice(dados);
+            conteudo[inicio..fim].copy_from_slice(dados);
             a.sujo = true;
             d.posicao = fim;
         }
@@ -666,9 +677,7 @@ fn pread(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize, pos
     let aberto = t.processos[i].linux.fd(fd)?;
     let d = aberto.borrow();
     let Tipo::Disco(a) = &d.tipo else { return Err(ESPIPE) };
-    let inicio = posicao.min(a.dados.len());
-    let fim = (inicio + tamanho).min(a.dados.len());
-    let v = a.dados[inicio..fim].to_vec();
+    let v = a.ler(posicao, tamanho.min(1 << 20))?;
     drop(d);
     escrever_mem(t, i, endereco, &v)?;
     Ok(v.len() as i64)
@@ -679,11 +688,12 @@ fn pwrite(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize, po
     let aberto = t.processos[i].linux.fd(fd)?;
     let mut d = aberto.borrow_mut();
     let Tipo::Disco(a) = &mut d.tipo else { return Err(ESPIPE) };
+    let conteudo = a.dados_mut()?;
     let fim = posicao + dados.len();
-    if a.dados.len() < fim {
-        a.dados.resize(fim, 0);
+    if conteudo.len() < fim {
+        conteudo.resize(fim, 0);
     }
-    a.dados[posicao..fim].copy_from_slice(&dados);
+    conteudo[posicao..fim].copy_from_slice(&dados);
     a.sujo = true;
     Ok(dados.len() as i64)
 }
@@ -692,7 +702,7 @@ fn lseek(t: &mut Tabela, i: usize, fd: u64, deslocamento: i64, de_onde: u64) -> 
     let aberto = t.processos[i].linux.fd(fd)?;
     let mut d = aberto.borrow_mut();
     let tamanho = match &d.tipo {
-        Tipo::Disco(a) => a.dados.len() as i64,
+        Tipo::Disco(a) => a.tamanho() as i64,
         Tipo::Gerado(dados) => dados.len() as i64,
         Tipo::Pasta { itens, .. } => itens.len() as i64,
         Tipo::Nulo | Tipo::Zero => 0,
@@ -720,7 +730,7 @@ fn truncar(t: &mut Tabela, i: usize, numero: u64, alvo: u64, tamanho: usize) -> 
         let aberto = t.processos[i].linux.fd(alvo)?;
         let mut d = aberto.borrow_mut();
         let Tipo::Disco(a) = &mut d.tipo else { return Err(EINVAL) };
-        a.dados.resize(tamanho, 0);
+        a.dados_mut()?.resize(tamanho, 0);
         a.sujo = true;
         return Ok(0);
     }
@@ -862,7 +872,11 @@ fn sendfile(t: &mut Tabela, i: usize, saida: u64, entrada: u64, posicao: usize, 
         d.posicao
     };
     let dados = match &d.tipo {
-        Tipo::Disco(ArquivoDisco { dados, .. }) | Tipo::Gerado(dados) => {
+        Tipo::Disco(a) => match a.ler(inicio, quantos.min(1 << 20)) {
+            Ok(v) => v,
+            Err(e) => return Fim::Valor(-e),
+        },
+        Tipo::Gerado(dados) => {
             let ini = inicio.min(dados.len());
             dados[ini..(ini + quantos.min(1 << 20)).min(dados.len())].to_vec()
         }
@@ -907,7 +921,7 @@ fn estrutura_stat(caminho: &str, pasta: bool, tamanho: u64, dispositivo: bool) -
 
 fn stat_do_aberto(d: &Descricao) -> [u8; 128] {
     match &d.tipo {
-        Tipo::Disco(a) => estrutura_stat(&a.caminho, false, a.dados.len() as u64, false),
+        Tipo::Disco(a) => estrutura_stat(&a.caminho, false, a.tamanho() as u64, false),
         Tipo::Gerado(dados) => estrutura_stat("/proc", false, dados.len() as u64, false),
         Tipo::Pasta { caminho, .. } => estrutura_stat(caminho, true, 0, false),
         Tipo::Tubo(..) => {
@@ -1194,14 +1208,16 @@ fn mmap(t: &mut Tabela, i: usize, dica: usize, tamanho: usize, prot: u64, flags:
         return Err(EINVAL);
     }
     let tamanho = tamanho.next_multiple_of(PAGINA);
-    // conteudo do arquivo (mmap privado: uma copia)
+    // conteudo do arquivo: os quadros do cache (divididos, copy-on-write)
+    // ou, se o arquivo aberto ja mudou, uma copia
+    let mut quadros = None;
     let conteudo = if flags & MAP_ANONYMOUS == 0 {
         let aberto = t.processos[i].linux.fd(fd as u64)?;
         let d = aberto.borrow();
         let Tipo::Disco(a) = &d.tipo else { return Err(EACCES) };
-        let inicio = deslocamento.min(a.dados.len());
-        let fim = (deslocamento + tamanho).min(a.dados.len());
-        a.dados[inicio..fim].to_vec()
+        let paginas_no_arquivo = a.tamanho().saturating_sub(deslocamento).div_ceil(PAGINA).min(tamanho / PAGINA);
+        quadros = a.quadros(deslocamento / PAGINA, paginas_no_arquivo)?;
+        if quadros.is_none() { a.ler(deslocamento, tamanho)? } else { Vec::new() }
     } else {
         Vec::new()
     };
@@ -1226,6 +1242,15 @@ fn mmap(t: &mut Tabela, i: usize, dica: usize, tamanho: usize, prot: u64, flags:
             .ok_or(ENOMEM)?
     };
     let permissao = Permissao::de_prot(prot);
+    if let Some(quadros) = quadros {
+        // as paginas do arquivo; o resto (depois do fim do arquivo) zerado
+        p.espaco.mapear_dividida(endereco, &quadros, permissao).map_err(|_| ENOMEM)?;
+        let depois = endereco + quadros.len() * PAGINA;
+        if depois < endereco + tamanho {
+            p.espaco.mapear_faixa(depois, endereco + tamanho, permissao).map_err(|_| ENOMEM)?;
+        }
+        return Ok(endereco as i64);
+    }
     const MAP_SHARED: u64 = 1;
     if flags & MAP_SHARED != 0 && flags & MAP_ANONYMOUS != 0 {
         // memoria anonima dividida com os filhos (fork nao copia)
@@ -1617,16 +1642,18 @@ pub fn trocar_programa(t: &mut Tabela, i: usize, caminho: &str, mut argumentos: 
         Some(exe) => exe,
         None => caminho.to_owned(),
     };
-    let mut dados = match armazenamento::ler(&caminho) {
-        Ok(d) => d,
+    // o programa vem do cache de paginas: rodando de novo (ou outro
+    // processo com o mesmo programa) o codigo e dividido, nao copiado
+    let mut arquivo = match super::cache::abrir(&caminho) {
+        Ok(a) => a,
         // "/bin/ls" sem arquivo: o BusyBox faz o papel (como os links do Linux)
-        Err(armazenamento::Erro::NaoAchado) if pasta_de_programas(&caminho) => {
-            let dados = armazenamento::ler("/bin/busybox").map_err(|_| ENOENT)?;
+        Err(ENOENT) if pasta_de_programas(&caminho) => {
             caminho = String::from("/bin/busybox");
-            dados
+            super::cache::abrir(&caminho)?
         }
-        Err(e) => return Err(errno(e)),
+        Err(e) => return Err(e),
     };
+    let mut dados = arquivo.tudo()?;
     if dados.starts_with(b"#!") {
         let linha = dados[2..].split(|&b| b == b'\n').next().unwrap_or(&[]);
         let linha = String::from_utf8_lossy(linha).trim().to_owned();
@@ -1640,7 +1667,8 @@ pub fn trocar_programa(t: &mut Tabela, i: usize, caminho: &str, mut argumentos: 
         novos.extend(argumentos.into_iter().skip(1));
         argumentos = novos;
         caminho = interpretador;
-        dados = armazenamento::ler(&caminho).map_err(errno)?;
+        arquivo = super::cache::abrir(&caminho)?;
+        dados = arquivo.tudo()?;
     }
     elf::conferir(&dados).map_err(|_| ENOEXEC)?;
     // as outras threads morrem no exec
@@ -1649,14 +1677,15 @@ pub fn trocar_programa(t: &mut Tabela, i: usize, caminho: &str, mut argumentos: 
     let i = t.indice(pid).unwrap_or(i);
     let asid = t.processos[i].espaco.asid;
     let mut espaco = Espaco::novo(asid);
-    let mut programa = elf::carregar(&dados, &mut espaco).map_err(|_| ENOEXEC)?;
+    let mut programa = elf::carregar_de(&dados, Some(&arquivo), &mut espaco, elf::BASE_PIE).map_err(|_| ENOEXEC)?;
     espaco.brk_inicio = programa.fim.next_multiple_of(PAGINA);
     espaco.brk = espaco.brk_inicio;
     // programa dinamico: o ld-linux entra junto e comeca primeiro
     let mut inicio = programa.entrada;
     if let Some(caminho_interp) = elf::interpretador(&dados) {
-        let dados_interp = armazenamento::ler(&caminho_interp).map_err(|_| ELIBBAD)?;
-        let interp = elf::carregar_em(&dados_interp, &mut espaco, elf::BASE_INTERP).map_err(|_| ELIBBAD)?;
+        let arquivo_interp = super::cache::abrir(&caminho_interp).map_err(|_| ELIBBAD)?;
+        let dados_interp = arquivo_interp.tudo().map_err(|_| ELIBBAD)?;
+        let interp = elf::carregar_de(&dados_interp, Some(&arquivo_interp), &mut espaco, elf::BASE_INTERP).map_err(|_| ELIBBAD)?;
         programa.base_interp = interp.entrada - u64_do_elf(&dados_interp, 24);
         inicio = interp.entrada;
     }

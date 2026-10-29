@@ -2,8 +2,10 @@
 //!
 //!   Terminal          stdin/stdout/stderr, /dev/tty e /dev/console
 //!   Nulo, Zero, Aleatorio   /dev/null, /dev/zero, /dev/urandom
-//!   Disco             arquivo do FAT32: lido inteiro no open, gravado
-//!                     inteiro quando o ultimo descritor fecha (ou no fsync)
+//!   Disco             arquivo do FAT32: lido do cache de paginas (cache.rs)
+//!                     aos pedacos; na primeira escrita vira uma copia na
+//!                     memoria, gravada inteira quando o ultimo descritor
+//!                     fecha (ou no fsync)
 //!   Pasta             a listagem, para o getdents64
 //!   Tubo              pipe: um buffer com contagem de quem le e escreve
 //!   Soquete           socket de rede (soquetes.rs)
@@ -18,6 +20,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use super::cache;
 use super::soquetes::Soquete;
 use crate::armazenamento::{self, Erro};
 
@@ -73,8 +76,58 @@ pub const TAMANHO_TUBO: usize = 64 * 1024;
 
 pub struct ArquivoDisco {
     pub caminho: String,
-    pub dados: Vec<u8>,
+    conteudo: Conteudo,
     pub sujo: bool,
+}
+
+enum Conteudo {
+    /// Ainda igual ao do disco: le do cache (dividido com todo mundo).
+    Cache(Rc<cache::Arquivo>),
+    /// Mudou (ou vai mudar): uma copia so deste arquivo aberto.
+    Proprio(Vec<u8>),
+}
+
+impl ArquivoDisco {
+    pub fn tamanho(&self) -> usize {
+        match &self.conteudo {
+            Conteudo::Cache(a) => a.tamanho,
+            Conteudo::Proprio(d) => d.len(),
+        }
+    }
+
+    /// Ate `quanto` bytes a partir de `posicao`.
+    pub fn ler(&self, posicao: usize, quanto: usize) -> Result<Vec<u8>, i64> {
+        let inicio = posicao.min(self.tamanho());
+        let fim = inicio.saturating_add(quanto).min(self.tamanho());
+        match &self.conteudo {
+            Conteudo::Proprio(d) => Ok(d[inicio..fim].to_vec()),
+            Conteudo::Cache(a) => {
+                let mut v = alloc::vec![0u8; fim - inicio];
+                a.ler(inicio, &mut v)?;
+                Ok(v)
+            }
+        }
+    }
+
+    /// Os bytes para mudar (na primeira vez o arquivo vem inteiro do cache).
+    pub fn dados_mut(&mut self) -> Result<&mut Vec<u8>, i64> {
+        if let Conteudo::Cache(a) = &self.conteudo {
+            self.conteudo = Conteudo::Proprio(a.tudo()?);
+        }
+        match &mut self.conteudo {
+            Conteudo::Proprio(d) => Ok(d),
+            Conteudo::Cache(_) => unreachable!(),
+        }
+    }
+
+    /// Os quadros do cache das paginas [primeira, primeira + quantas), para
+    /// o mmap dividir (None: o arquivo ja mudou, o mmap copia).
+    pub fn quadros(&self, primeira: usize, quantas: usize) -> Result<Option<Vec<Rc<alloc::boxed::Box<super::memoria::Quadro>>>>, i64> {
+        match &self.conteudo {
+            Conteudo::Cache(a) => a.paginas(primeira, quantas).map(Some),
+            Conteudo::Proprio(_) => Ok(None),
+        }
+    }
 }
 
 pub struct ItemDePasta {
@@ -127,7 +180,9 @@ impl Descricao {
     pub fn sincronizar(&mut self) -> Result<(), i64> {
         if let Tipo::Disco(a) = &mut self.tipo {
             if a.sujo {
-                armazenamento::escrever(&a.caminho, &a.dados).map_err(errno)?;
+                if let Conteudo::Proprio(dados) = &a.conteudo {
+                    armazenamento::escrever(&a.caminho, dados).map_err(errno)?;
+                }
                 a.sujo = false;
             }
         }
@@ -250,14 +305,14 @@ pub fn abrir(caminho: &str, flags: u32) -> Result<Aberto, i64> {
                 return Err(ENOTDIR);
             }
             let truncar = flags & O_TRUNC != 0 && escreve;
-            let dados = if truncar { Vec::new() } else { armazenamento::ler(caminho).map_err(errno)? };
-            let arquivo = ArquivoDisco { caminho: caminho.into(), dados, sujo: truncar };
+            let conteudo = if truncar { Conteudo::Proprio(Vec::new()) } else { Conteudo::Cache(cache::abrir(caminho)?) };
+            let arquivo = ArquivoDisco { caminho: caminho.into(), conteudo, sujo: truncar };
             Ok(Descricao::nova(Tipo::Disco(arquivo), flags))
         }
         Err(ENOENT) if flags & O_CREAT != 0 => {
             // cria ja vazio, para o arquivo existir mesmo antes do close
             armazenamento::escrever(caminho, &[]).map_err(errno)?;
-            let arquivo = ArquivoDisco { caminho: caminho.into(), dados: Vec::new(), sujo: false };
+            let arquivo = ArquivoDisco { caminho: caminho.into(), conteudo: Conteudo::Proprio(Vec::new()), sujo: false };
             Ok(Descricao::nova(Tipo::Disco(arquivo), flags))
         }
         Err(e) => Err(e),

@@ -7,6 +7,7 @@
 //!   - drivers:       painel com os dispositivos e os drivers de cada um
 //!   - editor:        editor de texto
 //!   - janela_x:      uma janela de programa de Linux (servidor X11)
+//!   - linux:         atalhos para programas de Linux do disco (NetSurf)
 //!   - navegador:     o navegador (o motor fica em crate::navegador)
 //!   - pintura:       paleta de cores, pincel com o mouse, limpar
 //!   - sobre:         versao, cpu, memoria e tempo ligado
@@ -19,6 +20,7 @@ pub mod configuracoes;
 pub mod drivers;
 pub mod editor;
 pub mod janela_x;
+pub mod linux;
 pub mod navegador;
 pub mod pintura;
 pub mod sobre;
@@ -36,6 +38,9 @@ pub fn registrar_apps_basicos(g: &mut Gerenciador) {
     g.registrar_app("Arquivos", Icone::Pasta, arquivos::criar);
     g.registrar_app("Discos", Icone::Disco, arquivos::criar_discos);
     g.registrar_app("Navegador", Icone::Navegador, navegador::criar);
+    if linux::existe(linux::NETSURF) {
+        g.registrar_app("NetSurf", Icone::Navegador, linux::criar_netsurf);
+    }
     g.registrar_app("Editor de texto", Icone::Texto, editor::criar);
     g.registrar_app("Tarefas", Icone::Tarefas, tarefas::criar);
     g.registrar_app("Drivers", Icone::Chip, drivers::criar);
@@ -50,6 +55,9 @@ pub fn registrar_apps_basicos(g: &mut Gerenciador) {
 pub fn registrar_atalhos(g: &mut Gerenciador) {
     g.registrar_atalho("Arquivos", Icone::Pasta, arquivos::criar);
     g.registrar_atalho("Navegador", Icone::Navegador, navegador::criar);
+    if linux::existe(linux::NETSURF) {
+        g.registrar_atalho("NetSurf", Icone::Navegador, linux::criar_netsurf);
+    }
     g.registrar_atalho(terminal::TITULO, Icone::Terminal, terminal::criar);
     g.registrar_atalho("Tarefas", Icone::Tarefas, tarefas::criar);
     g.registrar_atalho("Configurações", Icone::Engrenagem, configuracoes::criar);

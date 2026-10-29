@@ -56,6 +56,7 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
     anunciar_config(&mut shell, &cfg, entrada.layout());
 
     let (largura, altura) = (framebuffer.largura(), framebuffer.altura());
+    tema::definir_tela(largura as i32, altura as i32);
     let mut gerenciador = Gerenciador::novo(largura as i32, altura as i32);
     apps::registrar_apps_basicos(&mut gerenciador);
     gerenciador.registrar_app(terminal::TITULO, Icone::Terminal, terminal::criar);

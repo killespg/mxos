@@ -18,11 +18,12 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+use super::cache;
 use super::memoria::{Espaco, PAGINA, Permissao};
 use crate::cpu;
 
 /// Onde um PIE (ET_DYN) e carregado.
-const BASE_PIE: usize = 0x40_0000;
+pub const BASE_PIE: usize = 0x40_0000;
 /// Onde o interpretador (ld-linux) e carregado: abaixo da pilha, longe do
 /// brk e do comeco da area do mmap.
 pub const BASE_INTERP: usize = 0x0700_0000;
@@ -142,6 +143,13 @@ pub fn carregar(d: &[u8], espaco: &mut Espaco) -> Result<Carregado, &'static str
 
 /// Como `carregar`, com um ET_DYN comecando em `base_pie`.
 pub fn carregar_em(d: &[u8], espaco: &mut Espaco, base_pie: usize) -> Result<Carregado, &'static str> {
+    carregar_de(d, None, espaco, base_pie)
+}
+
+/// Com `arquivo` (o mesmo `d`, no cache de paginas), as paginas que sao
+/// so arquivo (codigo e dados sem o .bss) vem do cache, divididas com os
+/// outros processos que rodam o mesmo programa (copy-on-write).
+pub fn carregar_de(d: &[u8], arquivo: Option<&cache::Arquivo>, espaco: &mut Espaco, base_pie: usize) -> Result<Carregado, &'static str> {
     conferir(d)?;
     let segmentos = segmentos(d).ok_or("cabeçalhos do ELF quebrados")?;
     let carregaveis: Vec<&Segmento> = segmentos.iter().filter(|s| s.tipo == PT_LOAD && s.memsz > 0).collect();
@@ -165,6 +173,7 @@ pub fn carregar_em(d: &[u8], espaco: &mut Espaco, base_pie: usize) -> Result<Car
             pagina += PAGINA;
         }
     }
+    let mut do_cache = alloc::collections::BTreeSet::new();
     for (&pagina, &flags) in &paginas {
         let permissao = match (flags & PF_W != 0, flags & PF_X != 0) {
             (true, true) => Permissao::Tudo,
@@ -172,11 +181,40 @@ pub fn carregar_em(d: &[u8], espaco: &mut Espaco, base_pie: usize) -> Result<Car
             (false, true) => Permissao::Codigo,
             (false, false) => Permissao::Leitura,
         };
-        espaco.mapear(pagina, permissao).map_err(|_| "o programa quer memória fora da área dele")?;
+        // a pagina inteira e arquivo de um segmento so: vem do cache
+        let fonte = arquivo.and_then(|a| {
+            let mut dono = carregaveis.iter().filter(|s| {
+                let inicio = s.vaddr + base;
+                pagina < inicio + s.memsz && pagina + PAGINA > inicio
+            });
+            let s = dono.next()?;
+            if dono.next().is_some() {
+                return None;
+            }
+            let inicio = s.vaddr + base;
+            let cabe = pagina >= inicio && pagina + PAGINA <= inicio + s.filesz && (inicio - s.offset) % PAGINA == 0;
+            cabe.then(|| (a, (s.offset + (pagina - inicio)) / PAGINA))
+        });
+        match fonte.and_then(|(a, n)| a.paginas(n, 1).ok()) {
+            Some(quadros) if quadros.len() == 1 => {
+                espaco.mapear_dividida(pagina, &quadros, permissao).map_err(|_| "o programa quer memória fora da área dele")?;
+                do_cache.insert(pagina);
+            }
+            _ => espaco.mapear(pagina, permissao).map_err(|_| "o programa quer memória fora da área dele")?,
+        }
     }
     for s in &carregaveis {
-        let dados = &d[s.offset..s.offset + s.filesz];
-        espaco.escrever_forcado(s.vaddr + base, dados).map_err(|_| "não deu para copiar o programa")?;
+        // copia so o que caiu nas paginas que nao vieram do cache
+        let mut feito = 0;
+        while feito < s.filesz {
+            let destino = s.vaddr + base + feito;
+            let n = (PAGINA - destino % PAGINA).min(s.filesz - feito);
+            if !do_cache.contains(&(destino & !(PAGINA - 1))) {
+                let dados = &d[s.offset + feito..s.offset + feito + n];
+                espaco.escrever_forcado(destino, dados).map_err(|_| "não deu para copiar o programa")?;
+            }
+            feito += n;
+        }
     }
 
     let phoff = u64_em(d, 32).unwrap_or(0);

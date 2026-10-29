@@ -210,6 +210,30 @@ impl Espaco {
         Ok(())
     }
 
+    /// Poe em `endereco` (e seguintes) quadros do cache de arquivos, em
+    /// copy-on-write: le direto deles; quem escreve ganha uma copia.
+    pub fn mapear_dividida(&mut self, endereco: usize, quadros: &[Rc<Box<Quadro>>], permissao: Permissao) -> Result<(), Fora> {
+        let fim = endereco + quadros.len() * PAGINA;
+        if endereco % PAGINA != 0 || endereco < INICIO_USUARIO || fim > FIM_USUARIO {
+            return Err(Fora);
+        }
+        let executa = matches!(permissao, Permissao::Codigo | Permissao::Tudo);
+        for (k, quadro) in quadros.iter().enumerate() {
+            let atual = endereco + k * PAGINA;
+            if executa {
+                // o quadro veio do disco pelo cache de dados da CPU: o de
+                // instrucoes tem de ver o mesmo
+                mmu::sincronizar_codigo(quadro.0.as_ptr() as usize, PAGINA);
+            }
+            let pagina = Pagina { quadro: quadro.clone(), atributos: permissao.atributos_divididos(), compartilhada: false };
+            *self.entrada(atual) = pagina.fisico() | pagina.atributos | mmu::DESCRITOR_PAGINA;
+            self.paginas.insert(atual / PAGINA, pagina);
+            self.permissoes.insert(atual / PAGINA, permissao);
+        }
+        mmu::esquecer_asid(self.asid);
+        Ok(())
+    }
+
     /// O quadro em `endereco`, se a pagina e compartilhada.
     pub fn quadro_compartilhado(&self, endereco: usize) -> Option<Rc<Box<Quadro>>> {
         self.paginas.get(&(endereco / PAGINA)).filter(|p| p.compartilhada).map(|p| p.quadro.clone())

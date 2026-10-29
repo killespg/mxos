@@ -24,6 +24,7 @@
 //! lidos do disco FAT32 pelo comando "executar".
 
 pub mod arquivos;
+pub mod cache;
 pub mod chamadas;
 pub mod elf;
 pub mod espera;
@@ -707,6 +708,11 @@ impl core::fmt::Write for Saida<'_> {
 
 // ---------------------------------------------------------------------
 // Terminal
+
+/// Um aviso do sistema na saida do terminal (como se um processo escrevesse).
+pub fn avisar_no_terminal(texto: &str) {
+    com(|t| t.escrever(texto.as_bytes()));
+}
 
 /// Tira o que os processos escreveram (o shell manda para a tela).
 pub fn tirar_saida() -> Vec<u8> {

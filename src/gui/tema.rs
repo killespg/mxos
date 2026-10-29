@@ -17,6 +17,7 @@
 //! parede, e vice-versa. As duas sao lidas e gravadas pelo config.rs.
 
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicI32, Ordering};
 
 use super::grafico::Cor;
 
@@ -280,4 +281,16 @@ pub fn aparencia() -> Aparencia {
 /// Troca a aparencia. Como no `definir`, quem desenha redesenha tudo depois.
 pub fn definir_aparencia(a: Aparencia) {
     unsafe { (*ATUAL.0.get()).1 = a };
+}
+
+/// Tamanho da tela (a area de trabalho conta na partida).
+static TELA: (AtomicI32, AtomicI32) = (AtomicI32::new(1024), AtomicI32::new(768));
+
+pub fn definir_tela(largura: i32, altura: i32) {
+    TELA.0.store(largura, Ordering::Relaxed);
+    TELA.1.store(altura, Ordering::Relaxed);
+}
+
+pub fn tamanho_da_tela() -> (i32, i32) {
+    (TELA.0.load(Ordering::Relaxed), TELA.1.load(Ordering::Relaxed))
 }
