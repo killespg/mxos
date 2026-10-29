@@ -3,6 +3,7 @@
 Este arquivo é para a próxima sessão do Claude Code que for continuar o
 projeto (por exemplo, rodando a noite toda em outro PC). Leia inteiro antes
 de começar.
+Leia também o `CONTEXTO.md` (resumo da conversa, decisões e armadilhas).
 
 ## Regras (pedidos do dono do projeto)
 
