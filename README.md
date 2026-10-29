@@ -417,6 +417,24 @@ hardware ainda.
 O pendrive é o disco `/` do MXOS (FAT32, igual ao `saida/disco.img` do QEMU). Sem relógio com bateria, a data
 começa em 2026 até a rede ser usada.
 
+### Instalar na memória interna (apaga o Android)
+
+Só depois que o MXOS ligar direito pelo pendrive. No terminal do MXOS (ligado pelo pendrive):
+```
+instalar-emmc APAGAR-ANDROID
+```
+1. Guarda no pendrive, em `/mxos-backup`: a partição `boot` do Android, os primeiros 4 MB da eMMC (U-Boot) e a
+   tabela de partições.
+2. Formata a partição `data` (a maior, onde ficavam os apps e arquivos do Android) em FAT32 e copia o pendrive
+   inteiro para ela: ela vira o disco `/`.
+3. Grava o MXOS na partição `boot`, embrulhado numa imagem de boot do Android: o boot normal da box (`storeboot`)
+   liga o MXOS no lugar do Android.
+
+O U-Boot, a tabela de partições e o resto do começo da eMMC nunca são escritos (o driver só deixa escrever nas
+partições `data` e `boot`). Com o pendrive plugado a box continua ligando dele primeiro, o que serve de socorro.
+`restaurar-boot` grava de volta a partição `boot` do Android, mas os dados do Android já foram apagados: para ter
+o Android inteiro de novo é preciso o firmware de fábrica da box (USB Burning Tool).
+
 ### Com cabo serial (para ver os erros)
 
 Adaptador USB-TTL de 3,3 V nos pinos TX/RX/GND (115200 baud). Parado no prompt do U-Boot:

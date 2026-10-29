@@ -1425,3 +1425,83 @@ mod testes {
         assert!(validar_nome("fim.").is_err());
     }
 }
+
+/// Formata `disco` inteiro como FAT32 sem tabela de particoes (o setor de
+/// boot no setor 0), como o criar_disco.py faz: 32 setores reservados,
+/// FSInfo no 1, copia do boot no 6, duas FATs e a raiz no cluster 2.
+/// Clusters de 4 KB ate 8 GB e de 32 KB acima (o FAT32 pede pelo menos
+/// 65525 clusters). O instalador da eMMC usa (amlogic.rs).
+#[cfg_attr(not(feature = "mxq"), allow(dead_code))]
+pub fn formatar(disco: &mut dyn Disco, rotulo: &str) -> Result<(), Erro> {
+    let total = disco.setores().min(u32::MAX as u64);
+    let setores_por_cluster: u64 = if total > 16 * 1024 * 1024 { 64 } else { 8 };
+    let reservados: u64 = 32;
+    // formula do fatgen103
+    let tmp1 = total - reservados;
+    let tmp2 = (256 * setores_por_cluster + 2) / 2;
+    let por_fat = tmp1.div_ceil(tmp2);
+    let clusters = (total - reservados - 2 * por_fat) / setores_por_cluster;
+    if clusters < 65525 {
+        return Err(Erro::Corrompido("partição pequena demais para FAT32"));
+    }
+    let mut boot = vec![0u8; SETOR];
+    boot[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
+    boot[3..11].copy_from_slice(b"MXOS    ");
+    gravar16(&mut boot, 11, SETOR as u16);
+    boot[13] = setores_por_cluster as u8;
+    gravar16(&mut boot, 14, reservados as u16);
+    boot[16] = 2;
+    boot[21] = 0xF8;
+    gravar16(&mut boot, 24, 63);
+    gravar16(&mut boot, 26, 255);
+    gravar32(&mut boot, 32, total as u32);
+    gravar32(&mut boot, 36, por_fat as u32);
+    gravar32(&mut boot, 44, 2); // raiz
+    gravar16(&mut boot, 48, 1); // FSInfo
+    gravar16(&mut boot, 50, 6); // copia do boot
+    boot[64] = 0x80;
+    boot[66] = 0x29;
+    gravar32(&mut boot, 67, 0x4D58_4F53);
+    let mut nome = [b' '; 11];
+    for (k, c) in rotulo.bytes().take(11).enumerate() {
+        nome[k] = c.to_ascii_uppercase();
+    }
+    boot[71..82].copy_from_slice(&nome);
+    boot[82..90].copy_from_slice(b"FAT32   ");
+    boot[510] = 0x55;
+    boot[511] = 0xAA;
+    let mut info = vec![0u8; SETOR];
+    gravar32(&mut info, 0, 0x4161_5252);
+    gravar32(&mut info, 484, 0x6141_7272);
+    gravar32(&mut info, 488, (clusters - 1) as u32);
+    gravar32(&mut info, 492, 3);
+    gravar32(&mut info, 508, 0xAA55_0000);
+    // area reservada zerada, com o boot e o FSInfo (e as copias)
+    let mut reservada = vec![0u8; reservados as usize * SETOR];
+    reservada[..SETOR].copy_from_slice(&boot);
+    reservada[SETOR..2 * SETOR].copy_from_slice(&info);
+    reservada[6 * SETOR..7 * SETOR].copy_from_slice(&boot);
+    reservada[7 * SETOR..8 * SETOR].copy_from_slice(&info);
+    disco.escrever(0, &reservada)?;
+    // as duas FATs: zeros, com as entradas 0, 1 e a raiz (2) no comeco
+    let pedaco = 2048usize; // setores por escrita (1 MB)
+    let zeros = vec![0u8; pedaco * SETOR];
+    for copia in 0..2u64 {
+        let inicio = reservados + copia * por_fat;
+        let mut feito = 0u64;
+        while feito < por_fat {
+            let n = (por_fat - feito).min(pedaco as u64) as usize;
+            disco.escrever(inicio + feito, &zeros[..n * SETOR])?;
+            feito += n as u64;
+        }
+        let mut primeiro = vec![0u8; SETOR];
+        gravar32(&mut primeiro, 0, 0x0FFF_FFF8);
+        gravar32(&mut primeiro, 4, 0x0FFF_FFFF);
+        gravar32(&mut primeiro, 8, 0x0FFF_FFFF);
+        disco.escrever(inicio, &primeiro)?;
+    }
+    // a raiz: o cluster 2 zerado
+    let dados = reservados + 2 * por_fat;
+    disco.escrever(dados, &zeros[..setores_por_cluster as usize * SETOR])?;
+    disco.sincronizar()
+}

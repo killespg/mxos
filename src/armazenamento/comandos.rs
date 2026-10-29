@@ -41,6 +41,19 @@ pub fn comando(nome: &str, args: &str, saida: &mut dyn Write) -> bool {
             let _ = writeln!(saida, "{args} montado em /mnt/{args} (só leitura)");
         }),
         "desmontar" => super::desmontar_disco(args),
+        #[cfg(feature = "mxq")]
+        "instalar-emmc" if args == "APAGAR-ANDROID" => super::instalar_emmc(&mut *saida),
+        #[cfg(feature = "mxq")]
+        "instalar-emmc" => {
+            let _ = writeln!(saida, "isto APAGA o Android da memória interna e instala o MXOS no lugar.");
+            let _ = writeln!(saida, "o U-Boot fica; a cópia de segurança vai para /mxos-backup no pendrive.");
+            let _ = writeln!(saida, "para confirmar digite: instalar-emmc APAGAR-ANDROID");
+            Ok(())
+        }
+        #[cfg(feature = "mxq")]
+        "restaurar-boot" => super::restaurar_boot().map(|_| {
+            let _ = writeln!(saida, "partição boot do Android de volta (os dados do Android já foram apagados)");
+        }),
         _ => return false,
     };
     if let Err(e) = resultado {

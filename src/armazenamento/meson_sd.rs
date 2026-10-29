@@ -10,7 +10,9 @@
 //! 24 MHz, e leitura/escrita de blocos de 512 bytes por DMA direto (sem
 //! cadeia de descritores: um comando por vez, como o "CMD_ARG dispara").
 //!
-//! A eMMC fica so de leitura: escrever nela por engano apagaria o Android.
+//! A eMMC fica so de leitura, menos nas faixas liberadas pelo instalador
+//! (amlogic.rs: a particao de dados e a boot). O comeco dela, com o U-Boot
+//! e a tabela de particoes, nunca e escrito.
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -59,6 +61,23 @@ const CMD_RESP_SEM_CRC: u32 = 1 << 20;
 const CMD_RESP_128: u32 = 1 << 21;
 const CMD_RESP_NUM: u32 = 1 << 22;
 const CMD_DONO: u32 = 1 << 31;
+
+/// Faixas de setores da eMMC onde pode escrever: (inicio, fim).
+struct Liberadas(core::cell::UnsafeCell<Vec<(u64, u64)>>);
+
+// So o laco principal mexe (com a trava do kernel).
+unsafe impl Sync for Liberadas {}
+
+static LIBERADAS: Liberadas = Liberadas(core::cell::UnsafeCell::new(Vec::new()));
+
+/// Libera a escrita em [inicio, fim) da eMMC (setores).
+pub fn liberar_escrita(inicio: u64, fim: u64) {
+    unsafe { (*LIBERADAS.0.get()).push((inicio, fim)) };
+}
+
+fn liberado(inicio: u64, fim: u64) -> bool {
+    unsafe { (*LIBERADAS.0.get()).iter().any(|&(a, b)| inicio >= a && fim <= b) }
+}
 
 /// Blocos por comando (CMD18/CMD25), ate 255 pelo campo LENGTH.
 const MAX_BLOCOS: usize = 128;
@@ -304,7 +323,7 @@ impl Disco for MesonSd {
     }
 
     fn escrever(&mut self, setor: u64, dados: &[u8]) -> Result<(), Erro> {
-        if self.so_leitura {
+        if self.so_leitura && !liberado(setor, setor + (dados.len() / 512) as u64) {
             return Err(Erro::SoLeitura);
         }
         let mut feito = 0;

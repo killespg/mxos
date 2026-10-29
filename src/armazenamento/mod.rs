@@ -20,6 +20,8 @@ mod comandos;
 mod ext4;
 mod fat32;
 #[cfg(feature = "mxq")]
+mod amlogic;
+#[cfg(feature = "mxq")]
 mod meson_sd;
 mod virtio_blk;
 
@@ -213,6 +215,11 @@ fn procurar_discos(estado: &mut Estado) {
 /// Monta o disco: ext4 em /mnt/<nome>; FAT32 em "/" se ainda nao ha
 /// volume. O resto fica cru (/dev/<nome>).
 fn montar(estado: &mut Estado, disco: Box<dyn Disco>) {
+    #[cfg(feature = "mxq")]
+    let disco = match montar_emmc(estado, disco) {
+        Some(d) => d,
+        None => return,
+    };
     let disco = match tentar_ext4(disco) {
         Ok(fs) => {
             let nome = String::from(fs.nome_disco());
@@ -243,6 +250,58 @@ fn montar(estado: &mut Estado, disco: Box<dyn Disco>) {
             });
         }
     }
+}
+
+/// A eMMC da box: se o MXOS foi instalado nela (particao data em FAT32) e
+/// nao ligou de um pendrive, ela vira "/" (com escrita so na data). Senao
+/// fica crua (devolve o disco).
+#[cfg(feature = "mxq")]
+fn montar_emmc(estado: &mut Estado, mut disco: Box<dyn Disco>) -> Option<Box<dyn Disco>> {
+    if disco.nome() != "emmc" || estado.volume.is_some() {
+        if disco.nome() == "emmc" {
+            estado.crus.push(disco);
+            return None;
+        }
+        return Some(disco);
+    }
+    let tabela = amlogic::ler_mpt(&mut *disco).unwrap_or_default();
+    let total = disco.setores();
+    let Some(dados) = amlogic::achar(&tabela, "data", total).cloned() else {
+        estado.crus.push(disco);
+        return None;
+    };
+    if !amlogic::tem_fat32(&mut *disco, &dados) {
+        estado.crus.push(disco);
+        return None;
+    }
+    meson_sd::liberar_escrita(dados.inicio, dados.inicio + dados.setores);
+    let particao = Box::new(Particao { disco, inicio: dados.inicio, setores: dados.setores });
+    if let Ok(fs) = Fat32::montar(particao, relogio) {
+        estado.volume = Some(fs);
+    }
+    None
+}
+
+/// Troca o Android da eMMC pelo MXOS (comando "instalar-emmc"): ver amlogic.rs.
+#[cfg(feature = "mxq")]
+pub fn instalar_emmc(saida: &mut dyn core::fmt::Write) -> Result<(), Erro> {
+    com(|estado| {
+        let Estado { volume, crus, .. } = estado;
+        let pendrive = volume.as_mut().ok_or(Erro::SemDisco)?;
+        let emmc = crus.iter_mut().find(|d| d.nome() == "emmc").ok_or(Erro::Corrompido("eMMC não achada (ou o MXOS ligou dela)"))?;
+        amlogic::instalar(&mut **emmc, pendrive, saida)
+    })
+}
+
+/// Volta a particao boot do Android (da copia no pendrive).
+#[cfg(feature = "mxq")]
+pub fn restaurar_boot() -> Result<(), Erro> {
+    com(|estado| {
+        let Estado { volume, crus, .. } = estado;
+        let pendrive = volume.as_mut().ok_or(Erro::SemDisco)?;
+        let emmc = crus.iter_mut().find(|d| d.nome() == "emmc").ok_or(Erro::Corrompido("eMMC não achada"))?;
+        amlogic::restaurar_boot(&mut **emmc, pendrive)
+    })
 }
 
 /// O disco inteiro e ext4, ou a primeira particao Linux (0x83) do MBR.
@@ -501,7 +560,7 @@ pub fn montado() -> bool {
 const DATA_PADRAO: (u16, u16) = ((46 << 9) | (1 << 5) | 1, 0);
 
 /// Data e hora atuais no formato da FAT (para as entradas de pasta).
-fn relogio() -> (u16, u16) {
+pub(super) fn relogio() -> (u16, u16) {
     let segundos = crate::plataforma::segundos_rtc();
     let dias = segundos / 86_400;
     let (ano, mes, dia) = data_civil(dias);
