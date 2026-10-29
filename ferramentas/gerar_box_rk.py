@@ -9,8 +9,16 @@
    o device tree) que o U-Boot da Rockchip espera:
      python -I ferramentas/gerar_box_rk.py recovery recovery-original.img mxos.bin recovery-mxos.img
 
-A box liga o MXOS quando entra em recovery (botao de reset apertado ao
-ligar, ou "adb reboot recovery"); o Android normal continua igual.
+3) Monta do zero uma imagem de recovery ANDROID! so com o MXOS, para as
+   boxes de layout antigo da Rockchip (recovery em formato KRNL, so com
+   ramdisk; o U-Boot "bootrk" aceita tambem ANDROID! com kernel dentro e
+   pega o device tree do resource):
+     python -I ferramentas/gerar_box_rk.py nova mxos.bin recovery-mxos.img
+
+A box liga o MXOS quando entra em recovery com o botao de reset apertado
+ao ligar; o Android normal continua igual. NAO use "adb reboot recovery":
+ele grava o pedido na particao misc e, como o MXOS nao apaga, a box
+voltaria sempre para o MXOS.
 """
 
 import hashlib
@@ -95,9 +103,43 @@ def recovery(original, kernel, saida):
     print(f"{saida}: {len(out)} bytes (kernel do MXOS com {len(novo_kernel)} bytes)")
 
 
+# Enderecos do U-Boot legado da Rockchip (RAM em 0x60000000): o kernel e
+# carregado longe do endereco em que o MXOS se copia (0x60200000).
+KERNEL_END = 0x62008000
+RAMDISK_END = 0x64000000
+TAGS_END = 0x60088000
+PAGINA = 2048
+
+
+def nova(kernel, saida):
+    k = pathlib.Path(kernel).read_bytes()
+    if struct.unpack_from("<I", k, 0x24)[0] != 0x016F2818:
+        raise SystemExit("o kernel não tem o cabeçalho de zImage (gere com: binario)")
+    # o bootrk le um ramdisk: uma pagina de zeros que o MXOS ignora
+    ramdisk, second = bytes(PAGINA), b""
+    h = hashlib.sha1()
+    for b in (k, ramdisk, second):
+        h.update(b)
+        h.update(struct.pack("<I", len(b)))
+    cab = bytearray(PAGINA)
+    cab[0:8] = b"ANDROID!"
+    struct.pack_into("<10I", cab, 8, len(k), KERNEL_END, len(ramdisk), RAMDISK_END, 0, 0, TAGS_END, PAGINA, 0, 0)
+    cab[48:52] = b"MXOS"
+    cab[576:596] = h.digest()
+    out = bytearray(cab)
+    for b in (k, ramdisk):
+        out += b + bytes(alinhar(len(b), PAGINA) - len(b))
+    if len(out) > 32 << 20:
+        raise SystemExit("maior que a partição recovery (32 MB)")
+    pathlib.Path(saida).write_bytes(out)
+    print(f"{saida}: {len(out)} bytes (kernel {len(k)} em {KERNEL_END:#x})")
+
+
 def main():
     if len(sys.argv) >= 2 and sys.argv[1] == "binario":
         binario(sys.argv[3] if len(sys.argv) > 3 else ELF_PADRAO, sys.argv[2])
+    elif len(sys.argv) == 4 and sys.argv[1] == "nova":
+        nova(sys.argv[2], sys.argv[3])
     elif len(sys.argv) == 5 and sys.argv[1] == "recovery":
         recovery(sys.argv[2], sys.argv[3], sys.argv[4])
     else:
