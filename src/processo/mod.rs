@@ -29,6 +29,7 @@ pub mod elf;
 pub mod memoria;
 pub mod proc;
 pub mod sinais;
+pub mod soquetes;
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};

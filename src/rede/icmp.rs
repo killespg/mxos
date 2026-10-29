@@ -47,6 +47,7 @@ impl Pilha {
         if dados.len() < TAMANHO || checksum(&[dados]) != 0 {
             return;
         }
+        self.guardar_icmp(origem, dados);
         let identificador = ler16(dados, 4);
         let sequencia = ler16(dados, 6);
         match dados[0] {

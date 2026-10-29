@@ -1,4 +1,6 @@
-//! TCP (RFC 9293), so o lado cliente e uma conexao por vez.
+//! TCP (RFC 9293), so o lado cliente. A conexao do navegador fica em
+//! `Pilha::tcp`; as dos sockets dos programas em `Pilha::soquetes` e
+//! trocam de lugar com ela para usar estas funcoes (soquete.rs).
 //!   porta origem, porta destino, seq, ack, tamanho do cabecalho, flags,
 //!   janela, checksum (com pseudo-cabecalho IP), urgente, opcoes
 //!
@@ -41,6 +43,11 @@ const MAX_TENTATIVAS: u32 = 6;
 /// TIME_WAIT curto: so para responder um FIN repetido.
 const TEMPO_ESPERA_MS: u64 = 2000;
 const PRIMEIRA_PORTA: u16 = 49152;
+
+/// Primeira porta local das conexoes (muda a cada boot).
+pub fn porta_inicial(semente: u64) -> u16 {
+    PRIMEIRA_PORTA + (semente % 10_000) as u16
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Estado {
@@ -105,7 +112,8 @@ pub struct Conexao {
     desde_ms: u64,
     /// Por que a conexao caiu (RST, tempo esgotado).
     pub erro: Option<ErroRede>,
-    proxima_porta: u16,
+    /// O programa fechou o socket: a conexao some quando terminar.
+    pub largada: bool,
 }
 
 /// Um segmento que chegou, ja separado.
@@ -126,10 +134,8 @@ fn antes(a: u32, b: u32) -> bool {
 }
 
 impl Conexao {
-    pub fn nova(semente: u64) -> Conexao {
-        let mut c = Conexao::fechada();
-        c.proxima_porta = PRIMEIRA_PORTA + (semente % 10_000) as u16;
-        c
+    pub fn nova(_semente: u64) -> Conexao {
+        Conexao::fechada()
     }
 
     fn fechada() -> Conexao {
@@ -156,13 +162,22 @@ impl Conexao {
             tentativas: 0,
             desde_ms: 0,
             erro: None,
-            proxima_porta: PRIMEIRA_PORTA,
+            largada: false,
         }
     }
 
     /// Conexao ativa (nem fechada nem em TIME_WAIT)?
     pub fn aberta(&self) -> bool {
         !matches!(self.estado, Estado::Fechada | Estado::TempoEspera)
+    }
+
+    pub fn porta_local(&self) -> u16 {
+        self.porta_local
+    }
+
+    /// Ha bytes recebidos esperando a leitura.
+    pub fn tem_dados(&self) -> bool {
+        !self.recebido.is_empty()
     }
 
     /// O outro lado fechou e ja lemos tudo.
@@ -316,8 +331,23 @@ impl Pilha {
 
     // ---------------- relogios ----------------
 
-    /// Chamado em todo `processar`: ACK atrasado, retransmissao, TIME_WAIT.
+    /// Chamado em todo `processar`: os relogios de todas as conexoes. As
+    /// dos sockets largados que ja terminaram somem.
     pub(super) fn tcp_temporizar(&mut self) {
+        self.tcp_temporizar_atual();
+        for id in 1..=self.soquetes.len() {
+            if self.soquetes[id - 1].is_some() {
+                self.tcp_com(id, |p| p.tcp_temporizar_atual());
+            }
+            if let Some(c) = &self.soquetes[id - 1] {
+                if c.largada && matches!(c.estado, Estado::Fechada | Estado::TempoEspera) {
+                    self.soquetes[id - 1] = None;
+                }
+            }
+        }
+    }
+
+    fn tcp_temporizar_atual(&mut self) {
         let c = &self.tcp;
         if c.estado == Estado::Fechada {
             return;
@@ -352,7 +382,24 @@ impl Pilha {
 
     // ---------------- recebimento ----------------
 
+    /// Segmento que chegou: vai para a conexao dele (a do navegador ou a
+    /// de um socket).
     pub(super) fn receber_tcp(&mut self, origem: [u8; 4], destino: [u8; 4], dados: &[u8]) {
+        if dados.len() >= TAMANHO {
+            let (porta_origem, porta_destino) = (ler16(dados, 0), ler16(dados, 2));
+            let dela = |c: &Conexao| {
+                c.estado != Estado::Fechada && origem == c.remoto && porta_origem == c.porta_remota && porta_destino == c.porta_local
+            };
+            if !dela(&self.tcp) {
+                if let Some(k) = self.soquetes.iter().position(|c| c.as_ref().is_some_and(dela)) {
+                    return self.tcp_com(k + 1, |p| p.receber_tcp_atual(origem, destino, dados));
+                }
+            }
+        }
+        self.receber_tcp_atual(origem, destino, dados)
+    }
+
+    fn receber_tcp_atual(&mut self, origem: [u8; 4], destino: [u8; 4], dados: &[u8]) {
         if dados.len() < TAMANHO {
             return;
         }
@@ -527,10 +574,10 @@ impl Pilha {
         if self.tcp.aberta() {
             self.tcp_abortar();
         }
-        let porta_local = self.tcp.proxima_porta;
+        let porta_local = self.porta_tcp;
+        self.porta_tcp = if porta_local >= 65000 { PRIMEIRA_PORTA } else { porta_local + 1 };
         let iss = (crate::cpu::contador() >> 4) as u32;
         let mut c = Conexao::fechada();
-        c.proxima_porta = if porta_local >= 65000 { PRIMEIRA_PORTA } else { porta_local + 1 };
         c.estado = Estado::SynEnviado;
         c.remoto = remoto;
         c.porta_local = porta_local;
@@ -567,6 +614,12 @@ impl Pilha {
             c.ack_pendente = true;
         }
         n
+    }
+
+    /// Poe de volta na frente do buffer o que o programa nao leu.
+    pub(super) fn tcp_devolver(&mut self, mut resto: Vec<u8>) {
+        resto.append(&mut self.tcp.recebido);
+        self.tcp.recebido = resto;
     }
 
     /// Fechamento educado: FIN depois dos dados que faltam.

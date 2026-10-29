@@ -6,6 +6,7 @@
 //!                     inteiro quando o ultimo descritor fecha (ou no fsync)
 //!   Pasta             a listagem, para o getdents64
 //!   Tubo              pipe: um buffer com contagem de quem le e escreve
+//!   Soquete           socket de rede (soquetes.rs)
 //!
 //! Um open cria uma Descricao (com a posicao); dup, fork e herancas so
 //! copiam o Rc, como no Linux (a posicao e dividida).
@@ -16,6 +17,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use super::soquetes::Soquete;
 use crate::armazenamento::{self, Erro};
 
 // errno do Linux usados aqui e em chamadas.rs.
@@ -88,6 +90,7 @@ pub enum Tipo {
     Tubo(Rc<RefCell<Tubo>>, bool),
     /// Arquivo feito na hora pelo kernel (/proc): so leitura.
     Gerado(Vec<u8>),
+    Soquete(Soquete),
 }
 
 pub struct Descricao {
@@ -101,6 +104,7 @@ pub type Aberto = Rc<RefCell<Descricao>>;
 
 pub const O_ACESSO: u32 = 3;
 pub const O_RDONLY: u32 = 0;
+pub const O_RDWR: u32 = 2;
 pub const O_CREAT: u32 = 0o100;
 pub const O_EXCL: u32 = 0o200;
 pub const O_TRUNC: u32 = 0o1000;

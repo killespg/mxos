@@ -43,6 +43,10 @@ impl Caixa {
         self.fila.retain(|d| d.porta != porta);
     }
 
+    pub fn tem(&self, porta: u16) -> bool {
+        self.fila.iter().any(|d| d.porta == porta)
+    }
+
     /// Proximo datagrama que chegou para `porta`.
     pub fn tirar(&mut self, porta: u16) -> Option<Datagrama> {
         let i = self.fila.iter().position(|d| d.porta == porta)?;

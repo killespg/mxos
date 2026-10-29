@@ -1,7 +1,7 @@
 //! Programa de Linux comum (Rust + musl, estatico) que o MXOS roda sem
 //! mudar nada: mostra os argumentos, o ambiente, a hora, le um arquivo e
-//! cria outro. "ola sinais" e "ola threads" testam tratadores de sinal,
-//! alarm, fork e std::thread. Compilar: cd ferramentas/ola && cargo build --release
+//! cria outro. "ola sinais", "ola threads" e "ola rede [host]" testam
+//! tratadores de sinal, alarm, fork, std::thread e std::net. Compilar: cd ferramentas/ola && cargo build --release
 
 use std::io::{self, BufRead, Write};
 
@@ -13,6 +13,10 @@ fn main() {
     }
     if args.get(1).is_some_and(|a| a == "threads") {
         testar_threads();
+        return;
+    }
+    if args.get(1).is_some_and(|a| a == "rede") {
+        testar_rede(args.get(2).map_or("example.com", String::as_str));
         return;
     }
     println!("Olá do Linux! Sou um programa de Rust + musl rodando no MXOS.");
@@ -141,4 +145,41 @@ fn testar_threads() {
         pronto = par.1.wait(pronto).unwrap();
     }
     println!("Condvar: avisada = {}", *pronto);
+}
+
+fn testar_rede(host: &str) {
+    use std::io::Read;
+    use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
+    let enderecos: Vec<_> = match (host, 80).to_socket_addrs() {
+        Ok(e) => e.collect(),
+        Err(e) => return println!("DNS de {host} falhou: {e}"),
+    };
+    println!("{host} = {:?}", enderecos);
+    let Some(endereco) = enderecos.iter().find(|e| e.is_ipv4()) else { return println!("sem IPv4") };
+    let mut conexao = match TcpStream::connect_timeout(endereco, std::time::Duration::from_secs(5)) {
+        Ok(c) => c,
+        Err(e) => return println!("connect falhou: {e}"),
+    };
+    println!("conectado de {:?} para {:?}", conexao.local_addr().ok(), conexao.peer_addr().ok());
+    let pedido = format!("GET / HTTP/1.0\r\nHost: {host}\r\n\r\n");
+    conexao.write_all(pedido.as_bytes()).unwrap();
+    let mut resposta = Vec::new();
+    let _ = conexao.read_to_end(&mut resposta);
+    let texto = String::from_utf8_lossy(&resposta);
+    println!("resposta: {} bytes, primeira linha: {:?}", resposta.len(), texto.lines().next());
+    let udp = UdpSocket::bind("0.0.0.0:0").unwrap();
+    udp.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+    // consulta DNS feita a mao (tipo A de example.com)
+    let mut consulta = vec![0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    for parte in "example.com".split('.') {
+        consulta.push(parte.len() as u8);
+        consulta.extend_from_slice(parte.as_bytes());
+    }
+    consulta.extend_from_slice(&[0, 0, 1, 0, 1]);
+    udp.send_to(&consulta, "10.0.2.3:53").unwrap();
+    let mut buf = [0u8; 512];
+    match udp.recv_from(&mut buf) {
+        Ok((n, de)) => println!("UDP: {n} bytes de {de}, id {:02x}{:02x}", buf[0], buf[1]),
+        Err(e) => println!("UDP sem resposta: {e}"),
+    }
 }

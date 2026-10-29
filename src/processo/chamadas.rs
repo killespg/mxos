@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use super::arquivos::{self, *};
 use super::memoria::{Espaco, PAGINA, Permissao};
 use super::sinais::{self, Acao};
-use super::{elf, Contexto, Dividido, Estado, Tabela, TAMANHO_PILHA, TOPO_PILHA};
+use super::{elf, soquetes, Contexto, Dividido, Estado, Tabela, TAMANHO_PILHA, TOPO_PILHA};
 use crate::{armazenamento, cpu, psci};
 
 /// Descritores por processo.
@@ -127,6 +127,15 @@ impl Linux {
         }
     }
 
+    pub fn fd_aberto(&self, fd: u64) -> Result<Aberto, i64> {
+        self.fd(fd)
+    }
+
+    /// Poe `aberto` no menor descritor livre.
+    pub fn novo_descritor(&mut self, aberto: Aberto, fecha_no_exec: bool) -> Result<usize, i64> {
+        self.novo_fd(aberto, fecha_no_exec, 0)
+    }
+
     fn fd(&self, fd: u64) -> Result<Aberto, i64> {
         match self.fds.get(fd as usize) {
             Some(Some(f)) => Ok(f.aberto.clone()),
@@ -150,7 +159,7 @@ impl Linux {
 }
 
 /// O que fazer com o processo depois da chamada.
-enum Fim {
+pub enum Fim {
     /// Volta para o programa com este valor em x0.
     Valor(i64),
     /// Espera (o estado ja foi trocado): o SVC roda de novo quando acordar.
@@ -306,6 +315,24 @@ fn despachar(t: &mut Tabela, i: usize, numero: u64, a: [u64; 6]) -> Fim {
         222 => mmap(t, i, a[0] as usize, a[1] as usize, a[2], a[3], a[4] as i64, a[5] as usize),
         226 => mprotect(t, i, a[0] as usize, a[1] as usize, a[2]),
         233 => Ok(0),
+        293 => Err(ENOSYS), // rseq: a glibc vive sem
+        // rede (soquetes.rs)
+        198 => soquetes::socket(t, i, a[0], a[1], a[2]),
+        199 => Err(97), // socketpair: so AF_UNIX, que nao existe
+        200 => soquetes::bind(t, i, a[0], a[1] as usize, a[2] as usize),
+        201 => soquetes::listen(t, i, a[0]),
+        202 | 242 => Err(95), // accept: sem servidor ainda
+        203 => return soquetes::connect(t, i, a[0], a[1] as usize, a[2] as usize),
+        204 => soquetes::nome(t, i, a[0], a[1] as usize, a[2] as usize, false),
+        205 => soquetes::nome(t, i, a[0], a[1] as usize, a[2] as usize, true),
+        206 => return soquetes::sendto(t, i, a[0], a[1] as usize, a[2] as usize, a[4] as usize, a[5] as usize),
+        207 => return soquetes::recvfrom(t, i, a[0], a[1] as usize, a[2] as usize, a[3], a[4] as usize, a[5] as usize),
+        208 => Ok(0), // setsockopt: aceita e ignora
+        209 => soquetes::getsockopt(t, i, a[0], a[1], a[2], a[3] as usize, a[4] as usize),
+        210 => soquetes::shutdown(t, i, a[0], a[1]),
+        211 => return soquetes::sendmsg(t, i, a[0], a[1] as usize),
+        212 => return soquetes::recvmsg(t, i, a[0], a[1] as usize, a[2]),
+        269 => return soquetes::sendmmsg(t, i, a[0], a[1] as usize, a[2] as usize),
         260 => return wait4(t, i, a[0] as i64, a[1] as usize, a[2]),
         278 => getrandom(t, i, a[0] as usize, a[1] as usize),
         _ => {
@@ -319,13 +346,13 @@ fn despachar(t: &mut Tabela, i: usize, numero: u64, a: [u64; 6]) -> Fim {
 // ---------------------------------------------------------------------
 // Memoria do programa
 
-fn ler_mem(t: &Tabela, i: usize, endereco: usize, tamanho: usize) -> Result<Vec<u8>, i64> {
+pub fn ler_mem(t: &Tabela, i: usize, endereco: usize, tamanho: usize) -> Result<Vec<u8>, i64> {
     let mut v = vec![0u8; tamanho];
     t.processos[i].espaco.ler(endereco, &mut v).map_err(|_| EFAULT)?;
     Ok(v)
 }
 
-fn escrever_mem(t: &mut Tabela, i: usize, endereco: usize, dados: &[u8]) -> Result<(), i64> {
+pub fn escrever_mem(t: &mut Tabela, i: usize, endereco: usize, dados: &[u8]) -> Result<(), i64> {
     t.processos[i].espaco.escrever(endereco, dados).map_err(|_| EFAULT)
 }
 
@@ -454,6 +481,9 @@ fn ler(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize) -> Fi
         Err(e) => return Fim::Valor(-e),
     };
     let tamanho = tamanho.min(1 << 20);
+    if matches!(aberto.borrow().tipo, Tipo::Soquete(_)) {
+        return soquetes::recvfrom(t, i, fd, endereco, tamanho, 0, 0, 0);
+    }
     let mut d = aberto.borrow_mut();
     let nao_bloqueia = d.flags & O_NONBLOCK != 0;
     let posicao = d.posicao;
@@ -482,6 +512,7 @@ fn ler(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize) -> Fi
         Tipo::Zero => vec![0; tamanho],
         Tipo::Aleatorio => (0..tamanho.div_ceil(16)).flat_map(|k| elf::aleatorio(k as u64)).take(tamanho).collect(),
         Tipo::Pasta { .. } => return Fim::Valor(-EISDIR),
+        Tipo::Soquete(_) => return Fim::Valor(-EBADF), // ja foi para o soquetes.rs
         Tipo::Tubo(tubo, _) => {
             let mut tb = tubo.borrow_mut();
             if tb.buffer.is_empty() {
@@ -525,6 +556,9 @@ fn escrever_dados(t: &mut Tabela, i: usize, fd: u64, dados: &[u8]) -> Fim {
         Ok(a) => a,
         Err(e) => return Fim::Valor(-e),
     };
+    if matches!(aberto.borrow().tipo, Tipo::Soquete(_)) {
+        return soquetes::enviar(t, i, fd, dados, None);
+    }
     let mut d = aberto.borrow_mut();
     if d.flags & O_ACESSO == O_RDONLY && !matches!(d.tipo, Tipo::Terminal | Tipo::Tubo(..)) {
         return Fim::Valor(-EBADF);
@@ -536,6 +570,7 @@ fn escrever_dados(t: &mut Tabela, i: usize, fd: u64, dados: &[u8]) -> Fim {
         Tipo::Nulo | Tipo::Zero | Tipo::Aleatorio => {}
         Tipo::Pasta { .. } => return Fim::Valor(-EISDIR),
         Tipo::Gerado(_) => return Fim::Valor(-EACCES),
+        Tipo::Soquete(_) => return Fim::Valor(-EBADF), // ja foi para o soquetes.rs
         Tipo::Tubo(tubo, _) => {
             let mut tb = tubo.borrow_mut();
             if tb.leitores == 0 {
@@ -898,10 +933,18 @@ const TIOCGPGRP: u64 = 0x540F;
 const TIOCSPGRP: u64 = 0x5410;
 const TIOCGWINSZ: u64 = 0x5413;
 const FIONREAD: u64 = 0x541B;
+const FIONBIO: u64 = 0x5421;
 
 fn ioctl(t: &mut Tabela, i: usize, fd: u64, pedido: u64, endereco: usize) -> Fim {
     let r = (|| -> R {
         let aberto = t.processos[i].linux.fd(fd)?;
+        if pedido == FIONBIO {
+            // liga ou desliga o O_NONBLOCK (qualquer descritor)
+            let liga = ler_mem(t, i, endereco, 4)? != [0; 4];
+            let mut d = aberto.borrow_mut();
+            d.flags = if liga { d.flags | O_NONBLOCK } else { d.flags & !O_NONBLOCK };
+            return Ok(0);
+        }
         if !matches!(aberto.borrow().tipo, Tipo::Terminal) {
             return Err(ENOTTY);
         }
@@ -951,6 +994,7 @@ fn ioctl(t: &mut Tabela, i: usize, fd: u64, pedido: u64, endereco: usize) -> Fim
 fn ppoll(t: &mut Tabela, i: usize, endereco: usize, quantos: usize, prazo: usize) -> Fim {
     const POLLIN: u16 = 1;
     const POLLOUT: u16 = 4;
+    const POLLERR: u16 = 8;
     const POLLHUP: u16 = 0x10;
     const POLLNVAL: u16 = 0x20;
     let quantos = quantos.min(256);
@@ -982,11 +1026,15 @@ fn ppoll(t: &mut Tabela, i: usize, endereco: usize, quantos: usize, prazo: usize
                             0
                         }
                     }
+                    Tipo::Soquete(s) => {
+                        let (ler, escrever, erro) = soquetes::prontidao(s);
+                        (if ler { POLLIN } else { 0 }) | (if escrever { POLLOUT } else { 0 }) | (if erro { POLLERR } else { 0 })
+                    }
                     _ => POLLIN | POLLOUT,
                 },
             }
         };
-        let resposta = tem & (quer | POLLHUP | POLLNVAL);
+        let resposta = tem & (quer | POLLHUP | POLLNVAL | POLLERR);
         fds[k * 8 + 6..k * 8 + 8].copy_from_slice(&resposta.to_le_bytes());
         if resposta != 0 {
             prontos += 1;

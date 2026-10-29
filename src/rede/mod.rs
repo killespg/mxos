@@ -9,7 +9,8 @@
 //!   udp         datagramas (DHCP e DNS)
 //!   dhcp        pega IP, mascara, gateway e DNS
 //!   dns         nome -> IP (registro A)
-//!   tcp         uma conexao cliente por vez
+//!   tcp         conexoes cliente (a do navegador e as dos programas)
+//!   soquete     a rede para os sockets dos programas (TCP, UDP, ICMP)
 //!   http        GET com redirecionamentos
 //!   comandos    ip, ping, dns e http no shell
 //!
@@ -32,6 +33,7 @@ mod ethernet;
 mod http;
 mod icmp;
 mod ipv4;
+pub mod soquete;
 mod tcp;
 mod udp;
 mod virtio_net;
@@ -124,6 +126,13 @@ struct Pilha {
     udp: udp::Caixa,
     icmp: icmp::Ecos,
     tcp: tcp::Conexao,
+    /// As conexoes TCP dos sockets dos programas (numero = indice + 1).
+    soquetes: Vec<Option<tcp::Conexao>>,
+    /// Proxima porta local de uma conexao TCP.
+    porta_tcp: u16,
+    /// Sockets de ping abertos e o ICMP que chegou para eles.
+    ouvintes_icmp: usize,
+    icmp_recebidos: soquete::FilaIcmp,
     cache_dns: Vec<(String, [u8; 4])>,
     id_ip: u16,
     pacotes_rx: u64,
@@ -145,6 +154,10 @@ impl Pilha {
             udp: udp::Caixa::nova(),
             icmp: icmp::Ecos::novo(),
             tcp: tcp::Conexao::nova(semente),
+            soquetes: Vec::new(),
+            porta_tcp: tcp::porta_inicial(semente),
+            ouvintes_icmp: 0,
+            icmp_recebidos: alloc::collections::VecDeque::new(),
             cache_dns: Vec::new(),
             id_ip: semente as u16,
             pacotes_rx: 0,

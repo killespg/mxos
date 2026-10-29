@@ -523,6 +523,10 @@ def conteudo_padrao() -> dict:
             "passwd": b"root:x:0:0:root:/:/bin/sh\n",
             "group": b"root:x:0:\n",
             "hostname": b"mxos\n",
+            # rede dos programas: o DNS e o do QEMU (-netdev user)
+            "resolv.conf": b"nameserver 10.0.2.3\n",
+            "hosts": b"127.0.0.1 localhost\n10.0.2.15 mxos\n",
+            "nsswitch.conf": b"hosts: files dns\n",
             "profile": "# lido pelo sh -l do BusyBox\nexport PS1='\\w # '\necho \"BusyBox no MXOS: help lista os comandos do shell, busybox --list os programas.\"\n".encode("utf-8"),
         },
         "LEIAME.TXT": LEIAME.encode("utf-8"),
