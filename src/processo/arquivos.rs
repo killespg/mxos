@@ -45,6 +45,8 @@ pub const ERANGE: i64 = 34;
 pub const ENAMETOOLONG: i64 = 36;
 pub const ENOSYS: i64 = 38;
 pub const ENOTEMPTY: i64 = 39;
+/// Biblioteca (ou interpretador) que falta ou esta estragada.
+pub const ELIBBAD: i64 = 80;
 
 pub fn errno(e: Erro) -> i64 {
     match e {

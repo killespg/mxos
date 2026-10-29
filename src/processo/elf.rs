@@ -9,9 +9,11 @@
 //!         auxv: (AT_*, valor)..., (AT_NULL, 0)
 //!         ... textos (argumentos, ambiente, "aarch64", 16 bytes aleatorios)
 //!
-//! Aceita ET_EXEC estatico e ET_DYN sem interpretador (PIE estatico, que
-//! se reloca sozinho com o AT_PHDR e o AT_ENTRY). Programa dinamico (com
-//! PT_INTERP) precisaria do ld-linux e das bibliotecas: recusado.
+//! Aceita ET_EXEC e ET_DYN (PIE). Programa dinamico (com PT_INTERP): o
+//! carregador mapeia tambem o interpretador (o ld-linux da glibc, em /lib)
+//! em BASE_INTERP e comeca por ele, com AT_BASE apontando para ele e
+//! AT_ENTRY/AT_PHDR para o programa; o ld-linux abre as bibliotecas com
+//! openat + mmap, como no Linux.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -19,8 +21,11 @@ use alloc::vec::Vec;
 use super::memoria::{Espaco, PAGINA, Permissao};
 use crate::cpu;
 
-/// Onde um PIE estatico (ET_DYN) e carregado.
+/// Onde um PIE (ET_DYN) e carregado.
 const BASE_PIE: usize = 0x40_0000;
+/// Onde o interpretador (ld-linux) e carregado: abaixo da pilha, longe do
+/// brk e do comeco da area do mmap.
+pub const BASE_INTERP: usize = 0x0700_0000;
 
 const PT_LOAD: u32 = 1;
 const PT_INTERP: u32 = 3;
@@ -57,6 +62,8 @@ pub struct Carregado {
     pub phnum: usize,
     /// Fim do ultimo segmento: o brk comeca aqui (arredondado).
     pub fim: usize,
+    /// Onde o interpretador foi carregado (AT_BASE); 0 = estatico.
+    pub base_interp: usize,
 }
 
 fn u16_em(d: &[u8], i: usize) -> Option<u16> {
@@ -119,20 +126,30 @@ pub fn conferir(d: &[u8]) -> Result<(), &'static str> {
     }
 }
 
+/// O interpretador pedido pelo PT_INTERP (ex.: /lib/ld-linux-aarch64.so.1).
+pub fn interpretador(d: &[u8]) -> Option<alloc::string::String> {
+    let s = segmentos(d)?.into_iter().find(|s| s.tipo == PT_INTERP)?;
+    let bytes = d.get(s.offset..s.offset.checked_add(s.filesz)?)?;
+    let fim = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..fim]).ok().map(alloc::string::String::from)
+}
+
 /// Mapeia o programa no espaco. Devolve onde ele comeca e o resto que a
 /// pilha inicial precisa.
 pub fn carregar(d: &[u8], espaco: &mut Espaco) -> Result<Carregado, &'static str> {
+    carregar_em(d, espaco, BASE_PIE)
+}
+
+/// Como `carregar`, com um ET_DYN comecando em `base_pie`.
+pub fn carregar_em(d: &[u8], espaco: &mut Espaco, base_pie: usize) -> Result<Carregado, &'static str> {
     conferir(d)?;
     let segmentos = segmentos(d).ok_or("cabeçalhos do ELF quebrados")?;
-    if segmentos.iter().any(|s| s.tipo == PT_INTERP) {
-        return Err("programa dinâmico (precisa do ld-linux): o MXOS só roda programas estáticos");
-    }
     let carregaveis: Vec<&Segmento> = segmentos.iter().filter(|s| s.tipo == PT_LOAD && s.memsz > 0).collect();
     if carregaveis.is_empty() {
         return Err("ELF sem segmentos para carregar");
     }
     let menor = carregaveis.iter().map(|s| s.vaddr).min().unwrap_or(0) & !(PAGINA - 1);
-    let base = if u16_em(d, 16) == Some(3) { BASE_PIE.wrapping_sub(menor) } else { 0 };
+    let base = if u16_em(d, 16) == Some(3) { base_pie.wrapping_sub(menor) } else { 0 };
 
     // permissao de cada pagina: a soma dos segmentos que passam por ela
     let mut paginas: BTreeMap<usize, u32> = BTreeMap::new();
@@ -177,7 +194,7 @@ pub fn carregar(d: &[u8], espaco: &mut Espaco) -> Result<Carregado, &'static str
         })
         .unwrap_or(0);
     let fim = carregaveis.iter().map(|s| s.vaddr + base + s.memsz).max().unwrap_or(0);
-    Ok(Carregado { entrada: u64_em(d, 24).unwrap_or(0).wrapping_add(base), phdr, phnum, fim })
+    Ok(Carregado { entrada: u64_em(d, 24).unwrap_or(0).wrapping_add(base), phdr, phnum, fim, base_interp: 0 })
 }
 
 /// O que a CPU tem, no formato do AT_HWCAP do Linux (so o que da para
@@ -270,7 +287,7 @@ pub fn montar_pilha(
         (AT_PHENT, 56),
         (AT_PHNUM, programa.phnum as u64),
         (AT_PAGESZ, PAGINA as u64),
-        (AT_BASE, 0),
+        (AT_BASE, programa.base_interp as u64),
         (AT_FLAGS, 0),
         (AT_ENTRY, programa.entrada as u64),
         (AT_UID, 0),

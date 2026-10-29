@@ -1686,9 +1686,17 @@ pub fn trocar_programa(t: &mut Tabela, i: usize, caminho: &str, mut argumentos: 
     let i = t.indice(pid).unwrap_or(i);
     let asid = t.processos[i].espaco.asid;
     let mut espaco = Espaco::novo(asid);
-    let programa = elf::carregar(&dados, &mut espaco).map_err(|_| ENOEXEC)?;
+    let mut programa = elf::carregar(&dados, &mut espaco).map_err(|_| ENOEXEC)?;
     espaco.brk_inicio = programa.fim.next_multiple_of(PAGINA);
     espaco.brk = espaco.brk_inicio;
+    // programa dinamico: o ld-linux entra junto e comeca primeiro
+    let mut inicio = programa.entrada;
+    if let Some(caminho_interp) = elf::interpretador(&dados) {
+        let dados_interp = armazenamento::ler(&caminho_interp).map_err(|_| ELIBBAD)?;
+        let interp = elf::carregar_em(&dados_interp, &mut espaco, elf::BASE_INTERP).map_err(|_| ELIBBAD)?;
+        programa.base_interp = interp.entrada - u64_do_elf(&dados_interp, 24);
+        inicio = interp.entrada;
+    }
     espaco.mapear_faixa(TOPO_PILHA - TAMANHO_PILHA, TOPO_PILHA, Permissao::Dados).map_err(|_| ENOMEM)?;
     let args: Vec<&[u8]> = argumentos.iter().map(|a| a.as_slice()).collect();
     let env: Vec<&[u8]> = ambiente.iter().map(|a| a.as_slice()).collect();
@@ -1696,7 +1704,7 @@ pub fn trocar_programa(t: &mut Tabela, i: usize, caminho: &str, mut argumentos: 
 
     let p = &mut t.processos[i];
     p.espaco = Dividido::novo(espaco);
-    p.contexto = Contexto::novo(programa.entrada, sp);
+    p.contexto = Contexto::novo(inicio, sp);
     p.limpar_tid = 0;
     // o nome e o do argv[0] (o applet do BusyBox), como no ps do Linux
     let primeiro = argumentos.first().map(|a| String::from_utf8_lossy(a).into_owned()).unwrap_or_default();
@@ -1726,6 +1734,11 @@ pub fn trocar_programa(t: &mut Tabela, i: usize, caminho: &str, mut argumentos: 
         t.acordar_vfork(pai);
     }
     Ok(())
+}
+
+/// Um campo de 64 bits do cabecalho de um ELF (ja conferido).
+fn u64_do_elf(d: &[u8], posicao: usize) -> usize {
+    u64::from_le_bytes(d[posicao..posicao + 8].try_into().unwrap()) as usize
 }
 
 /// Pastas onde um programa que nao existe vira applet do BusyBox.

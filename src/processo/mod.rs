@@ -837,6 +837,7 @@ fn motivo_de_erro(errno: i64, caminho: &str) -> String {
         },
         arquivos::EISDIR => format!("{caminho}: é uma pasta"),
         arquivos::ENOMEM => format!("{caminho}: sem memória"),
+        arquivos::ELIBBAD => format!("{caminho}: programa dinâmico, e o interpretador (ld-linux) falta ou não carregou"),
         e => format!("{caminho}: erro {e}"),
     }
 }

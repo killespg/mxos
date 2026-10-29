@@ -505,19 +505,22 @@ body { background-color: #f8fafc; }
 # Programas de Linux aarch64 (estaticos) que vao para /bin: ferramentas/binarios/.
 # O ola sai de ferramentas/ola (cargo build --release); o busybox vem do Debian.
 BINARIOS = pathlib.Path(__file__).resolve().parent / "binarios"
+BIBLIOTECAS = pathlib.Path(__file__).resolve().parent / "bibliotecas"
 
 
-def programas() -> dict:
-    """Os executaveis de ferramentas/binarios (os que existirem)."""
-    if not BINARIOS.is_dir():
+def programas(pasta: pathlib.Path = BINARIOS) -> dict:
+    """Os arquivos de ferramentas/binarios (ou de outra pasta), se existirem."""
+    if not pasta.is_dir():
         return {}
-    return {arquivo.name: arquivo.read_bytes() for arquivo in sorted(BINARIOS.iterdir()) if arquivo.is_file()}
+    return {arquivo.name: arquivo.read_bytes() for arquivo in sorted(pasta.iterdir()) if arquivo.is_file()}
 
 
 def conteudo_padrao() -> dict:
     """Arvore do disco: dict = pasta, bytes = arquivo."""
     return {
         "bin": programas(),
+        # o ld-linux e as bibliotecas da glibc (Debian), para os programas dinamicos
+        "lib": programas(BIBLIOTECAS),
         # para os programas de Linux (ls -l, id, whoami e o prompt do sh)
         "etc": {
             "passwd": b"root:x:0:0:root:/:/bin/sh\n",

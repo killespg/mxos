@@ -101,7 +101,7 @@ fn le_a_imagem_do_python() {
     let imagem = imagem_nova("leitura.img", &[]);
     let mut fs = montar(&imagem);
     assert_eq!(fs.rotulo(), "MXOS");
-    assert_eq!(nomes(&mut fs, "/"), ["bin", "etc", "LEIAME.TXT", "config", "paginas", "documentos"]);
+    assert_eq!(nomes(&mut fs, "/"), ["bin", "lib", "etc", "LEIAME.TXT", "config", "paginas", "documentos"]);
     assert_eq!(nomes(&mut fs, "/paginas"), ["index.html", "sobre.html", "guia.html", "tabelas.html", "teste.html", "css.html", "estilo.css"]);
     assert_eq!(nomes(&mut fs, "/documentos"), ["notas.txt", "Lista de compras.txt", "Anotações.txt"]);
     assert!(nomes(&mut fs, "/config").is_empty());
@@ -136,7 +136,7 @@ fn le_a_imagem_do_python() {
 fn superfloppy() {
     let imagem = imagem_nova("superfloppy.img", &["--sem-mbr"]);
     let mut fs = montar(&imagem);
-    assert_eq!(nomes(&mut fs, "/"), ["bin", "etc", "LEIAME.TXT", "config", "paginas", "documentos"]);
+    assert_eq!(nomes(&mut fs, "/"), ["bin", "lib", "etc", "LEIAME.TXT", "config", "paginas", "documentos"]);
     fs.escrever("/config/tema.cfg", b"tema=Azul\n").unwrap();
     drop(fs);
     verificar(&imagem, "superfloppy.img");
@@ -336,7 +336,7 @@ fn operacoes_aleatorias() {
         }
     }
     let lista = verificar(&imagem, "aleatorio.img");
-    let originais = 20; // com /bin (ola, busybox) e /etc (com resolv.conf, hosts, nsswitch.conf) // arquivos que ja vinham na imagem
+    let originais = 25; // + /lib (ld-linux, libc, libresolv) e /bin/busybox-dinamico; // com /bin (ola, busybox) e /etc (com resolv.conf, hosts, nsswitch.conf) // arquivos que ja vinham na imagem
     assert_eq!(lista.iter().filter(|l| l.starts_with("ARQ ")).count(), modelo.len() + originais);
 }
 
