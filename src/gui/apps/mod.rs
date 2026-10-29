@@ -6,6 +6,7 @@
 //!   - configuracoes: personalizar, teclado, rede, disco e sistema
 //!   - drivers:       painel com os dispositivos e os drivers de cada um
 //!   - editor:        editor de texto
+//!   - janela_x:      uma janela de programa de Linux (servidor X11)
 //!   - navegador:     o navegador (o motor fica em crate::navegador)
 //!   - pintura:       paleta de cores, pincel com o mouse, limpar
 //!   - sobre:         versao, cpu, memoria e tempo ligado
@@ -17,6 +18,7 @@ pub mod calculadora;
 pub mod configuracoes;
 pub mod drivers;
 pub mod editor;
+pub mod janela_x;
 pub mod navegador;
 pub mod pintura;
 pub mod sobre;

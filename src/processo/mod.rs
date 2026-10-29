@@ -26,8 +26,10 @@
 pub mod arquivos;
 pub mod chamadas;
 pub mod elf;
+pub mod espera;
 pub mod memoria;
 pub mod proc;
+pub mod shm;
 pub mod sinais;
 pub mod soquetes;
 pub mod unix;
@@ -58,7 +60,7 @@ const MAX_PROCESSOS: usize = 64;
 /// ASIDs de 8 bits; o 0 e do kernel.
 const MAX_ASID: u16 = 255;
 /// Ambiente dos programas que o shell do MXOS roda.
-const AMBIENTE: [&str; 6] = ["PATH=/bin:/", "HOME=/", "TERM=vt100", "USER=root", "LANG=C.UTF-8", "PS1=\\w # "];
+const AMBIENTE: [&str; 7] = ["PATH=/bin:/usr/bin:/", "HOME=/", "TERM=vt100", "USER=root", "LANG=C.UTF-8", "PS1=\\w # ", "DISPLAY=:0"];
 
 // ---------------------------------------------------------------------
 // Contexto (o mesmo layout que o vetores.s usa)
@@ -610,8 +612,10 @@ pub fn rodar() -> bool {
                 novidade = true;
             }
             if unix::mexeu() {
-                // um soquete local mudou: quem espera por ele tenta de novo
-                // ja, sem esperar o proximo tique
+                // um soquete local mudou: o servidor X11 atende na hora e
+                // quem espera por um soquete tenta de novo, sem esperar o
+                // proximo tique
+                crate::x11::atender();
                 t.acordar(true);
             }
             if timer::tiques() != tique {

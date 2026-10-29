@@ -44,6 +44,8 @@ mod uart;
 #[cfg(not(feature = "mxq"))]
 mod virtio;
 mod video;
+#[cfg(not(feature = "mxq"))]
+mod x11;
 
 use core::arch::global_asm;
 use core::fmt::Write;

@@ -236,10 +236,11 @@ pub fn socket(t: &mut Tabela, i: usize, familia: u64, tipo: u64, protocolo: u64)
 
 pub fn connect(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize) -> Fim {
     if familia(t, i, endereco, tamanho) == Ok(AF_UNIX) {
+        let quem = t.processos[i].nome.clone();
         let r = ler_nome_unix(t, i, endereco, tamanho).and_then(|nome| {
             com_soquete(t, i, fd, |s, _| match s {
                 Soquete::Unix(u @ Unix::Novo { .. }) => {
-                    let ponta = unix::conectar(&nome).ok_or(if nome.starts_with('@') { ECONNREFUSED } else { ENOENT })?;
+                    let ponta = unix::conectar(&nome, &quem).ok_or(if nome.starts_with('@') { ECONNREFUSED } else { ENOENT })?;
                     *u = Unix::Conectado { ponta, outro: Some(nome) };
                     Ok(0)
                 }

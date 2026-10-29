@@ -25,6 +25,7 @@ pub mod tema;
 pub mod widgets;
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::fmt::Write;
 
 use crate::config::{self, Config};
@@ -32,7 +33,8 @@ use crate::entrada::{Entrada, Layout};
 use crate::shell::Shell;
 use crate::uart::Uart;
 use crate::video::tela::Tela;
-use crate::{drivers, excecao, irq, processo, rede, timer};
+use crate::{drivers, excecao, irq, processo, rede, timer, x11};
+use apps::janela_x::JanelaX;
 use apps::terminal::{self, AppTerminal};
 use janelas::{EventoApp, Gerenciador, Pedido};
 use widgets::Icone;
@@ -58,6 +60,9 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
     apps::registrar_apps_basicos(&mut gerenciador);
     gerenciador.registrar_app(terminal::TITULO, Icone::Terminal, terminal::criar);
     apps::registrar_atalhos(&mut gerenciador);
+    // programas de Linux com janela falam X11 em /tmp/.X11-unix/X0
+    x11::iniciar(largura, altura);
+    let mut janelas_x: Vec<usize> = Vec::new();
 
     let tela = (largura as i32, altura as i32);
     let (x, y) = posicao_do_terminal(tela);
@@ -82,6 +87,7 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
         }
         // os processos rodam ate o proximo tique; o shell da janela mostra a saida
         gerenciador.enviar(id_terminal, EventoApp::Processos);
+        atender_x11(&mut gerenciador, &mut janelas_x, (largura as i32, altura as i32));
         gerenciador.compor(&framebuffer);
         // o tique de 100 Hz acorda; teclado e mouse sao lidos na volta.
         // Com processo pronto a CPU nao dorme: ele usa o tempo ate o tique.
@@ -102,6 +108,24 @@ fn anunciar_config(shell: &mut Shell, cfg: &Config, layout: Layout) {
         tema::aparencia().papel.rotulo(),
         layout.descricao()
     );
+}
+
+/// O servidor X11: atende os programas, abre uma janela do MXOS para cada
+/// janela X nova e avisa as abertas (redesenham se o programa desenhou).
+fn atender_x11(gerenciador: &mut Gerenciador, janelas: &mut Vec<usize>, (largura, altura): (i32, i32)) {
+    x11::atender();
+    for id in x11::janelas_novas() {
+        let app = JanelaX::nova(id);
+        let (l, a) = app.tamanho_inicial();
+        let x = ((largura - l as i32) / 2).max(0);
+        let y = ((altura - tema::ALTURA_BARRA_TAREFAS - a as i32 - tema::ALTURA_TITULO) / 2).max(0);
+        janelas.push(gerenciador.abrir(Box::new(app), x, y));
+    }
+    let abertas = gerenciador.janelas();
+    janelas.retain(|j| abertas.iter().any(|a| a.id == *j));
+    for &j in janelas.iter() {
+        gerenciador.enviar(j, EventoApp::Processos);
+    }
 }
 
 /// Pedidos dos apps que so este laco atende (ele e o dono da Entrada).

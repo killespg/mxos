@@ -7,6 +7,7 @@
 //!   Pasta             a listagem, para o getdents64
 //!   Tubo              pipe: um buffer com contagem de quem le e escreve
 //!   Soquete           socket de rede (soquetes.rs)
+//!   Evento, Epoll     eventfd e epoll (espera.rs)
 //!
 //! Um open cria uma Descricao (com a posicao); dup, fork e herancas so
 //! copiam o Rc, como no Linux (a posicao e dividida).
@@ -93,6 +94,8 @@ pub enum Tipo {
     /// Arquivo feito na hora pelo kernel (/proc): so leitura.
     Gerado(Vec<u8>),
     Soquete(Soquete),
+    Evento(Rc<RefCell<super::espera::Contador>>),
+    Epoll(super::espera::Lista),
 }
 
 pub struct Descricao {

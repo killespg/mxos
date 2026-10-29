@@ -24,13 +24,13 @@ use alloc::vec::Vec;
 use super::arquivos::{self, *};
 use super::memoria::{Espaco, PAGINA, Permissao};
 use super::sinais::{self, Acao};
-use super::{elf, soquetes, Contexto, Dividido, Estado, Tabela, TAMANHO_PILHA, TOPO_PILHA};
+use super::{elf, espera, shm, soquetes, Contexto, Dividido, Estado, Tabela, TAMANHO_PILHA, TOPO_PILHA};
 use crate::{armazenamento, cpu, psci};
 
 /// Descritores por processo.
 const MAX_FDS: usize = 256;
 /// O mmap procura espaco a partir daqui (o brk cresce de baixo).
-const BASE_MMAP: usize = 0x0300_0000;
+pub const BASE_MMAP: usize = 0x0300_0000;
 /// O brk nao passa daqui.
 const LIMITE_BRK: usize = BASE_MMAP;
 const AT_FDCWD: i64 = -100;
@@ -233,7 +233,12 @@ fn despachar(t: &mut Tabela, i: usize, numero: u64, a: [u64; 6]) -> Fim {
         66 => return vetor(t, i, a[0], a[1] as usize, a[2] as usize, true),
         67 => pread(t, i, a[0], a[1] as usize, a[2] as usize, a[3] as usize),
         68 => pwrite(t, i, a[0], a[1] as usize, a[2] as usize, a[3] as usize),
-        73 => return ppoll(t, i, a[0] as usize, a[1] as usize, a[2] as usize),
+        73 => return espera::ppoll(t, i, a[0] as usize, a[1] as usize, a[2] as usize),
+        72 => return espera::pselect6(t, i, a[0] as usize, [a[1] as usize, a[2] as usize, a[3] as usize], a[4] as usize),
+        19 => espera::eventfd2(t, i, a[0], a[1]),
+        20 => espera::epoll_create(t, i, a[0]),
+        21 => espera::epoll_ctl(t, i, a[0], a[1], a[2], a[3] as usize),
+        22 => return espera::epoll_wait(t, i, a[0], a[1] as usize, a[2] as usize, a[3] as i32 as i64),
         78 => readlinkat(t, i, a[0] as i64, a[1] as usize, a[2] as usize, a[3] as usize),
         71 => return sendfile(t, i, a[0], a[1], a[2] as usize, a[3] as usize),
         79 => newfstatat(t, i, a[0] as i64, a[1] as usize, a[2] as usize, a[3]),
@@ -324,6 +329,10 @@ fn despachar(t: &mut Tabela, i: usize, numero: u64, a: [u64; 6]) -> Fim {
         233 => Ok(0),
         293 => Err(ENOSYS), // rseq: a glibc vive sem
         // rede (soquetes.rs)
+        194 => shm::shmget(a[0] as i32 as i64, a[1] as usize, a[2]),
+        195 => shm::shmctl(t, i, a[0] as u32, a[1], a[2] as usize),
+        196 => shm::shmat(t, i, a[0] as u32, a[1] as usize, a[2]),
+        197 => shm::shmdt(t, i, a[0] as usize),
         198 => soquetes::socket(t, i, a[0], a[1], a[2]),
         199 => soquetes::socketpair(t, i, a[0], a[1], a[3] as usize),
         200 => soquetes::bind(t, i, a[0], a[1] as usize, a[2] as usize),
@@ -492,6 +501,17 @@ fn ler(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize) -> Fi
     if matches!(aberto.borrow().tipo, Tipo::Soquete(_)) {
         return soquetes::recvfrom(t, i, fd, endereco, tamanho, 0, 0, 0);
     }
+    if let Tipo::Evento(c) = &aberto.borrow().tipo {
+        let nao_bloqueia = aberto.borrow().flags & O_NONBLOCK != 0;
+        return match espera::ler_contador(c, nao_bloqueia, tamanho) {
+            Ok(Some(v)) => match escrever_mem(t, i, endereco, &v) {
+                Ok(()) => Fim::Valor(8),
+                Err(e) => Fim::Valor(-e),
+            },
+            Ok(None) => Fim::Esperar("lendo um eventfd"),
+            Err(e) => Fim::Valor(-e),
+        };
+    }
     let mut d = aberto.borrow_mut();
     let nao_bloqueia = d.flags & O_NONBLOCK != 0;
     let posicao = d.posicao;
@@ -520,7 +540,8 @@ fn ler(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize) -> Fi
         Tipo::Zero => vec![0; tamanho],
         Tipo::Aleatorio => (0..tamanho.div_ceil(16)).flat_map(|k| elf::aleatorio(k as u64)).take(tamanho).collect(),
         Tipo::Pasta { .. } => return Fim::Valor(-EISDIR),
-        Tipo::Soquete(_) => return Fim::Valor(-EBADF), // ja foi para o soquetes.rs
+        Tipo::Soquete(_) | Tipo::Evento(_) => return Fim::Valor(-EBADF), // ja atendidos acima
+        Tipo::Epoll(_) => return Fim::Valor(-EINVAL),
         Tipo::Tubo(tubo, _) => {
             let mut tb = tubo.borrow_mut();
             if tb.buffer.is_empty() {
@@ -567,6 +588,9 @@ fn escrever_dados(t: &mut Tabela, i: usize, fd: u64, dados: &[u8]) -> Fim {
     if matches!(aberto.borrow().tipo, Tipo::Soquete(_)) {
         return soquetes::enviar(t, i, fd, dados, None);
     }
+    if let Tipo::Evento(c) = &aberto.borrow().tipo {
+        return Fim::Valor(espera::escrever_contador(c, dados).unwrap_or_else(|e| -e));
+    }
     let mut d = aberto.borrow_mut();
     if d.flags & O_ACESSO == O_RDONLY && !matches!(d.tipo, Tipo::Terminal | Tipo::Tubo(..)) {
         return Fim::Valor(-EBADF);
@@ -578,7 +602,8 @@ fn escrever_dados(t: &mut Tabela, i: usize, fd: u64, dados: &[u8]) -> Fim {
         Tipo::Nulo | Tipo::Zero | Tipo::Aleatorio => {}
         Tipo::Pasta { .. } => return Fim::Valor(-EISDIR),
         Tipo::Gerado(_) => return Fim::Valor(-EACCES),
-        Tipo::Soquete(_) => return Fim::Valor(-EBADF), // ja foi para o soquetes.rs
+        Tipo::Soquete(_) | Tipo::Evento(_) => return Fim::Valor(-EBADF), // ja atendidos acima
+        Tipo::Epoll(_) => return Fim::Valor(-EINVAL),
         Tipo::Tubo(tubo, _) => {
             let mut tb = tubo.borrow_mut();
             if tb.leitores == 0 {
@@ -998,83 +1023,6 @@ fn ioctl(t: &mut Tabela, i: usize, fd: u64, pedido: u64, endereco: usize) -> Fim
     Fim::Valor(r.unwrap_or_else(|e| -e))
 }
 
-/// ppoll: quem esta pronto para ler ou escrever.
-fn ppoll(t: &mut Tabela, i: usize, endereco: usize, quantos: usize, prazo: usize) -> Fim {
-    const POLLIN: u16 = 1;
-    const POLLOUT: u16 = 4;
-    const POLLERR: u16 = 8;
-    const POLLHUP: u16 = 0x10;
-    const POLLNVAL: u16 = 0x20;
-    let quantos = quantos.min(256);
-    let Ok(mut fds) = ler_mem(t, i, endereco, quantos * 8) else { return Fim::Valor(-EFAULT) };
-    let mut prontos = 0;
-    for k in 0..quantos {
-        let b = &fds[k * 8..k * 8 + 8];
-        let fd = i32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-        let quer = u16::from_le_bytes([b[4], b[5]]);
-        let tem = if fd < 0 {
-            0
-        } else {
-            match t.processos[i].linux.fd(fd as u64) {
-                Err(_) => POLLNVAL,
-                Ok(aberto) => match &aberto.borrow().tipo {
-                    Tipo::Terminal => {
-                        let entrada = !t.tty.prontos.is_empty() || t.tty.fim;
-                        (if entrada { POLLIN } else { 0 }) | POLLOUT
-                    }
-                    Tipo::Tubo(tubo, escrita) => {
-                        let tb = tubo.borrow();
-                        if *escrita {
-                            if tb.leitores == 0 { POLLHUP } else { POLLOUT }
-                        } else if !tb.buffer.is_empty() {
-                            POLLIN
-                        } else if tb.escritores == 0 {
-                            POLLHUP
-                        } else {
-                            0
-                        }
-                    }
-                    Tipo::Soquete(s) => {
-                        let (ler, escrever, erro) = soquetes::prontidao(s);
-                        (if ler { POLLIN } else { 0 }) | (if escrever { POLLOUT } else { 0 }) | (if erro { POLLERR } else { 0 })
-                    }
-                    _ => POLLIN | POLLOUT,
-                },
-            }
-        };
-        let resposta = tem & (quer | POLLHUP | POLLNVAL | POLLERR);
-        fds[k * 8 + 6..k * 8 + 8].copy_from_slice(&resposta.to_le_bytes());
-        if resposta != 0 {
-            prontos += 1;
-        }
-    }
-    if prontos > 0 {
-        t.processos[i].linux.acordar_em = None;
-        return match escrever_mem(t, i, endereco, &fds) {
-            Ok(()) => Fim::Valor(prontos),
-            Err(e) => Fim::Valor(-e),
-        };
-    }
-    // ninguem pronto: espera ate o prazo (sem prazo = para sempre)
-    if prazo != 0 {
-        let agora = cpu::contador();
-        let alvo = match t.processos[i].linux.acordar_em {
-            Some(alvo) => alvo,
-            None => match tempo_em_ticks(t, i, prazo) {
-                Ok(ticks) => agora.saturating_add(ticks),
-                Err(e) => return Fim::Valor(-e),
-            },
-        };
-        if agora >= alvo {
-            t.processos[i].linux.acordar_em = None;
-            let _ = escrever_mem(t, i, endereco, &fds);
-            return Fim::Valor(0);
-        }
-        t.processos[i].linux.acordar_em = Some(alvo);
-    }
-    Fim::Esperar("esperando entrada")
-}
-
 // ---------------------------------------------------------------------
 // Tempo
 
@@ -1084,7 +1032,7 @@ pub fn segundos_do_rtc() -> u64 {
 }
 
 /// Lê um timespec {segundos, nanossegundos} e converte em ticks do contador.
-fn tempo_em_ticks(t: &Tabela, i: usize, endereco: usize) -> Result<u64, i64> {
+pub fn tempo_em_ticks(t: &Tabela, i: usize, endereco: usize) -> Result<u64, i64> {
     let segundos = ler_u64(t, i, endereco)?;
     let nanos = ler_u64(t, i, endereco + 8)?;
     if nanos >= 1_000_000_000 {
@@ -1278,6 +1226,13 @@ fn mmap(t: &mut Tabela, i: usize, dica: usize, tamanho: usize, prot: u64, flags:
             .ok_or(ENOMEM)?
     };
     let permissao = Permissao::de_prot(prot);
+    const MAP_SHARED: u64 = 1;
+    if flags & MAP_SHARED != 0 && flags & MAP_ANONYMOUS != 0 {
+        // memoria anonima dividida com os filhos (fork nao copia)
+        let quadros: Vec<_> = (0..tamanho / PAGINA).map(|_| super::memoria::quadro_novo()).collect();
+        p.espaco.mapear_compartilhada(endereco, &quadros, permissao).map_err(|_| ENOMEM)?;
+        return Ok(endereco as i64);
+    }
     // as paginas nascem gravaveis para receber o conteudo; depois ficam como pedido
     p.espaco.mapear_faixa(endereco, endereco + tamanho, Permissao::Tudo).map_err(|_| ENOMEM)?;
     if !conteudo.is_empty() {

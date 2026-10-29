@@ -7,7 +7,10 @@ Formato (o mesmo que o kernel le em src/armazenamento/fat32.rs):
   - 64 MB, MBR com UMA particao FAT32 (tipo 0x0C, LBA) comecando no setor 2048
     (com --sem-mbr o FAT32 ocupa o disco inteiro, "superfloppy")
   - setores de 512 bytes, 1 setor por cluster (o certo para FAT32 deste
-    tamanho: da uns 127 mil clusters, acima do minimo de 65525)
+    tamanho: da uns 127 mil clusters, acima do minimo de 65525); discos de
+    512 MB ou mais usam clusters de 4 KB
+  - com --raiz PASTA (o saida/raiz do ferramentas/pacotes.py) os programas
+    do Debian vao junto: a pasta e copiada por cima da arvore padrao
   - 32 setores reservados, FSInfo no setor 1, copia do boot no setor 6
   - duas FATs iguais, pasta raiz no cluster 2, rotulo "MXOS"
   - nomes longos (LFN) para tudo que nao cabe em 8.3 maiusculo, em UTF-16
@@ -17,6 +20,8 @@ Formato (o mesmo que o kernel le em src/armazenamento/fat32.rs):
 Uso:
   python -I ferramentas/criar_disco.py saida/disco.img            cria a imagem
   python -I ferramentas/criar_disco.py saida/disco.img --sem-mbr  sem tabela de particoes
+  python -I ferramentas/criar_disco.py saida/disco.img --raiz saida/raiz --tamanho-mb 512
+        com os pacotes do Debian
   python -I ferramentas/criar_disco.py --verificar saida/disco.img
         confere a imagem (FATs, cadeias, tamanhos, LFN, FSInfo) e lista tudo:
           DIR /caminho
@@ -831,7 +836,38 @@ def mbr(setores_disco: int, inicio: int, setores_particao: int) -> bytes:
     return bytes(m)
 
 
+def arvore_da_pasta(pasta: pathlib.Path) -> dict:
+    return {p.name: arvore_da_pasta(p) if p.is_dir() else p.read_bytes() for p in sorted(pasta.iterdir())}
+
+
+def juntar(base: dict, extra: dict, caminho: str = "") -> None:
+    """Copia `extra` por cima de `base` (o FAT32 nao diferencia maiusculas:
+    nomes que so mudam na caixa ficam com o primeiro)."""
+    for nome, valor in extra.items():
+        igual = next((n for n in base if n.lower() == nome.lower()), None)
+        if igual is not None and igual != nome:
+            print(f"aviso: {caminho}/{nome} colide com {igual}; fica de fora", file=sys.stderr)
+            continue
+        if isinstance(valor, dict) and isinstance(base.get(nome), dict):
+            juntar(base[nome], valor, f"{caminho}/{nome}")
+        else:
+            base[nome] = valor
+
+
+def com_raiz(arvore: dict, raiz: pathlib.Path) -> dict:
+    extra = arvore_da_pasta(raiz)
+    juntar(arvore, extra)
+    # a libc de /lib tem de ser a mesma do ld-linux novo
+    pasta_libs = extra.get("usr", {}).get("lib", {}).get("aarch64-linux-gnu", {})
+    for nome in list(arvore.get("lib", {})):
+        if nome in pasta_libs:
+            arvore["lib"][nome] = pasta_libs[nome]
+    return arvore
+
+
 def criar(destino: pathlib.Path, tamanho: int, com_mbr: bool, arvore: dict) -> None:
+    global SETORES_POR_CLUSTER
+    SETORES_POR_CLUSTER = 8 if tamanho >= 512 * 1024 * 1024 else 1
     setores_disco = tamanho // SETOR
     inicio = INICIO_PARTICAO if com_mbr else 0
     volume = Volume(setores_disco - inicio)
@@ -1114,6 +1150,7 @@ def main() -> int:
     parser.add_argument("--ler", metavar="CAMINHO", help="com --verificar: mostra um arquivo")
     parser.add_argument("--sem-mbr", action="store_true", help="FAT32 no disco inteiro (superfloppy)")
     parser.add_argument("--tamanho-mb", type=int, default=TAMANHO_PADRAO // (1024 * 1024))
+    parser.add_argument("--raiz", metavar="PASTA", help="arvore extra (pacotes do Debian) por cima da padrao")
     opcoes = parser.parse_args()
     # nomes com acento no console do Windows: o que nao couber vira "?"
     sys.stdout.reconfigure(errors="replace")
@@ -1128,7 +1165,10 @@ def main() -> int:
         return v.verificar()
     if not opcoes.imagem:
         parser.error("diga a imagem a criar ou use --verificar IMG")
-    criar(pathlib.Path(opcoes.imagem), opcoes.tamanho_mb * 1024 * 1024, not opcoes.sem_mbr, conteudo_padrao())
+    arvore = conteudo_padrao()
+    if opcoes.raiz:
+        arvore = com_raiz(arvore, pathlib.Path(opcoes.raiz))
+    criar(pathlib.Path(opcoes.imagem), opcoes.tamanho_mb * 1024 * 1024, not opcoes.sem_mbr, arvore)
     return 0
 
 

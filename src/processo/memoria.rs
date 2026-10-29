@@ -44,6 +44,9 @@ struct Pagina {
     /// Rc de Box: o Rc fica pequeno e o quadro continua alinhado em 4 KB.
     quadro: Rc<Box<Quadro>>,
     atributos: u64,
+    /// Memoria dividida de proposito (shmat, mmap MAP_SHARED): todos
+    /// escrevem no mesmo quadro, sem copy-on-write.
+    compartilhada: bool,
 }
 
 impl Pagina {
@@ -51,9 +54,35 @@ impl Pagina {
         &**self.quadro as *const Quadro as u64
     }
 
+    /// Dividida pelo fork (copy-on-write)?
     fn dividida(&self) -> bool {
-        Rc::strong_count(&self.quadro) > 1
+        !self.compartilhada && Rc::strong_count(&self.quadro) > 1
     }
+
+    /// O kernel escreve `dados` no quadro a partir de `dentro`. Numa pagina
+    /// compartilhada outros processos tem o mesmo quadro (e escrevem nele
+    /// direto pela MMU): a copia vai pelo ponteiro, como a deles.
+    fn gravar(&mut self, dentro: usize, dados: &[u8]) -> Result<(), Fora> {
+        if dentro + dados.len() > PAGINA {
+            return Err(Fora);
+        }
+        if self.compartilhada {
+            let base = Rc::as_ptr(&self.quadro);
+            unsafe {
+                let destino = (**base).0.as_ptr().add(dentro) as *mut u8;
+                core::ptr::copy_nonoverlapping(dados.as_ptr(), destino, dados.len());
+            }
+            return Ok(());
+        }
+        let quadro = Rc::get_mut(&mut self.quadro).ok_or(Fora)?;
+        quadro.0[dentro..dentro + dados.len()].copy_from_slice(dados);
+        Ok(())
+    }
+}
+
+/// Um quadro zerado para memoria compartilhada (shm.rs).
+pub fn quadro_novo() -> Rc<Box<Quadro>> {
+    Rc::new(unsafe { Box::new_zeroed().assume_init() })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,11 +185,34 @@ impl Espaco {
             return Ok(());
         }
         let quadro: Box<Quadro> = unsafe { Box::new_zeroed().assume_init() };
-        let pagina = Pagina { quadro: Rc::new(quadro), atributos: permissao.atributos() };
+        let pagina = Pagina { quadro: Rc::new(quadro), atributos: permissao.atributos(), compartilhada: false };
         *self.entrada(endereco) = pagina.fisico() | pagina.atributos | mmu::DESCRITOR_PAGINA;
         self.paginas.insert(numero, pagina);
         self.permissoes.insert(numero, permissao);
         Ok(())
+    }
+
+    /// Poe em `endereco` (e seguintes) quadros que outros tambem usam
+    /// (memoria compartilhada). O que estava la sai.
+    pub fn mapear_compartilhada(&mut self, endereco: usize, quadros: &[Rc<Box<Quadro>>], permissao: Permissao) -> Result<(), Fora> {
+        let fim = endereco + quadros.len() * PAGINA;
+        if endereco % PAGINA != 0 || endereco < INICIO_USUARIO || fim > FIM_USUARIO {
+            return Err(Fora);
+        }
+        for (k, quadro) in quadros.iter().enumerate() {
+            let atual = endereco + k * PAGINA;
+            let pagina = Pagina { quadro: quadro.clone(), atributos: permissao.atributos(), compartilhada: true };
+            *self.entrada(atual) = pagina.fisico() | pagina.atributos | mmu::DESCRITOR_PAGINA;
+            self.paginas.insert(atual / PAGINA, pagina);
+            self.permissoes.insert(atual / PAGINA, permissao);
+        }
+        mmu::esquecer_asid(self.asid);
+        Ok(())
+    }
+
+    /// O quadro em `endereco`, se a pagina e compartilhada.
+    pub fn quadro_compartilhado(&self, endereco: usize) -> Option<Rc<Box<Quadro>>> {
+        self.paginas.get(&(endereco / PAGINA)).filter(|p| p.compartilhada).map(|p| p.quadro.clone())
     }
 
     /// Mapeia todas as paginas de [inicio, fim).
@@ -290,10 +342,9 @@ impl Espaco {
                 self.privatizar(numero);
             }
             let pagina = self.paginas.get_mut(&numero).ok_or(Fora)?;
-            let quadro = Rc::get_mut(&mut pagina.quadro).ok_or(Fora)?;
             let dentro = atual % PAGINA;
             let n = (PAGINA - dentro).min(dados.len() - feito);
-            quadro.0[dentro..dentro + n].copy_from_slice(&dados[feito..feito + n]);
+            pagina.gravar(dentro, &dados[feito..feito + n])?;
             if forcado && matches!(self.permissoes.get(&numero), Some(Permissao::Codigo | Permissao::Tudo)) {
                 let quadro = &pagina.quadro.0[dentro] as *const u8 as usize;
                 mmu::sincronizar_codigo(quadro, n);
@@ -343,16 +394,24 @@ impl Espaco {
         for numero in numeros {
             let permissao = self.permissoes[&numero];
             let endereco = numero * PAGINA;
-            let atributos = permissao.atributos_divididos();
             let pagina = self.paginas.get_mut(&numero).expect("pagina sem quadro");
             let quadro = pagina.quadro.clone();
+            if pagina.compartilhada {
+                // memoria compartilhada continua a mesma no filho
+                let copia = Pagina { quadro, atributos: pagina.atributos, compartilhada: true };
+                *novo.entrada(endereco) = copia.fisico() | copia.atributos | mmu::DESCRITOR_PAGINA;
+                novo.paginas.insert(numero, copia);
+                novo.permissoes.insert(numero, permissao);
+                continue;
+            }
+            let atributos = permissao.atributos_divididos();
             if pagina.atributos != atributos {
                 pagina.atributos = atributos;
                 let valor = pagina.fisico() | atributos | mmu::DESCRITOR_PAGINA;
                 *self.entrada(endereco) = valor;
                 pai_mudou = true;
             }
-            let copia = Pagina { quadro, atributos };
+            let copia = Pagina { quadro, atributos, compartilhada: false };
             *novo.entrada(endereco) = copia.fisico() | atributos | mmu::DESCRITOR_PAGINA;
             novo.paginas.insert(numero, copia);
             novo.permissoes.insert(numero, permissao);

@@ -132,6 +132,10 @@ def preparar_disco(novo: bool) -> None:
     DISCO.parent.mkdir(exist_ok=True)
     DISCO.unlink(missing_ok=True)
     comando = [sys.executable, "-I", str(CRIAR_DISCO), str(DISCO)]
+    raiz = RAIZ / "saida" / "raiz"
+    if raiz.is_dir():
+        # os pacotes do Debian (ferramentas/pacotes.py) vao junto, num disco maior
+        comando += ["--raiz", str(raiz), "--tamanho-mb", "512"]
     if subprocess.run(comando, cwd=RAIZ).returncode != 0 or not DISCO.exists():
         sys.exit("falha ao criar o disco (ferramentas/criar_disco.py)")
 

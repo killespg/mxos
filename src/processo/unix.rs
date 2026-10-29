@@ -73,6 +73,9 @@ pub type Lado = Rc<RefCell<Canal>>;
 pub struct Ponta {
     pub entrada: Lado,
     pub saida: Lado,
+    /// Na ponta de quem aceitou: o nome do programa que conectou (o
+    /// servidor X11 usa como titulo quando a janela nao tem um).
+    pub quem: String,
 }
 
 impl Ponta {
@@ -80,7 +83,7 @@ impl Ponta {
     pub fn par() -> (Ponta, Ponta) {
         let a: Lado = Rc::new(RefCell::new(Canal::default()));
         let b: Lado = Rc::new(RefCell::new(Canal::default()));
-        (Ponta { entrada: a.clone(), saida: b.clone() }, Ponta { entrada: b, saida: a })
+        (Ponta { entrada: a.clone(), saida: b.clone(), quem: String::new() }, Ponta { entrada: b, saida: a, quem: String::new() })
     }
 
     pub fn legivel(&self) -> bool {
@@ -176,9 +179,10 @@ pub fn servir(nome: &str) -> Rc<RefCell<Escuta>> {
 
 /// Conecta em `nome`: a ponta do cliente (a outra fica na fila de quem
 /// escuta). None = ninguem escuta esse nome.
-pub fn conectar(nome: &str) -> Option<Ponta> {
+pub fn conectar(nome: &str, quem: &str) -> Option<Ponta> {
     let escuta = nomes().get(nome)?.upgrade()?;
-    let (cliente, servidor) = Ponta::par();
+    let (cliente, mut servidor) = Ponta::par();
+    servidor.quem = String::from(quem);
     escuta.borrow_mut().fila.push_back(servidor);
     avisar();
     Some(cliente)
