@@ -1,0 +1,102 @@
+/* Folha de estilo padrao do navegador do MXOS (a "user agent stylesheet"),
+   seguindo a secao 15 (Rendering) da especificacao do HTML. */
+
+html, address, blockquote, body, center, dialog, div, figure, figcaption,
+footer, form, header, hr, legend, listing, main, p, plaintext, pre, search,
+xmp, article, aside, h1, h2, h3, h4, h5, h6, hgroup, nav, section,
+dir, dd, dl, dt, menu, ol, ul, details, summary, fieldset, optgroup { display: block; }
+
+[hidden], area, base, basefont, datalist, head, link, meta, noembed,
+noframes, param, rp, script, style, template, title, noscript { display: none; }
+
+html { color: CanvasText; background-color: Canvas; }
+body { margin: 8px; line-height: normal; }
+
+p, blockquote, figure, listing, plaintext, pre, xmp, dl, menu, ol, ul, dir {
+  margin-top: 1em; margin-bottom: 1em; }
+blockquote, figure { margin-left: 40px; margin-right: 40px; }
+address, i, cite, em, var, dfn { font-style: italic; }
+center { text-align: center; }
+h1 { font-size: 2em; margin-top: 0.67em; margin-bottom: 0.67em; font-weight: bold; }
+h2 { font-size: 1.5em; margin-top: 0.83em; margin-bottom: 0.83em; font-weight: bold; }
+h3 { font-size: 1.17em; margin-top: 1em; margin-bottom: 1em; font-weight: bold; }
+h4 { margin-top: 1.33em; margin-bottom: 1.33em; font-weight: bold; }
+h5 { font-size: 0.83em; margin-top: 1.67em; margin-bottom: 1.67em; font-weight: bold; }
+h6 { font-size: 0.67em; margin-top: 2.33em; margin-bottom: 2.33em; font-weight: bold; }
+article h1, aside h1, nav h1, section h1 { font-size: 1.5em; margin-top: 0.83em; margin-bottom: 0.83em; }
+
+dd { margin-left: 40px; }
+dir, menu, ol, ul { padding-left: 40px; }
+ol { list-style-type: decimal; }
+ul ul, ol ul, menu ul, ul menu { list-style-type: circle; }
+ul ul ul, ul ol ul, ol ul ul { list-style-type: square; }
+ol ol, ol ul, ul ol, ul ul, menu ol, menu ul { margin-top: 0; margin-bottom: 0; }
+li { display: list-item; }
+
+table { display: table; border-spacing: 2px; border-collapse: separate; box-sizing: border-box; text-indent: 0; }
+caption { display: table-caption; text-align: center; }
+colgroup { display: table-column-group; }
+col { display: table-column; }
+thead { display: table-header-group; vertical-align: middle; }
+tbody { display: table-row-group; vertical-align: middle; }
+tfoot { display: table-footer-group; vertical-align: middle; }
+tr { display: table-row; vertical-align: inherit; }
+td, th { display: table-cell; vertical-align: inherit; padding: 1px; }
+th { font-weight: bold; text-align: center; }
+
+pre, listing, plaintext, xmp, code, kbd, samp, tt { font-family: monospace; }
+pre, listing, plaintext, xmp { white-space: pre; }
+textarea { white-space: pre-wrap; }
+
+b, strong { font-weight: bolder; }
+small { font-size: smaller; }
+big { font-size: larger; }
+sub { vertical-align: sub; font-size: smaller; }
+sup { vertical-align: super; font-size: smaller; }
+u, ins { text-decoration: underline; }
+s, strike, del { text-decoration: line-through; }
+mark { background-color: Mark; color: MarkText; }
+abbr[title] { text-decoration: underline; }
+q::before { content: open-quote; }
+q::after { content: close-quote; }
+nobr { white-space: nowrap; }
+wbr { display: inline; }
+
+a:link { color: LinkText; text-decoration: underline; cursor: pointer; }
+a:visited { color: VisitedText; text-decoration: underline; }
+
+hr { color: gray; border-style: inset; border-width: 1px; margin: 0.5em auto; overflow: hidden; }
+fieldset { margin-left: 2px; margin-right: 2px; border: groove 2px ThreeDFace; padding: 0.35em 0.75em 0.625em; }
+legend { padding-left: 2px; padding-right: 2px; }
+
+img, video, canvas, svg, iframe, embed, object, input, button, select, textarea, meter, progress {
+  display: inline-block; }
+iframe { border: 2px inset; width: 300px; height: 150px; }
+video { object-fit: contain; }
+
+input, select, button, textarea {
+  font-size: 13.333px; font-family: sans-serif; color: FieldText; letter-spacing: normal;
+  line-height: normal; text-align: start; }
+input, textarea, select { background-color: Field; border: 2px inset ButtonBorder; padding: 1px 2px; }
+input { width: 150px; }
+input[type=hidden] { display: none; }
+input[type=checkbox], input[type=radio] { width: 13px; height: 13px; margin: 3px 3px 3px 4px; padding: 0; }
+input[type=submit], input[type=button], input[type=reset], button {
+  background-color: ButtonFace; color: ButtonText; border: 2px outset ButtonBorder; padding: 1px 6px;
+  text-align: center; width: auto; }
+textarea { width: 180px; height: 36px; }
+select { padding: 1px 0; }
+option { display: block; }
+select option { display: none; }
+
+details > summary:first-of-type { display: list-item; list-style-type: disclosure-closed; }
+dialog:not([open]) { display: none; }
+dialog { position: absolute; left: 0; right: 0; margin: auto; border: solid; padding: 1em;
+  background-color: Canvas; color: CanvasText; }
+
+ruby { display: ruby; }
+rt { display: ruby-text; font-size: 50%; }
+
+[dir=rtl] { direction: rtl; }
+address, blockquote, center, dialog, div, figure, figcaption, footer, form, header, hr,
+legend, listing, main, p, plaintext, pre, search, xmp { unicode-bidi: isolate; }
