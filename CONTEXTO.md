@@ -89,9 +89,10 @@ não começar do zero.
 
 ## Estado no momento da passagem
 
-Versão 0.9: os passos 0 a 5 do `PLANO.md` estão feitos (acentos conferidos, CSS no
-navegador, processos em EL0, carregador de ELF, ABI do Linux e BusyBox com `sh` e
-`vi` na janela do terminal). Ver o "Diário" e as "Pendências para depois" no
+Versão 0.10: os passos 0 a 6 do `PLANO.md` estão feitos (acentos conferidos, CSS no
+navegador, processos em EL0, carregador de ELF, ABI do Linux, BusyBox com `sh` e
+`vi` na janela do terminal, sinais com tratador, threads, sockets e programas
+dinâmicos com o `ld-linux`). Ver o "Diário" e as "Pendências para depois" no
 `PLANO.md`.
 
 ## Neste PC (Windows, segunda sessão)

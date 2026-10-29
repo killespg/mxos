@@ -279,9 +279,30 @@ A rodada de acentos foi interrompida no meio. Compila limpo (QEMU e mxq), mas:
   conta (não é mais um número fixo que quebra quando um binário muda).
 - Versão 0.9.
 
+### Passo 6 (feito, 0.10): sinais, threads, rede e programas dinâmicos
+
+- Sinais (`processo/sinais.rs`): rt_sigframe do Linux arm64 na pilha (siginfo, ucontext com x0-x30, sp, pc,
+  pstate e o FPSIMD), trampolim `mov x8,#139; svc #0` na página acima da pilha (quando a libc não manda
+  `SA_RESTORER`), `rt_sigreturn`, `rt_sigprocmask`, `rt_sigsuspend`, `rt_sigpending`. A chamada que espera guarda o
+  número (`na_chamada`): um sinal a interrompe com `EINTR` ou a repete com `SA_RESTART`, menos `poll`, `nanosleep`
+  e `sigsuspend`, que o Linux nunca repete (o `pause` da musl travava por isso). `setitimer`/`alarm` com `SIGALRM`,
+  `SIGCHLD` para o pai; filho de quem ignora `SIGCHLD` some sozinho.
+- Threads: `Dividido<T>` (Rc + UnsafeCell) para a memória (o `brk` foi para o `Espaco`) e a tabela de
+  descritores; `tgid`, `exit` só da thread, `exit_group`/morte por sinal/`execve` levam o grupo. `futex` de verdade:
+  WAIT dorme até um WAKE na mesma memória (ou o prazo), REQUEUE/CMP_REQUEUE.
+- Rede: a pilha ganhou várias conexões TCP (as dos sockets trocam de lugar com a `Pilha::tcp` em cada chamada),
+  abertura passiva (servidor), loopback (pacote para o nosso IP volta pela fila do `processar`) e cópia do ICMP
+  para os sockets de ping. `processo/soquetes.rs` faz as chamadas do Linux; `/etc/resolv.conf` aponta para o DNS
+  do QEMU. `rodar.py --porta PC:MXOS` encaminha uma porta do PC.
+- Dinâmicos: `PT_INTERP` -> o `ld-linux` (Debian libc6 2.41) entra em 0x7000000 com `AT_BASE`; as `.so` vêm de
+  `/lib` por `openat` + `mmap` (que já existiam). Rodou de primeira.
+- Conferido no QEMU: `ola sinais`, `ola threads`, `ola rede` (std::net da musl), `trap`/`wait`/Ctrl+C no `sh`,
+  `nslookup`, `wget`, `ping`, `nc`, `httpd` (pelo próprio MXOS e pelo PC), BusyBox dinâmico; `teste_fat32` 13/13;
+  imagem da TV box compila.
+- Versão 0.10.
+
 ### Pendências para depois
 
-- Sockets (o `wget` e o `ping` do BusyBox precisam), threads, entrega de sinais com quadro de sinal, links
-  simbólicos, programas dinâmicos.
+- `AF_UNIX`, IPv6, links simbólicos (o FAT32 não guarda), job control (Ctrl+Z/SIGSTOP), tratador de `SIGSEGV`.
 - Na TV box os processos ainda não são compilados (o módulo `processo` depende do disco do QEMU).
 - O `--teste` do `rodar.py` separa comandos por `;`: para mandar `;` para o sh use `&&` ou um script.
