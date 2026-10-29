@@ -352,7 +352,6 @@ impl Shell {
         diga!(self, "  halt          congela a CPU");
     }
 
-    #[cfg(not(feature = "mxq"))]
     fn ajuda_modulos(&mut self) {
         diga!(self, "  ls [C]        lista a pasta C do disco (sem C: a raiz)");
         diga!(self, "  cat A         mostra o arquivo A");
@@ -376,8 +375,6 @@ impl Shell {
         diga!(self, "  syscalls      chamadas de sistema pedidas que o MXOS ainda não tem");
     }
 
-    #[cfg(feature = "mxq")]
-    fn ajuda_modulos(&mut self) {}
 
     fn info(&mut self) {
         let midr = cpu::midr();
@@ -413,17 +410,12 @@ impl Shell {
         }
     }
 
-    #[cfg(not(feature = "mxq"))]
     fn som(&mut self) {
         if let Err(e) = crate::som::tocar_melodia(&mut self.console) {
             diga!(self, "som: {}", e.descricao());
         }
     }
 
-    #[cfg(feature = "mxq")]
-    fn som(&mut self) {
-        diga!(self, "som: na TV box o áudio sai pelo HDMI, e esse driver ainda não existe");
-    }
 
     fn uptime(&mut self) {
         let freq = cpu::frequencia_timer();
@@ -497,7 +489,6 @@ impl Shell {
             h.blocos_livres,
             Bytes(h.maior_bloco)
         );
-        #[cfg(not(feature = "mxq"))]
         {
             let (arquivos, kb) = crate::processo::cache::resumo();
             diga!(self, "  cache de arquivos: {} em {} arquivo(s) (dividido pelos programas)", Bytes(kb * 1024), arquivos);
@@ -630,15 +621,11 @@ impl Shell {
 }
 
 /// O que roda cada vez que a CPU acorda esperando tecla no modo serial.
-#[cfg(not(feature = "mxq"))]
 fn processar_fundo() {
     crate::rede::processar();
 }
 
-#[cfg(feature = "mxq")]
-fn processar_fundo() {}
 
-#[cfg(not(feature = "mxq"))]
 fn comando_de_modulo(saida: &mut Terminal, nome: &str, argumentos: &str) -> bool {
     crate::armazenamento::comando(nome, argumentos, &mut *saida)
         || crate::processo::comando(nome, argumentos, &mut *saida)
@@ -647,42 +634,11 @@ fn comando_de_modulo(saida: &mut Terminal, nome: &str, argumentos: &str) -> bool
         || crate::drivers::comando(nome, argumentos, &mut *saida)
 }
 
-#[cfg(feature = "mxq")]
-fn comando_de_modulo(_saida: &mut Terminal, _nome: &str, _argumentos: &str) -> bool {
-    false
-}
 
-/// Os processos (src/processo/) so existem no QEMU por enquanto; na TV box
-/// estas funcoes nao fazem nada.
-#[cfg(not(feature = "mxq"))]
 mod processos {
     pub use crate::processo::{criar_teste, executar, rodar, tecla, tem_prontos, terminou, tirar_saida};
 }
 
-#[cfg(feature = "mxq")]
-mod processos {
-    use alloc::vec::Vec;
-
-    pub fn rodar() -> bool {
-        false
-    }
-    pub fn tem_prontos() -> bool {
-        false
-    }
-    pub fn tirar_saida() -> Vec<u8> {
-        Vec::new()
-    }
-    pub fn terminou(_pid: u32) -> Option<i32> {
-        None
-    }
-    pub fn tecla(_byte: u8) {}
-    pub fn criar_teste(_modo: &str, _primeiro_plano: bool) -> Result<u32, &'static str> {
-        Err("processos ainda não existem na TV box")
-    }
-    pub fn executar(_programa: &str, _args: &[&str], _primeiro_plano: bool) -> Result<u32, alloc::string::String> {
-        Err(alloc::string::String::from("processos ainda não existem na TV box"))
-    }
-}
 
 /// Separa os argumentos por espacos; "entre aspas" ou 'entre apostrofos'
 /// fica junto (como no sh).

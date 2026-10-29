@@ -7,46 +7,33 @@
 
 extern crate alloc;
 
-#[cfg(not(feature = "mxq"))]
 mod armazenamento;
-#[cfg(not(feature = "mxq"))]
 mod audio;
-#[cfg(not(feature = "mxq"))]
 mod config;
 mod cpu;
-#[cfg(not(feature = "mxq"))]
 mod drivers;
-#[cfg(not(feature = "mxq"))]
 mod entrada;
 mod excecao;
 mod fonte;
 mod gic;
-#[cfg(not(feature = "mxq"))]
 mod gui;
 mod heap;
 mod irq;
 mod mapa;
 mod mmu;
-#[cfg(not(feature = "mxq"))]
 mod navegador;
 mod plataforma;
 mod psci;
-#[cfg(not(feature = "mxq"))]
 mod processo;
-#[cfg(not(feature = "mxq"))]
 mod rede;
 mod shell;
-#[cfg(not(feature = "mxq"))]
 mod smp;
-#[cfg(not(feature = "mxq"))]
 mod som;
 mod terminal;
 mod timer;
 mod uart;
-#[cfg(not(feature = "mxq"))]
 mod virtio;
 mod video;
-#[cfg(not(feature = "mxq"))]
 mod x11;
 
 use core::arch::global_asm;
@@ -65,14 +52,16 @@ pub extern "C" fn kernel_main(el_boot: u64) -> ! {
     let mut terminal = Terminal::new();
     mmu::ligar();
     heap::iniciar(mapa::kernel().fim, plataforma::RAM_FIM);
+    for &(inicio, fim) in plataforma::RAM_EXTRA {
+        heap::acrescentar(inicio, fim);
+    }
     irq::iniciar(&mut terminal.serial);
     // sem ramfb (ou na TV box, por enquanto) o terminal fica so na serial
     match terminal.ligar_video() {
         Ok(v) => diga(&mut terminal, format_args!("vídeo   : {}x{}, {}", v.largura, v.altura, v.nome)),
         Err(motivo) => diga(&mut terminal, format_args!("vídeo   : desligado ({motivo})")),
     }
-    #[cfg(not(feature = "mxq"))]
-    let terminal = qemu::iniciar(terminal, el_boot);
+        let terminal = qemu::iniciar(terminal, el_boot);
     // sem area de trabalho: o shell le a propria serial
     Shell::nova(terminal, el_boot).rodar()
 }
@@ -84,7 +73,6 @@ fn diga(terminal: &mut Terminal, linha: core::fmt::Arguments) {
 
 /// Dispositivos que so existem no QEMU virt: disco, rede, teclado e mouse.
 /// Com video e entrada a area de trabalho assume e esta funcao nao volta.
-#[cfg(not(feature = "mxq"))]
 mod qemu {
     use core::fmt;
 

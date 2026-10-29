@@ -27,7 +27,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::hint::spin_loop;
-use core::ptr::read_volatile;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::virtio::virtio_mmio::{self, VirtioMmio};
@@ -492,14 +491,12 @@ pub fn montado() -> bool {
 
 // ---------------------------------------------------------------- relogio
 
-/// RTC PL031 do QEMU virt: RTCDR (offset 0) = segundos desde 1970 (UTC).
-const RTC_PL031: usize = 0x0901_0000;
 /// Sem relogio: 1 de janeiro de 2026, 00:00.
 const DATA_PADRAO: (u16, u16) = ((46 << 9) | (1 << 5) | 1, 0);
 
 /// Data e hora atuais no formato da FAT (para as entradas de pasta).
 fn relogio() -> (u16, u16) {
-    let segundos = unsafe { read_volatile(RTC_PL031 as *const u32) } as u64;
+    let segundos = crate::plataforma::segundos_rtc();
     let dias = segundos / 86_400;
     let (ano, mes, dia) = data_civil(dias);
     if !(1980..=2107).contains(&ano) {

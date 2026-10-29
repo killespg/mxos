@@ -78,6 +78,23 @@ pub fn iniciar(inicio: usize, fim: usize) {
     });
 }
 
+/// Mais um pedaco de RAM para o heap (separado do primeiro: na TV box ha
+/// um buraco do firmware no meio).
+#[cfg_attr(not(feature = "mxq"), allow(dead_code))]
+pub fn acrescentar(inicio: usize, fim: usize) {
+    let inicio = arredondar(inicio, ALINHAMENTO);
+    let fim = fim & !(ALINHAMENTO - 1);
+    if fim <= inicio {
+        return;
+    }
+    HEAP.com(|estado| unsafe {
+        estado.liberar(inicio, fim - inicio);
+        estado.total += fim - inicio;
+        // liberar contou como devolucao de uma alocacao que nunca houve
+        estado.alocacoes += 1;
+    });
+}
+
 unsafe impl GlobalAlloc for Heap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let tamanho = tamanho_real(layout);

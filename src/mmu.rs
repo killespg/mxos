@@ -157,6 +157,11 @@ pub fn ligar() {
         m.mapear_blocos(inicio, fim, DISPOSITIVO);
     }
     m.mapear_blocos(plataforma::RAM_INICIO, plataforma::RAM_FIM, RAM);
+    for &(inicio, fim) in plataforma::RAM_EXTRA {
+        m.mapear_blocos(inicio, fim, RAM);
+    }
+    #[cfg(feature = "mxq")]
+    m.mapear_blocos(plataforma::FRAMEBUFFER.0, plataforma::FRAMEBUFFER.1, RAM);
 
     // O bloco de 2 MB onde o kernel mora ganha permissoes por pagina.
     let bloco = k.inicio & !(BLOCO - 1);

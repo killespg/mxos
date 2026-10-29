@@ -17,7 +17,11 @@ use core::ptr::{read_volatile, write_volatile};
 /// Slots do virtio-mmio no QEMU virt.
 pub const BASE_QEMU_VIRT: usize = 0x0a00_0000;
 pub const PASSO_QEMU_VIRT: usize = 0x200;
+/// Na TV box nao ha virtio: nenhum slot (a busca nao le endereco nenhum).
+#[cfg(not(feature = "mxq"))]
 pub const SLOTS_QEMU_VIRT: usize = 32;
+#[cfg(feature = "mxq")]
+pub const SLOTS_QEMU_VIRT: usize = 0;
 /// INTID do GIC do slot 0 (SPI 16 = 32 + 16).
 pub const INTID_PRIMEIRO_SLOT: u32 = 48;
 

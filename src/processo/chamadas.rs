@@ -1128,9 +1128,9 @@ fn ioctl(t: &mut Tabela, i: usize, fd: u64, pedido: u64, endereco: usize) -> Fim
 // ---------------------------------------------------------------------
 // Tempo
 
-/// Segundos desde 1970 pelo RTC PL031 do QEMU virt.
+/// Segundos desde 1970 (plataforma.rs: RTC do QEMU ou hora da rede).
 pub fn segundos_do_rtc() -> u64 {
-    unsafe { core::ptr::read_volatile(0x0901_0000 as *const u32) as u64 }
+    crate::plataforma::segundos_rtc()
 }
 
 /// Lê um timespec {segundos, nanossegundos} e converte em ticks do contador.

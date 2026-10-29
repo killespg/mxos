@@ -152,14 +152,24 @@ mod video_qemu {
 }
 
 // Na TV box o caminho e o framebuffer que o U-Boot deixa ligado
-// (src/video/mxq.rs). Falta mapear a regiao dele na MMU e testar no
-// hardware, entao por enquanto o terminal fica so na serial.
+// (src/video/mxq.rs), mapeado pela MMU (plataforma::FRAMEBUFFER). Nunca
+// testado no hardware.
 #[cfg(feature = "mxq")]
 mod video_qemu {
     use super::Video;
-    use crate::video::tela::{Console, Tela};
+    use crate::video::mxq;
+    use crate::video::tela::{self, Console, Escala};
 
-    pub fn ligar() -> Result<(Video, Tela, Console), &'static str> {
-        Err("na TV box o vídeo (src/video/mxq.rs) ainda não foi ligado: falta testar no hardware")
+    /// Desenha direto no framebuffer que o U-Boot deixou no HDMI, no formato
+    /// dele (RGB565 no padrao): nada muda nos registradores do video.
+    pub fn ligar() -> Result<(Video, tela::Tela, Console), &'static str> {
+        let info = mxq::descobrir().map_err(|e| e.descricao())?;
+        let tela = unsafe { mxq::usar_como_esta(&info) }.map_err(|e| e.descricao())?;
+        let (largura, altura) = (tela.largura(), tela.altura());
+        tela.limpar(tela::PRETO);
+        let console = Console::new(tela, Escala::CONSOLE, tela::BRANCO, tela::PRETO);
+        let (base, _) = info.framebuffer_uboot();
+        let video = Video { largura, altura, base, nome: "framebuffer do U-Boot (HDMI)" };
+        Ok((video, tela, console))
     }
 }
