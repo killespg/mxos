@@ -1,5 +1,6 @@
-//! Navegador: o motor de src/navegador (HTML, diagramacao e desenho) numa
-//! janela, com botoes, barra de endereco, historico e rolagem.
+//! Navegador: o motor web do MXOS (src/web: HTML5, CSS, layout, fontes e
+//! imagens, tudo feito aqui; adaptado em src/navegador/web.rs) numa janela,
+//! com botoes, barra de endereco, historico e rolagem.
 //!
 //! A pagina e diagramada uma vez so, quando chega, e fica guardada. Cada
 //! desenho so pinta o que mudou: rolar move os pixels que ja estavam na
@@ -35,7 +36,7 @@ use crate::gui::janelas::{App, EventoApp, Pedido};
 use crate::gui::tema::{self, Tema};
 use crate::gui::widgets::{self, ALTURA_BOTAO, AcaoCampo, CampoTexto, Icone};
 use crate::fonte;
-use crate::navegador::{self as motor, layout, Pagina};
+use crate::navegador::{self as motor, web};
 
 pub const TITULO: &str = "Navegador";
 /// Sem pagina_inicial nas configuracoes.
@@ -161,7 +162,7 @@ struct Visita {
 pub struct Navegador {
     /// Endereco da pagina mostrada (o final, depois dos redirecionamentos).
     url: String,
-    pagina: Option<Pagina>,
+    pagina: Option<web::PaginaWeb>,
     titulo: String,
     historico: Vec<Visita>,
     /// Indice da pagina mostrada no historico.
@@ -323,15 +324,15 @@ impl Navegador {
     /// diagrama e mostra.
     fn carregar(&mut self) {
         let Some(carga) = self.carga.take() else { return };
-        let aberta = motor::abrir(&carga.url);
-        let pagina = motor::diagramar(&motor::documento(&aberta.html, &aberta.url_final), AREA_PAGINA.largura);
-        self.guardar_no_historico(carga.destino, &aberta.url_final);
-        self.titulo = titulo_da_janela(&pagina.titulo, &aberta.url_final);
-        self.status = match aberta.erro {
+        let pagina = web::abrir(&carga.url, AREA_PAGINA.largura, AREA_PAGINA.altura);
+        let url_final = pagina.url.clone();
+        self.guardar_no_historico(carga.destino, &url_final);
+        self.titulo = titulo_da_janela(&pagina.titulo, &url_final);
+        self.status = match pagina.erro {
             Some(motivo) => format!("Erro: {motivo}"),
             None => String::from("Pronto"),
         };
-        self.url = aberta.url_final;
+        self.url = url_final;
         if !self.endereco.focado() {
             self.endereco.definir(&self.url);
         }
@@ -470,8 +471,7 @@ impl Navegador {
             return None;
         }
         let pagina = self.pagina.as_ref()?;
-        let href = motor::link_em(pagina, x - AREA_PAGINA.x, y - AREA_PAGINA.y + self.rolagem)?;
-        Some(motor::resolver_url(&self.url, &href))
+        web::link_em(pagina, x - AREA_PAGINA.x, y - AREA_PAGINA.y, self.rolagem)
     }
 
     /// Confere o link embaixo do mouse (o status mostra o endereco dele).
@@ -650,13 +650,13 @@ impl Navegador {
 
     fn desenhar_pagina(&self, s: &mut Superficie) {
         match &self.pagina {
-            Some(pagina) => motor::desenhar(pagina, s, AREA_PAGINA, self.rolagem),
+            Some(pagina) => web::desenhar(pagina, s, AREA_PAGINA, self.rolagem),
             None => {
                 // ainda sem nenhuma pagina: so o aviso
-                s.retangulo(AREA_PAGINA, motor::render::COR_FUNDO);
+                s.retangulo(AREA_PAGINA, 0x00FF_FFFF);
                 if self.carga.is_some() {
-                    let base = AREA_PAGINA.y + layout::MARGEM + fonte::INTER.ascendente;
-                    s.texto_com(AREA_PAGINA.x + layout::MARGEM, base, "Carregando…", COR_AVISO, &fonte::INTER);
+                    let base = AREA_PAGINA.y + 8 + fonte::INTER.ascendente;
+                    s.texto_com(AREA_PAGINA.x + 8, base, "Carregando…", COR_AVISO, &fonte::INTER);
                 }
             }
         }
@@ -672,7 +672,7 @@ impl Navegador {
             return;
         }
         let faixa = deslocar(s, area, delta);
-        motor::desenhar(pagina, s, faixa, self.rolagem + (faixa.y - AREA_PAGINA.y));
+        web::desenhar(pagina, s, faixa, self.rolagem + (faixa.y - AREA_PAGINA.y));
     }
 
     fn desenhar_rolagem(&self, s: &mut Superficie, t: &Tema) {

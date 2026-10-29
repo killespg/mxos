@@ -207,7 +207,7 @@ impl Pintor<'_> {
             let bp: Vec<i32> = b.iter().map(|&v| if v > 0 { px(v).max(1) } else { 0 }).collect();
             let cores = [e.cor_borda(0), e.cor_borda(1), e.cor_borda(2), e.cor_borda(3)];
             let estilos = e.borda_estilo;
-            let mut lado = |q: &mut Quadro, rr: Ret, i: usize| {
+            let lado = |q: &mut Quadro, rr: Ret, i: usize| {
                 if bp[i] == 0 {
                     return;
                 }

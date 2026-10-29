@@ -106,7 +106,7 @@ fn juntar(base: &Url, local: &str) -> String {
 
 fn pedido(url: &Url) -> String {
     format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: MXOS/0.12\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux armv7l) MXOS/0.12\r\nAccept: */*\r\nAccept-Encoding: gzip\r\nAccept-Language: pt-BR,pt;q=0.9,en;q=0.5\r\nConnection: close\r\n\r\n",
         url.caminho,
         url.autoridade()
     )
@@ -336,6 +336,13 @@ pub fn get(url: &str, limite_ms: u64) -> Result<Resposta, ErroRede> {
             Some(local) if redireciona => atual = juntar(&u, local),
             _ => {
                 resposta.url_final = u.completa();
+                // corpo comprimido (pedimos gzip): descomprime aqui
+                let gzip = resposta.cabecalho("content-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("gzip"));
+                if gzip {
+                    if let Some(c) = crate::web::imagem::inflate::gzip(&resposta.corpo, MAX_RESPOSTA) {
+                        resposta.corpo = c;
+                    }
+                }
                 return Ok(resposta);
             }
         }

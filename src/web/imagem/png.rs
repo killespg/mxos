@@ -126,7 +126,7 @@ pub fn decodificar(d: &[u8]) -> Option<Imagem> {
     } else {
         None
     };
-    let mut converter = |linha: &[u8], w: usize, destino: &mut dyn FnMut(usize, u32)| {
+    let converter = |linha: &[u8], w: usize, destino: &mut dyn FnMut(usize, u32)| {
         let amostra = |idx: usize| -> u32 {
             // idx = numero da amostra na linha
             match prof {
