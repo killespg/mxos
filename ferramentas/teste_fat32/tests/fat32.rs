@@ -102,8 +102,8 @@ fn le_a_imagem_do_python() {
     let mut fs = montar(&imagem);
     assert_eq!(fs.rotulo(), "MXOS");
     assert_eq!(nomes(&mut fs, "/"), ["LEIAME.TXT", "config", "paginas", "documentos"]);
-    assert_eq!(nomes(&mut fs, "/paginas"), ["index.html", "sobre.html"]);
-    assert_eq!(nomes(&mut fs, "/documentos"), ["notas.txt", "Lista de compras.txt"]);
+    assert_eq!(nomes(&mut fs, "/paginas"), ["index.html", "sobre.html", "guia.html", "tabelas.html", "teste.html"]);
+    assert_eq!(nomes(&mut fs, "/documentos"), ["notas.txt", "Lista de compras.txt", "Anotações.txt"]);
     assert!(nomes(&mut fs, "/config").is_empty());
     let index = fs.ler("/paginas/index.html").unwrap();
     assert_eq!(index, ler_python(&imagem, "leitura.img", "/paginas/index.html"));
@@ -112,12 +112,14 @@ fn le_a_imagem_do_python() {
     assert_eq!(fs.ler("/PAGINAS/INDEX.HTML").unwrap(), index);
     assert_eq!(fs.ler("/paginas/INDEX~1.HTM").unwrap(), index);
     assert_eq!(fs.ler("documentos/../paginas/./index.html").unwrap(), index);
-    assert_eq!(fs.ler("/documentos/lista de compras.txt").unwrap(), b"arroz\nfeijao\ncafe\n");
+    assert_eq!(fs.ler("/documentos/lista de compras.txt").unwrap(), "arroz\nfeijão\ncafé\n".as_bytes());
+    // nome longo com acentos (UTF-16 no disco), achado sem diferenciar caixa
+    assert_eq!(fs.ler("/documentos/ANOTAÇÕES.TXT").unwrap().len(), 635);
     assert_eq!(fs.ler("/config"), Err(Erro::EPasta));
     assert_eq!(fs.listar("/LEIAME.TXT").err(), Some(Erro::NaoEPasta));
     assert_eq!(fs.ler("/nada.txt"), Err(Erro::NaoAchado));
     assert_eq!(fs.ler("/nada/x.txt"), Err(Erro::NaoAchado));
-    let livre_python = 126_981u64 * 512;
+    let livre_python = 126_952u64 * 512;
     assert_eq!(fs.bytes_livres(), livre_python);
 }
 
@@ -177,7 +179,7 @@ fn escritas_basicas() {
     assert_eq!(fs.ler("/Novo.TXT").unwrap(), vec![1u8; 5000]);
     assert_eq!(fs.ler("/grande.bin").unwrap(), b"agora pequeno");
     assert_eq!(fs.ler("/documentos/temas movidos/pasta funda com nome longo/a.txt").unwrap(), b"fundo");
-    assert_eq!(fs.ler("/config/notas.txt").unwrap().len(), 150);
+    assert_eq!(fs.ler("/config/notas.txt").unwrap().len(), 151);
     let livre_depois = fs.bytes_livres();
     drop(fs);
 
@@ -188,7 +190,7 @@ fn escritas_basicas() {
         "ARQ /vazio 8",
         "ARQ /grande.bin 13",
         "ARQ /Renomeado com nome longo.txt 16",
-        "ARQ /config/notas.txt 150",
+        "ARQ /config/notas.txt 151",
         "DIR /documentos/temas movidos",
         "DIR /documentos/temas movidos/Pasta Funda Com Nome Longo",
         "ARQ /documentos/temas movidos/Pasta Funda Com Nome Longo/a.txt 5",
@@ -325,7 +327,7 @@ fn operacoes_aleatorias() {
         }
     }
     let lista = verificar(&imagem, "aleatorio.img");
-    let originais = 5; // arquivos que ja vinham na imagem
+    let originais = 9; // arquivos que ja vinham na imagem
     assert_eq!(lista.iter().filter(|l| l.starts_with("ARQ ")).count(), modelo.len() + originais);
 }
 
@@ -387,7 +389,7 @@ fn disco_que_recusa_escrita() {
     assert_eq!(fs.apagar("/paginas/index.html"), Err(Erro::Disco));
     assert_eq!(fs.bytes_livres(), livre);
     assert!(*imagem.borrow() == original, "a imagem mudou");
-    assert_eq!(fs.ler("/LEIAME.TXT").unwrap().len(), 423);
+    assert_eq!(fs.ler("/LEIAME.TXT").unwrap().len(), 433);
     // o disco volta a aceitar: tudo funciona e fica consistente
     recusar.set(false);
     fs.escrever("/novo.txt", &vec![1u8; 3000]).unwrap();

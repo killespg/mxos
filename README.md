@@ -38,22 +38,23 @@ serial e antes da `--captura`, com as ações separadas por `;`:
 | `clicar [esquerdo\|direito\|meio]` | aperta e solta o botão (padrão: esquerdo) |
 | `arrastar X1 Y1 X2 Y2` | aperta em (X1, Y1), anda em 10 passos e solta em (X2, Y2) |
 | `tecla QCODE` | aperta e solta uma tecla pelo nome do QEMU: `ret`, `esc`, `tab`, `backspace`, `up`, `f1`, `a`... |
-| `digitar TEXTO` | digita o texto no teclado americano (maiúsculas e símbolos com shift; não aceita `;`); letras acentuadas e `ç` saem pelas teclas mortas do ABNT2 (veja abaixo) |
+| `digitar TEXTO` | digita o texto no layout do MXOS (ABNT2 por padrão; `--layout us` para o americano), com maiúsculas, símbolos e acentos; não aceita `;` (veja abaixo) |
 | `esperar MS` | espera MS milissegundos |
 
 Tudo vira `input-send-event` do QMP. O que o shell da janela escrever na serial enquanto as ações rodam também
 aparece na saída. As ações são conferidas antes de compilar, então um erro de digitação para tudo logo no começo.
 
-O MXOS liga com o teclado ABNT2 (o padrão das configurações). O `digitar` manda as teclas do teclado americano,
-então letras, números e espaço saem iguais, mas símbolos como `/` e `:` não. Para testar com símbolos, troque o
-layout antes: `--teste "escrever /config/mxos.cfg layout=us"` numa execução (as outras chaves ficam no padrão) e
-as próximas já ligam com o teclado americano; `--disco-novo` volta tudo ao padrão.
+O MXOS liga com o teclado ABNT2 (o padrão das configurações) e o `digitar` manda as teclas do ABNT2: letras,
+números e espaço como no americano, e os símbolos nas teclas do ABNT2 (`/` e `?` na tecla ao lado do Shift
+direito, `:` em Shift + ponto e vírgula, `'` e `"` à esquerda do 1, `[`/`]` nas teclas do acento e do til...).
+`~`, `^` e `` ` `` saem como tecla morta seguida de espaço. Se o MXOS estiver com `layout=us`, passe `--layout us`
+ao `rodar.py`.
 
-Acentos no `digitar`: o QMP só manda teclas, então o `rodar.py` faz o que uma pessoa faria no ABNT2 (o layout
-padrão): `á` vira a tecla morta do agudo (`bracket_left`) e depois `a`; `à` é a mesma tecla com shift (crase);
-`ã`/`õ` usam o til (`apostrophe`), `â`/`ê`/`ô` o circunflexo (shift + `apostrophe`), `ü` o trema (shift + `6`) e
-`ç` é a tecla própria dele (`semicolon`). Maiúsculas acentuadas também funcionam (`É`, `Ç`). Com `layout=us` os
-acentos não saem (o teclado americano não tem teclas mortas). Pela serial (`--teste`) tudo vai em UTF-8, então
+Acentos no `digitar`: o QMP só manda teclas, então o `rodar.py` faz o que uma pessoa faria no ABNT2: `á` vira a
+tecla morta do agudo (`bracket_left`) e depois `a`; `à` é a mesma tecla com shift (crase); `ã`/`õ` usam o til
+(`apostrophe`), `â`/`ê`/`ô` o circunflexo (shift + `apostrophe`), `ü` o trema (shift + `6`) e `ç` é a tecla
+própria dele (`semicolon`). Maiúsculas acentuadas também funcionam (`É`, `Ç`). Com `--layout us` os acentos não
+saem (o teclado americano não tem teclas mortas). Pela serial (`--teste`) tudo vai em UTF-8, então
 `--teste "mkdir /Área;ls /"` funciona em qualquer layout.
 
 ## Arquivos
@@ -91,7 +92,7 @@ acentos não saem (o teclado americano não tem teclas mortas). Pela serial (`--
 | `ferramentas/criar_disco.py` | Cria a imagem FAT32 do disco do zero e confere imagens (`--verificar`) |
 | `ferramentas/gerar_fontes.py` | Gera `src/fonte/*.mxf` a partir das fontes TrueType em `ferramentas/fontes/` (precisa do Pillow e do fontTools só no PC) |
 | `ferramentas/fontes/` | Inter e JetBrains Mono (TTF) com as licenças (SIL Open Font License 1.1) |
-| `ferramentas/teste_fat32/` | Testes do `fat32.rs` no PC contra imagens do `criar_disco.py`: `cd ferramentas/teste_fat32 && cargo test --release` (se o Python não for achado, defina `PYTHON`) |
+| `ferramentas/teste_fat32/` | Testes do `fat32.rs` no PC contra imagens do `criar_disco.py`: `cd ferramentas/teste_fat32 && cargo test --release` (se o Python não for achado, defina `PYTHON`; no Windows sem o Visual Studio use a toolchain GNU: `cargo +stable-x86_64-pc-windows-gnu test --release`) |
 | `linker.ld` / `linker-mxq.ld` / `secoes.ld` | Onde o kernel fica (QEMU em 0x40080000, box em 0x01080000), páginas alinhadas e página de guarda |
 
 ## Memória

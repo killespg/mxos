@@ -257,13 +257,34 @@ MORTAS_ABNT2 = {
 }
 
 
+# simbolos ASCII no ABNT2 (src/entrada/teclado.rs): caractere -> teclas.
+# Os que viram tecla morta no ABNT2 saem com a morta e depois o espaco.
+SIMBOLOS_ABNT2 = {
+    "'": [("grave_accent", False)], '"': [("grave_accent", True)],
+    "[": [("bracket_right", False)], "{": [("bracket_right", True)],
+    "]": [("backslash", False)], "}": [("backslash", True)],
+    ";": [("slash", False)], ":": [("slash", True)],
+    "/": [("ro", False)], "?": [("ro", True)],
+    "\\": [("less", False)], "|": [("less", True)],
+    "~": [("apostrophe", False), ("spc", False)], "^": [("apostrophe", True), ("spc", False)],
+    "`": [("bracket_left", True), ("spc", False)],
+}
+# layout que o MXOS esta usando (--layout); muda so os simbolos
+LAYOUT = "abnt2"
+
+
 def teclas_do_caractere(c: str) -> list[tuple[str, bool]]:
-    """Teclas para um caractere: ASCII pelo teclado americano; acentuadas e o
-    c cedilha pelo ABNT2 (o layout padrao do MXOS): tecla morta e depois a letra."""
-    if c in "çÇ":
+    """Teclas para um caractere no layout do MXOS (ABNT2 por padrao): letras,
+    numeros e espaco iguais ao americano; acentuadas e o c cedilha pela tecla
+    morta e depois a letra."""
+    if LAYOUT == "abnt2" and c in SIMBOLOS_ABNT2:
+        return SIMBOLOS_ABNT2[c]
+    if c in "çÇ" and LAYOUT == "abnt2":
         return [("semicolon", c.isupper())]
     if c.isascii():
         return [qcode_do_caractere(c)]
+    if LAYOUT != "abnt2":
+        raise ValueError(f"nao sei digitar {c!r} no layout americano")
     decomposto = unicodedata.normalize("NFD", c)
     if len(decomposto) == 2 and decomposto[0].isascii() and decomposto[1] in MORTAS_ABNT2:
         return [MORTAS_ABNT2[decomposto[1]], qcode_do_caractere(decomposto[0])]
@@ -507,12 +528,16 @@ def main() -> int:
                         help="com --teste: quanto esperar o prompt depois de cada comando (padrao 3)")
     parser.add_argument("--acoes", metavar="ACOES",
                         help="com --teste: mouse e teclado pelo QMP, separados por ';'")
+    parser.add_argument("--layout", choices=["abnt2", "us"], default="abnt2",
+                        help="com --acoes: layout do MXOS para o digitar (padrao abnt2)")
     parser.add_argument("--disco-novo", action="store_true", help="recria saida/disco.img")
     parser.add_argument("--disco", metavar="IMG",
                         help="outra imagem de disco (padrao saida/disco.img); cada QEMU precisa da sua")
     opcoes = parser.parse_args()
     # console do Windows em cp1252/cp850: o que nao couber (ex.: "✓") vira "?"
     sys.stdout.reconfigure(errors="replace")
+    global LAYOUT
+    LAYOUT = opcoes.layout
     if opcoes.disco:
         global DISCO
         DISCO = (RAIZ / opcoes.disco).resolve()

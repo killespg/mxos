@@ -194,3 +194,14 @@ A rodada de acentos foi interrompida no meio. Compila limpo (QEMU e mxq), mas:
   - `ferramentas/teste_fat32/tests/fat32.rs`: 4 testes esperam o disco de exemplo
     antigo (tamanhos de LEIAME.TXT/notas.txt mudaram, falta Anotações.txt na lista).
     Atualizar as listas e tamanhos.
+
+### Passo 0 (feito)
+
+- Conferido por captura: Tarefas, Drivers, Configurações e Navegador abrem com acentos, medidos com a Inter e
+  sem cortes; a `Lista` já usa `fonte::encurtar`. Shell: `echo ação é ç` e `cat /documentos/Anotações.txt` ok.
+- Trema: `ü`/`Ü` saem certos pelo teclado virtio (testado com `digitar`); não era bug do kernel.
+- `rodar.py`: o `digitar` agora manda os símbolos nas teclas do ABNT2 (`/`, `:`, `[`, `'`...) e ganhou
+  `--layout us`. Testado: `echo üÜ /a:b [x]{y} 'q' "d" ção ~ ^ ` ?|\` sai igual na janela do terminal.
+- `teste_fat32`: listas e tamanhos atualizados para o disco de exemplo novo (13 testes passando). Neste PC
+  não há Visual Studio: os testes rodam com `cargo +stable-x86_64-pc-windows-gnu test --release`.
+- Projeto em `C:\dev\mxos` (caminho curto; o QEMU não gosta de caminho longo).
