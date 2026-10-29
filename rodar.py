@@ -573,13 +573,15 @@ def main() -> int:
         elf_para_imagem(compilar(mxq=True), RAIZ / "saida" / "mxos-mxq.img")
         # o cartao SD da box e o disco "/" do MXOS: tudo o que o disco do
         # QEMU tem (e os pacotes de saida/raiz) vai numa pasta para copiar
-        cartao = RAIZ / "saida" / "cartao"
+        cartao = RAIZ / "saida" / "pendrive"
         comando = [sys.executable, "-I", str(CRIAR_DISCO), "--pasta", str(cartao)]
         if (RAIZ / "saida" / "raiz").is_dir():
             comando += ["--raiz", str(RAIZ / "saida" / "raiz")]
         subprocess.run(comando, cwd=RAIZ, check=True)
         shutil.copyfile(RAIZ / "saida" / "mxos-mxq.img", cartao / "mxos-mxq.img")
-        print(f"copie TUDO de {cartao} para um cartao SD FAT32 (o mxos-mxq.img vai junto)")
+        # os scripts do U-Boot para ligar so com o pendrive (botao de reset)
+        subprocess.run([sys.executable, "-I", str(RAIZ / "ferramentas" / "boot_box.py"), str(cartao)], cwd=RAIZ, check=True)
+        print(f"copie TUDO de {cartao} para um pendrive (ou cartao SD) em FAT32")
         return 0
 
     # "" (nenhum comando) serve para quem so quer as acoes ou a captura
