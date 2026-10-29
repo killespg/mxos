@@ -301,8 +301,22 @@ A rodada de acentos foi interrompida no meio. Compila limpo (QEMU e mxq), mas:
   imagem da TV box compila.
 - Versão 0.10.
 
+### Passo 7 (feito, 0.10): interface leve e mais bonita
+
+- Medido no QEMU: o redesenho completo em 1080p custa uns 30 ms; o resto é por área suja. O tempo das escritas
+  no framebuffer no QEMU não serve de régua (cada linha da tela é uma página que o QEMU marca para redesenhar),
+  então a comparação foi em pixels: arrastar só o contorno troca ~350 mil pixels por ~9 mil por movimento.
+- Sem buffer de trás (-3 MB em 1024x768, -8 MB em 1080p); áreas sujas apresentadas separadas; RGB565 por fileira
+  com uma limpeza de cache por área (antes uma linha de cache inteira por pixel).
+- Barra de tarefas com hora e data do RTC (fuso nas configurações), janelas com cantos arredondados, clique direito
+  na área de trabalho para o plano de fundo, seleção em área na área de trabalho e no Arquivos (vários itens em
+  copiar/recortar/colar/apagar).
+
 ### Pendências para depois
 
 - `AF_UNIX`, IPv6, links simbólicos (o FAT32 não guarda), job control (Ctrl+Z/SIGSTOP), tratador de `SIGSEGV`.
+- Memória dos processos: `fork` copia tudo (falta copy-on-write) e cada programa dinâmico tem a própria cópia da
+  libc (falta dividir as páginas só de leitura); o `open` lê o arquivo inteiro.
+- Na box: desenhar com os 4 núcleos; montar a cena já em RGB565.
 - Na TV box os processos ainda não são compilados (o módulo `processo` depende do disco do QEMU).
 - O `--teste` do `rodar.py` separa comandos por `;`: para mandar `;` para o sh use `&&` ou um script.

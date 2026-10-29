@@ -525,6 +525,14 @@ impl MenuContexto {
     }
 }
 
+/// Selecao em area na area de trabalho: de onde o arrasto comecou e o
+/// retangulo atual (vazio enquanto o mouse nao andou).
+#[derive(Clone, Copy)]
+struct Selecao {
+    inicio: (i32, i32),
+    r: Retangulo,
+}
+
 /// Janela sendo arrastada pela barra de titulo.
 #[derive(Clone, Copy)]
 struct Arrasto {
@@ -555,6 +563,12 @@ pub struct Gerenciador {
     contorno_desenhado: Option<Retangulo>,
     /// Menu do clique direito na area de trabalho (None = fechado).
     contexto: Option<MenuContexto>,
+    /// Retangulo de selecao na area de trabalho (arrastando no papel).
+    selecao: Option<Selecao>,
+    /// Pedacos sujos que nao sao juntados com os outros: as faixas finas
+    /// que mudam quando a selecao cresce ou encolhe (juntas virariam o
+    /// retangulo inteiro).
+    soltas: Vec<Retangulo>,
     botoes: u8,
     arrasto: Option<Arrasto>,
     /// Janela que recebeu o clique no conteudo: fica com o mouse ate soltar.
@@ -592,6 +606,8 @@ impl Gerenciador {
             contorno: None,
             contorno_desenhado: None,
             contexto: None,
+            selecao: None,
+            soltas: Vec::new(),
             botoes: 0,
             arrasto: None,
             captura: None,
@@ -825,6 +841,10 @@ impl Gerenciador {
             }
             return;
         }
+        if self.selecao.is_some() {
+            self.esticar_selecao(x, y);
+            return;
+        }
         if let Some(mut mc) = self.contexto {
             let destacado = mc.item_em(x, y);
             if destacado != mc.destacado {
@@ -883,10 +903,47 @@ impl Gerenciador {
             self.barra.sujar();
         }
         let alvo = self.atalho_em(x, y);
-        let celulas = self.atalhos.escolher(alvo);
-        self.sujar_celulas(celulas);
+        for r in self.atalhos.escolher(alvo) {
+            self.sujar(r);
+        }
+        if alvo.is_none() {
+            // no papel de parede: comeca a selecao em area
+            self.selecao = Some(Selecao { inicio: (x, y), r: Retangulo::default() });
+        }
         if let Some(criar) = alvo.and_then(|i| self.atalhos.clicar(i)) {
             self.abrir_em_cascata(criar());
+        }
+    }
+
+    /// O mouse andou com a selecao em area aberta: o retangulo vai ate ele,
+    /// os atalhos que ele toca ficam escolhidos, e so as faixas que mudaram
+    /// sao redesenhadas.
+    fn esticar_selecao(&mut self, x: i32, y: i32) {
+        let Some(sel) = self.selecao else { return };
+        let limite = Retangulo::novo(0, 0, self.largura, self.altura_area());
+        let novo = Retangulo::entre(sel.inicio, (x, y)).intersecao(&limite);
+        if novo == sel.r {
+            return;
+        }
+        let velho = sel.r;
+        self.selecao = Some(Selecao { r: novo, ..sel });
+        let mut faixas_mudadas: Vec<Retangulo> = Vec::with_capacity(16);
+        faixas_mudadas.extend(velho.menos(&novo));
+        faixas_mudadas.extend(novo.menos(&velho));
+        if !velho.vazio() {
+            faixas_mudadas.extend(faixas(velho, 1));
+        }
+        faixas_mudadas.extend(faixas(novo, 1));
+        for f in faixas_mudadas {
+            let f = f.intersecao(&self.tela());
+            if !f.vazio() {
+                self.soltas.push(f);
+            }
+        }
+        if tema::aparencia().icones {
+            for r in self.atalhos.escolher_em(novo) {
+                self.sujar(r);
+            }
         }
     }
 
@@ -1035,6 +1092,9 @@ impl Gerenciador {
     fn soltar(&mut self, botao: Botao) {
         self.botoes &= !bit_do_botao(botao);
         if botao == Botao::Esquerdo {
+            if let Some(sel) = self.selecao.take() {
+                self.sujar(sel.r); // some o retangulo; os escolhidos ficam
+            }
             if let (Some(a), Some(c)) = (self.arrasto, self.contorno.take()) {
                 self.mover_janela(a.id, c.x, c.y);
             }
@@ -1132,7 +1192,7 @@ impl Gerenciador {
                 self.enviar(id, e);
             }
             None if e == EventoApp::Caractere(ENTER as char) && tema::aparencia().icones => {
-                if let Some(criar) = self.atalhos.criador_escolhido() {
+                for criar in self.atalhos.criadores_escolhidos() {
                     self.abrir_em_cascata(criar());
                 }
             }
@@ -1170,7 +1230,8 @@ impl Gerenciador {
     pub fn compor(&mut self, tela: &Tela) {
         let (t, ap) = (tema::atual(), tema::aparencia());
         self.atualizar_caches(&t, &ap);
-        let sujas = core::mem::take(&mut self.sujas);
+        let mut sujas = core::mem::take(&mut self.sujas);
+        sujas.append(&mut self.soltas);
         for &area in &sujas {
             self.pintar_cena(area, &t, &ap);
             grafico::apresentar(&self.cena, tela, area);
@@ -1301,6 +1362,13 @@ impl Gerenciador {
         }
         if let Some(mc) = self.contexto {
             mc.pintar(&mut self.cena, area, t);
+        }
+        if let Some(sel) = self.selecao.filter(|s| !s.r.vazio()) {
+            // azul translucido com borda, so na parte que cai em `area`
+            area::tingir(&mut self.cena, sel.r.intersecao(&area), t.destaque, 60);
+            for faixa in faixas(sel.r, 1) {
+                area::preencher(&mut self.cena, faixa, area, area::clarear(t.destaque, 40));
+            }
         }
     }
 

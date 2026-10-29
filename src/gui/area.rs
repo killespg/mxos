@@ -77,7 +77,7 @@ fn escalar(cor: Cor, fator: u32) -> Cor {
 }
 
 /// Mistura `cor` com o que ja esta em `r` (alfa 0 a 255), pixel a pixel.
-fn tingir(s: &mut Superficie, r: Retangulo, cor: Cor, alfa: u32) {
+pub fn tingir(s: &mut Superficie, r: Retangulo, cor: Cor, alfa: u32) {
     let r = r.intersecao(&s.area());
     let largura = s.largura();
     let pixels = s.pixels_mut();
@@ -581,17 +581,19 @@ struct Atalho {
 }
 
 /// Atalhos da area de trabalho, numa coluna a esquerda: um clique escolhe,
-/// clique duplo (ou Enter com nenhuma janela focada) abre o app.
+/// arrastar no papel de parede escolhe varios (selecao em area), clique
+/// duplo (ou Enter com nenhuma janela focada) abre o app.
 pub struct Atalhos {
     itens: Vec<Atalho>,
-    escolhido: Option<usize>,
+    /// Bit i = atalho i escolhido (ate 64 atalhos).
+    escolhidos: u64,
     sob_ponteiro: Option<usize>,
     duplo: DuploClique,
 }
 
 impl Atalhos {
     pub fn novos() -> Atalhos {
-        Atalhos { itens: Vec::new(), escolhido: None, sob_ponteiro: None, duplo: DuploClique::novo() }
+        Atalhos { itens: Vec::new(), escolhidos: 0, sob_ponteiro: None, duplo: DuploClique::novo() }
     }
 
     /// Acrescenta um atalho no fim da coluna. Devolve a celula dele.
@@ -623,13 +625,32 @@ impl Atalhos {
         celulas
     }
 
-    /// Troca o atalho escolhido. Devolve as celulas que mudaram (para sujar).
-    pub fn escolher(&mut self, i: Option<usize>) -> [Option<Retangulo>; 2] {
-        if i == self.escolhido {
-            return [None, None];
+    /// So o atalho `i` fica escolhido (None = nenhum). Devolve as celulas
+    /// que mudaram (para sujar).
+    pub fn escolher(&mut self, i: Option<usize>) -> Vec<Retangulo> {
+        self.trocar_escolhidos(i.filter(|&i| i < 64).map_or(0, |i| 1 << i))
+    }
+
+    /// Escolhe os atalhos cuja celula toca `r` (selecao em area).
+    pub fn escolher_em(&mut self, r: Retangulo) -> Vec<Retangulo> {
+        let mascara = (0..self.itens.len().min(64))
+            .filter(|&i| !self.retangulo(i).intersecao(&r).vazio())
+            .fold(0u64, |m, i| m | 1 << i);
+        self.trocar_escolhidos(mascara)
+    }
+
+    fn trocar_escolhidos(&mut self, mascara: u64) -> Vec<Retangulo> {
+        let mudou = core::mem::replace(&mut self.escolhidos, mascara) ^ mascara;
+        let mut celulas = Vec::new();
+        for i in (0..self.itens.len().min(64)).filter(|i| mudou >> i & 1 == 1) {
+            self.itens[i].sujo = true;
+            celulas.push(self.retangulo(i));
         }
-        let antes = core::mem::replace(&mut self.escolhido, i);
-        self.mudaram(antes, i)
+        celulas
+    }
+
+    fn escolhido(&self, i: usize) -> bool {
+        i < 64 && self.escolhidos >> i & 1 == 1
     }
 
     /// O ponteiro esta em cima de `i` (None = de nenhum).
@@ -648,9 +669,9 @@ impl Atalhos {
         self.itens.get(i).filter(|_| duplo).map(|a| a.criar)
     }
 
-    /// O app do atalho escolhido (Enter na area de trabalho).
-    pub fn criador_escolhido(&self) -> Option<Criador> {
-        self.escolhido.and_then(|i| self.itens.get(i)).map(|a| a.criar)
+    /// Os apps dos atalhos escolhidos (Enter na area de trabalho abre todos).
+    pub fn criadores_escolhidos(&self) -> Vec<Criador> {
+        (0..self.itens.len()).filter(|&i| self.escolhido(i)).map(|i| self.itens[i].criar).collect()
     }
 
     /// Tudo precisa ser redesenhado (trocou o tema ou o papel de parede).
@@ -667,7 +688,7 @@ impl Atalhos {
                 continue;
             }
             let r = self.retangulo(i);
-            let (escolhido, sob) = (self.escolhido == Some(i), self.sob_ponteiro == Some(i));
+            let (escolhido, sob) = (self.escolhido(i), self.sob_ponteiro == Some(i));
             let atalho = &mut self.itens[i];
             desenhar_atalho(atalho, r, escolhido, sob, altura_area, t, ap);
             atalho.sujo = false;

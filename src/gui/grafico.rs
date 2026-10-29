@@ -82,6 +82,27 @@ impl Retangulo {
         Retangulo::novo(x0, y0, x1 - x0, y1 - y0)
     }
 
+    /// O retangulo entre dois pontos (em qualquer ordem), incluindo os dois.
+    pub fn entre((x0, y0): (i32, i32), (x1, y1): (i32, i32)) -> Retangulo {
+        let (x, y) = (x0.min(x1), y0.min(y1));
+        Retangulo::novo(x, y, (x0 - x1).abs() + 1, (y0 - y1).abs() + 1)
+    }
+
+    /// `self` menos `outro`: ate quatro pedacos (cima, baixo, esquerda,
+    /// direita); os que sobram vazios ficam com largura ou altura 0.
+    pub fn menos(&self, outro: &Retangulo) -> [Retangulo; 4] {
+        let i = self.intersecao(outro);
+        if i.vazio() {
+            return [*self, Retangulo::default(), Retangulo::default(), Retangulo::default()];
+        }
+        [
+            Retangulo::novo(self.x, self.y, self.largura, i.y - self.y),
+            Retangulo::novo(self.x, i.baixo(), self.largura, self.baixo() - i.baixo()),
+            Retangulo::novo(self.x, i.y, i.x - self.x, i.altura),
+            Retangulo::novo(i.direita(), i.y, self.direita() - i.direita(), i.altura),
+        ]
+    }
+
     pub fn deslocado(&self, dx: i32, dy: i32) -> Retangulo {
         Retangulo::novo(self.x.saturating_add(dx), self.y.saturating_add(dy), self.largura, self.altura)
     }

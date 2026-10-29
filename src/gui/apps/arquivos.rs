@@ -118,23 +118,24 @@ struct Copiado {
 
 /// Area de transferencia de todas as janelas do gerenciador. So o laco
 /// principal da GUI mexe (nunca uma interrupcao): basta um UnsafeCell.
-struct Transferencia(UnsafeCell<Option<Copiado>>);
+/// Guarda varios itens de uma vez (selecao em area).
+struct Transferencia(UnsafeCell<Vec<Copiado>>);
 
 unsafe impl Sync for Transferencia {}
 
-static TRANSFERENCIA: Transferencia = Transferencia(UnsafeCell::new(None));
+static TRANSFERENCIA: Transferencia = Transferencia(UnsafeCell::new(Vec::new()));
 
 impl Transferencia {
-    fn ler(&self) -> Option<Copiado> {
+    fn ler(&self) -> Vec<Copiado> {
         unsafe { (*self.0.get()).clone() }
     }
 
     fn tem_algo(&self) -> bool {
-        unsafe { (*self.0.get()).is_some() }
+        unsafe { !(*self.0.get()).is_empty() }
     }
 
-    fn guardar(&self, copiado: Option<Copiado>) {
-        unsafe { *self.0.get() = copiado };
+    fn guardar(&self, copiados: Vec<Copiado>) {
+        unsafe { *self.0.get() = copiados };
     }
 }
 
@@ -161,9 +162,9 @@ enum Modo {
 
 /// Trabalho demorado, feito no Tique depois do quadro com o aviso.
 enum Tarefa {
-    Colar(Copiado),
-    /// Caminho e posicao na lista (depois seleciona o vizinho).
-    Apagar(String, usize),
+    Colar(Vec<Copiado>),
+    /// Caminhos e posicao na lista (depois seleciona o vizinho).
+    Apagar(Vec<String>, usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -251,6 +252,7 @@ impl Arquivos {
     fn vazio() -> Arquivos {
         let mut lista = Lista::nova();
         lista.definir_colunas(&COLUNAS, &LARGURAS);
+        lista.permitir_varios();
         Arquivos {
             local: Local::Pasta(String::from("/")),
             historico: Vec::new(),
@@ -287,10 +289,6 @@ impl Arquivos {
 
     fn item_selecionado(&self) -> Option<&ItemPasta> {
         self.lista.selecionado().and_then(|i| self.itens.get(i))
-    }
-
-    fn caminho_selecionado(&self) -> Option<String> {
-        Some(juntar(self.pasta_atual()?, &self.item_selecionado()?.nome))
     }
 
     fn disco_escolhido(&self) -> Option<&InfoDisco> {
@@ -544,25 +542,49 @@ impl Arquivos {
         }
     }
 
-    /// Copiar ou recortar o item selecionado para a area de transferencia.
+    /// Os itens escolhidos na lista (um, ou varios pela selecao em area).
+    fn escolhidos(&self) -> Vec<&ItemPasta> {
+        self.lista.marcados().into_iter().filter_map(|i| self.itens.get(i)).collect()
+    }
+
+    /// "nome" para um item, "3 itens" para varios.
+    fn nome_dos_escolhidos(&self) -> String {
+        match self.escolhidos().as_slice() {
+            [item] => item.nome.clone(),
+            varios => format!("{} itens", varios.len()),
+        }
+    }
+
+    /// Copiar ou recortar os itens escolhidos para a area de transferencia.
     fn copiar(&mut self, recortar: bool) {
-        let (Some(caminho), Some(item)) = (self.caminho_selecionado(), self.item_selecionado()) else { return };
+        let Some(pasta) = self.pasta_atual().map(String::from) else { return };
+        let copiados: Vec<Copiado> = self
+            .escolhidos()
+            .iter()
+            .map(|item| Copiado { caminho: juntar(&pasta, &item.nome), pasta: item.pasta, recortar })
+            .collect();
+        if copiados.is_empty() {
+            return;
+        }
         let verbo = if recortar { "Recortado" } else { "Copiado" };
-        let texto = format!("{verbo}: {} (abra a pasta de destino e clique em Colar)", item.nome);
-        TRANSFERENCIA.guardar(Some(Copiado { caminho, pasta: item.pasta, recortar }));
+        let texto = format!("{verbo}: {} (abra a pasta de destino e clique em Colar)", self.nome_dos_escolhidos());
+        TRANSFERENCIA.guardar(copiados);
         self.info(texto);
     }
 
     fn agendar_colar(&mut self) {
-        if let Some(copiado) = TRANSFERENCIA.ler() {
-            self.agendar(Tarefa::Colar(copiado));
+        let copiados = TRANSFERENCIA.ler();
+        if !copiados.is_empty() {
+            self.agendar(Tarefa::Colar(copiados));
         }
     }
 
     fn agendar_apagar(&mut self) {
         self.modo = Modo::Normal;
-        let (Some(caminho), Some(i)) = (self.caminho_selecionado(), self.lista.selecionado()) else { return };
-        self.agendar(Tarefa::Apagar(caminho, i));
+        let Some(pasta) = self.pasta_atual().map(String::from) else { return };
+        let caminhos: Vec<String> = self.escolhidos().iter().map(|item| juntar(&pasta, &item.nome)).collect();
+        let Some(&primeiro) = self.lista.marcados().first() else { return };
+        self.agendar(Tarefa::Apagar(caminhos, primeiro));
     }
 
     /// Guarda a tarefa; ela roda no primeiro Tique depois do quadro com o aviso.
@@ -574,8 +596,22 @@ impl Arquivos {
 
     fn fazer_tarefa(&mut self, tarefa: Tarefa) {
         match tarefa {
-            Tarefa::Colar(copiado) => self.colar(copiado),
-            Tarefa::Apagar(caminho, i) => self.apagar(&caminho, i),
+            Tarefa::Colar(copiados) => self.colar_todos(copiados),
+            Tarefa::Apagar(caminhos, i) => self.apagar_todos(&caminhos, i),
+        }
+    }
+
+    /// Cola tudo o que esta na area de transferencia (um por vez; a
+    /// mensagem do ultimo fica, ou o resumo se foram varios).
+    fn colar_todos(&mut self, copiados: Vec<Copiado>) {
+        let n = copiados.len();
+        let mut erros = 0;
+        for copiado in copiados {
+            self.colar(copiado);
+            erros += self.mensagem.as_ref().is_some_and(|(_, erro)| *erro) as usize;
+        }
+        if n > 1 && erros == 0 {
+            self.info(format!("Colados: {n} itens"));
         }
     }
 
@@ -602,7 +638,9 @@ impl Arquivos {
         match resultado {
             Ok(n) => {
                 if copiado.recortar {
-                    TRANSFERENCIA.guardar(None); // o original nao existe mais
+                    // o original nao existe mais
+                    let resto = TRANSFERENCIA.ler().into_iter().filter(|c| c.caminho != copiado.caminho).collect();
+                    TRANSFERENCIA.guardar(resto);
                 }
                 self.recarregar(Some(&novo));
                 let extra = if n > 1 { format!(" ({n} itens)") } else { String::new() };
@@ -615,22 +653,32 @@ impl Arquivos {
         }
     }
 
-    /// Apaga (com tudo dentro, se for pasta) e seleciona o vizinho.
-    fn apagar(&mut self, caminho: &str, indice: usize) {
-        let nome = String::from(nome_do_caminho(caminho));
-        let resultado = apagar_tudo(caminho, 0);
-        // o que estava na area de transferencia pode ter ido junto
-        if TRANSFERENCIA.ler().is_some_and(|c| dentro_de(&c.caminho, caminho)) {
-            TRANSFERENCIA.guardar(None);
+    /// Apaga cada caminho (com tudo dentro, se for pasta) e seleciona o
+    /// vizinho do primeiro.
+    fn apagar_todos(&mut self, caminhos: &[String], indice: usize) {
+        let mut total = 0;
+        let mut falha = None;
+        for caminho in caminhos {
+            match apagar_tudo(caminho, 0) {
+                Ok(n) => total += n,
+                Err(e) => falha = Some(format!("Não foi possível apagar {}: {e}", nome_do_caminho(caminho))),
+            }
+            // o que estava na area de transferencia pode ter ido junto
+            let resto = TRANSFERENCIA.ler().into_iter().filter(|c| !dentro_de(&c.caminho, caminho)).collect();
+            TRANSFERENCIA.guardar(resto);
         }
         self.recarregar(None);
         if !self.itens.is_empty() {
             self.lista.selecionar(Some(indice.min(self.itens.len() - 1)));
         }
-        match resultado {
-            Ok(n) if n > 1 => self.info(format!("Apagado: {nome} ({n} itens)")),
-            Ok(_) => self.info(format!("Apagado: {nome}")),
-            Err(e) => self.erro(format!("Não foi possível apagar {nome}: {e}")),
+        match (falha, caminhos) {
+            (Some(texto), _) => self.erro(texto),
+            (None, [um]) if total > 1 => self.info(format!("Apagado: {} ({total} itens)", nome_do_caminho(um))),
+            (None, [um]) => self.info(format!("Apagado: {}", nome_do_caminho(um))),
+            (None, varios) if total as usize > varios.len() => {
+                self.info(format!("Apagados: {} itens ({total} contando o que havia dentro)", varios.len()))
+            }
+            (None, varios) => self.info(format!("Apagados: {} itens", varios.len())),
         }
     }
 
@@ -984,11 +1032,12 @@ impl Arquivos {
             }
             (_, Modo::Normal) => self.desenhar_transferencia(s, y, t),
             (_, Modo::Apagar) => {
-                let Some(item) = self.item_selecionado() else { return };
-                let pergunta = if item.pasta {
-                    format!("Apagar a pasta “{}” e tudo o que há nela?", item.nome)
-                } else {
-                    format!("Apagar “{}”? Isso não pode ser desfeito.", item.nome)
+                let escolhidos = self.escolhidos();
+                let pergunta = match escolhidos.as_slice() {
+                    [] => return,
+                    [item] if item.pasta => format!("Apagar a pasta “{}” e tudo o que há nela?", item.nome),
+                    [item] => format!("Apagar “{}”? Isso não pode ser desfeito.", item.nome),
+                    varios => format!("Apagar os {} itens escolhidos? Isso não pode ser desfeito.", varios.len()),
                 };
                 let [ok, _] = botoes_dialogo(Acao::Confirmar, "Apagar", Acao::Cancelar, 0, LARGURA);
                 let texto = fonte::cortar(&pergunta, ok.r.x - 2 * MARGEM - 16, &INTER);
@@ -1004,9 +1053,13 @@ impl Arquivos {
 
     /// Lembrete do que esta na area de transferencia, a direita dos comandos.
     fn desenhar_transferencia(&self, s: &mut Superficie, y: i32, t: &Tema) {
-        let Some(copiado) = TRANSFERENCIA.ler() else { return };
+        let copiados = TRANSFERENCIA.ler();
+        let Some(copiado) = copiados.first() else { return };
         let verbo = if copiado.recortar { "Recortado" } else { "Copiado" };
-        let texto = format!("{verbo}: {}", nome_do_caminho(&copiado.caminho));
+        let texto = match copiados.len() {
+            1 => format!("{verbo}: {}", nome_do_caminho(&copiado.caminho)),
+            n => format!("{verbo}: {n} itens"),
+        };
         let inicio = MARGEM + COMANDOS.iter().map(|&(_, texto)| largura_botao(texto) + ESPACO).sum::<i32>() + 8;
         let texto = fonte::cortar(&texto, LARGURA - MARGEM - 4 - inicio, &INTER);
         let largura = Superficie::largura_texto(texto, 1);
@@ -1076,9 +1129,16 @@ impl Arquivos {
             contagem(self.itens.len() - pastas, "arquivo", "arquivos"),
             tamanho_texto(bytes)
         );
-        if let Some(item) = self.item_selecionado() {
-            let detalhe = if item.pasta { String::from("pasta") } else { tamanho_texto(item.tamanho) };
-            texto.push_str(&format!("   |   {}: {detalhe}", item.nome));
+        match self.escolhidos().as_slice() {
+            [] => {}
+            [item] => {
+                let detalhe = if item.pasta { String::from("pasta") } else { tamanho_texto(item.tamanho) };
+                texto.push_str(&format!("   |   {}: {detalhe}", item.nome));
+            }
+            varios => {
+                let bytes: u64 = varios.iter().map(|i| i.tamanho).sum();
+                texto.push_str(&format!("   |   {} itens escolhidos ({})", varios.len(), tamanho_texto(bytes)));
+            }
         }
         texto
     }
@@ -1086,11 +1146,17 @@ impl Arquivos {
     /// Aviso da tarefa que esta para rodar.
     fn texto_tarefa(&self) -> Option<String> {
         Some(match self.tarefa.as_ref()? {
-            Tarefa::Colar(c) => {
-                let verbo = if c.recortar { "Movendo" } else { "Copiando" };
-                format!("{verbo} {}…", nome_do_caminho(&c.caminho))
+            Tarefa::Colar(copiados) => {
+                let verbo = if copiados.first().is_some_and(|c| c.recortar) { "Movendo" } else { "Copiando" };
+                match copiados.as_slice() {
+                    [c] => format!("{verbo} {}…", nome_do_caminho(&c.caminho)),
+                    varios => format!("{verbo} {} itens…", varios.len()),
+                }
             }
-            Tarefa::Apagar(caminho, _) => format!("Apagando {}…", nome_do_caminho(caminho)),
+            Tarefa::Apagar(caminhos, _) => match caminhos.as_slice() {
+                [um] => format!("Apagando {}…", nome_do_caminho(um)),
+                varios => format!("Apagando {} itens…", varios.len()),
+            },
         })
     }
 }

@@ -889,6 +889,13 @@ pub struct Lista {
     duplo: DuploClique,
     /// Arrastando o polegar: distancia do ponteiro ao topo dele.
     arrasto: Option<i32>,
+    /// Aceita varias linhas escolhidas (selecao em area); so quem pede.
+    varios: bool,
+    /// Linhas marcadas alem da `selecionado` (que e a principal).
+    marcados: Vec<bool>,
+    /// Selecao em area em andamento: comeco e ponta, com y medido no
+    /// conteudo inteiro (y na tela + rolagem), para valer rolando.
+    laco: Option<((i32, i32), (i32, i32))>,
 }
 
 /// Onde fica cada parte da lista dentro da area.
@@ -924,7 +931,35 @@ impl Lista {
             focada: true,
             duplo: DuploClique::novo(),
             arrasto: None,
+            varios: false,
+            marcados: Vec::new(),
+            laco: None,
         }
+    }
+
+    /// Liga a selecao de varias linhas: arrastar no espaco vazio (fora do
+    /// nome) desenha um retangulo e escolhe as linhas que ele toca.
+    pub fn permitir_varios(&mut self) {
+        self.varios = true;
+    }
+
+    /// As linhas escolhidas (a principal e as marcadas pela selecao em area),
+    /// em ordem.
+    pub fn marcados(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = (0..self.itens.len()).filter(|&i| self.marcado(i)).collect();
+        if v.is_empty() {
+            v.extend(self.selecionado);
+        }
+        v
+    }
+
+    fn marcado(&self, i: usize) -> bool {
+        self.selecionado == Some(i) || self.marcados.get(i).copied().unwrap_or(false)
+    }
+
+    fn desmarcar_todos(&mut self) {
+        self.marcados.clear();
+        self.marcados.resize(self.itens.len(), false);
     }
 
     /// Titulos do cabecalho e largura de cada coluna em pixels (a ultima
@@ -943,8 +978,11 @@ impl Lista {
             self.rolagem = 0;
             self.mostrar_selecao = false;
             self.duplo.esquecer();
+            self.marcados.clear();
+            self.laco = None;
         }
         self.itens = itens;
+        self.marcados.resize(self.itens.len(), false);
     }
 
     #[allow(dead_code)] // para os apps lerem as linhas de volta
@@ -962,6 +1000,7 @@ impl Lista {
         if nova != self.selecionado {
             self.duplo.esquecer();
         }
+        self.desmarcar_todos();
         self.selecionado = nova;
         self.mostrar_selecao = nova.is_some();
     }
@@ -1008,12 +1047,15 @@ impl Lista {
         self.rolagem = self.rolagem_efetiva(p.visiveis);
         self.mostrar_selecao = false;
         match e {
+            EventoApp::Mouse { x, y, botoes } if self.laco.is_some() => self.esticar_laco(x, y, botoes, &p),
             EventoApp::Mouse { y, botoes, .. } => self.mover(y, botoes, &p),
             EventoApp::Botao { x, y, botao: Botao::Esquerdo, pressionado: true } => self.apertar(x, y, area, &p),
-            EventoApp::Botao { botao: Botao::Esquerdo, pressionado: false, .. } => match self.arrasto.take() {
-                Some(_) => AcaoLista::Rolou,
-                None => AcaoLista::Nada,
-            },
+            EventoApp::Botao { botao: Botao::Esquerdo, pressionado: false, .. } => {
+                match (self.arrasto.take(), self.laco.take()) {
+                    (None, None) => AcaoLista::Nada,
+                    _ => AcaoLista::Rolou,
+                }
+            }
             EventoApp::Roda(passos) => self.rodar(passos, &p),
             EventoApp::Tecla { codigo, pressionada: true } if self.focada => self.tecla(codigo, &p),
             EventoApp::Caractere('\r') if self.focada => self.selecionado.map_or(AcaoLista::Nada, AcaoLista::Abriu),
@@ -1034,18 +1076,68 @@ impl Lista {
         let fileira = (y - p.linhas.y) / ALTURA_LINHA;
         let linha = self.rolagem + fileira.max(0) as usize;
         let na_linha = p.linhas.contem(x, y) && (fileira as usize) < p.visiveis && linha < self.itens.len();
-        if !na_linha {
+        if !na_linha || (self.varios && !self.no_nome(x, linha, &p)) {
             if !p.linhas.contem(x, y) {
                 // cabecalho ou contorno
                 return if ganhou_foco { AcaoLista::Rolou } else { AcaoLista::Nada };
             }
-            // espaco vazio embaixo das linhas: tira a selecao
+            // espaco vazio (embaixo das linhas, ou fora do nome): tira a
+            // selecao e, se a lista aceita varias, comeca a selecao em area
             self.duplo.esquecer();
-            let tinha = self.selecionado.take().is_some();
+            let tinha = self.selecionado.take().is_some() || self.marcados.iter().any(|&m| m);
+            self.desmarcar_todos();
+            if self.varios {
+                let ponto = (x, y - p.linhas.y + self.rolagem as i32 * ALTURA_LINHA);
+                self.laco = Some((ponto, ponto));
+                return AcaoLista::Rolou;
+            }
             return if tinha || ganhou_foco { AcaoLista::Rolou } else { AcaoLista::Nada };
         }
+        self.desmarcar_todos();
         self.selecionado = Some(linha);
         if self.duplo.apertar(linha) { AcaoLista::Abriu(linha) } else { AcaoLista::Selecionou(linha) }
+    }
+
+    /// (x) cai no icone ou no texto da primeira coluna da linha? (o resto
+    /// da linha e "espaco vazio" para a selecao em area, como no Windows)
+    fn no_nome(&self, x: i32, linha: usize, p: &Partes) -> bool {
+        let coluna = self.coluna(0, p.linhas);
+        let texto = self.itens[linha].colunas.first().map_or(0, |t| INTER.largura(t));
+        let fim = coluna.x + 24 + texto + 6;
+        x >= coluna.x && x < fim.min(coluna.direita())
+    }
+
+    /// Selecao em area: a ponta vai ate o ponteiro (rolando a lista se ele
+    /// passa da borda) e as linhas que o retangulo toca ficam marcadas.
+    fn esticar_laco(&mut self, x: i32, y: i32, botoes: u8, p: &Partes) -> AcaoLista {
+        let Some((inicio, _)) = self.laco else { return AcaoLista::Nada };
+        if botoes & 1 == 0 {
+            self.laco = None; // soltou fora da janela
+            return AcaoLista::Rolou;
+        }
+        if y < p.linhas.y && self.rolagem > 0 {
+            self.rolagem -= 1;
+        } else if y >= p.linhas.baixo() && self.rolagem < self.maximo_rolagem(p.visiveis) {
+            self.rolagem += 1;
+        }
+        let y = y.clamp(p.linhas.y, p.linhas.baixo() - 1);
+        let ponta = (x.clamp(p.linhas.x, p.linhas.direita() - 1), y - p.linhas.y + self.rolagem as i32 * ALTURA_LINHA);
+        self.laco = Some((inicio, ponta));
+        let (cima, baixo) = (inicio.1.min(ponta.1), inicio.1.max(ponta.1));
+        let primeira = (cima / ALTURA_LINHA).max(0) as usize;
+        let ultima = (baixo / ALTURA_LINHA).max(0) as usize;
+        self.desmarcar_todos();
+        if !self.itens.is_empty() {
+            for i in primeira..=ultima.min(self.itens.len() - 1) {
+                self.marcados[i] = true;
+            }
+        }
+        // a principal e a da ponta (a barra de estado e o Renomear usam ela)
+        let na_ponta = (ponta.1 / ALTURA_LINHA) as usize;
+        self.selecionado = (na_ponta < self.itens.len() && self.marcados[na_ponta])
+            .then_some(na_ponta)
+            .or_else(|| self.marcados.iter().position(|&m| m));
+        AcaoLista::Rolou
     }
 
     /// O polegar da barra: altura proporcional ao que aparece, posicao pela
@@ -1134,6 +1226,7 @@ impl Lista {
         if atual == Some(nova) {
             return if self.rolagem != antes { AcaoLista::Rolou } else { AcaoLista::Nada };
         }
+        self.desmarcar_todos();
         self.selecionado = Some(nova);
         self.duplo.esquecer();
         AcaoLista::Selecionou(nova)
@@ -1172,6 +1265,14 @@ impl Lista {
             let r = Retangulo::novo(p.linhas.x, y, p.linhas.largura, ALTURA_LINHA);
             self.desenhar_linha(s, r, indice, &t, fundo);
         }
+        if let Some((inicio, ponta)) = self.laco {
+            // o retangulo da selecao em area, na posicao de agora
+            let deslocamento = p.linhas.y - rolagem as i32 * ALTURA_LINHA;
+            let r = Retangulo::entre((inicio.0, inicio.1 + deslocamento), (ponta.0, ponta.1 + deslocamento)).intersecao(&p.linhas);
+            area::tingir(s, r, t.destaque, 60);
+            // borda escura: aparece tambem por cima das linhas ja escolhidas
+            s.contorno(r, area::escurecer(t.destaque, 90), 1);
+        }
         if let Some(barra) = p.barra {
             s.retangulo(barra, grafico::misturar(fundo, t.texto, 14));
             let cor = if self.arrasto.is_some() { t.destaque } else { grafico::misturar(fundo, t.texto, 80) };
@@ -1201,7 +1302,7 @@ impl Lista {
 
     fn desenhar_linha(&self, s: &mut Superficie, r: Retangulo, indice: usize, t: &Tema, fundo: Cor) {
         let item = &self.itens[indice];
-        let (cor_fundo, cor_texto) = match (self.selecionado == Some(indice), self.focada) {
+        let (cor_fundo, cor_texto) = match (self.marcado(indice), self.focada) {
             (true, true) => (t.destaque, BRANCO),
             (true, false) => (grafico::misturar(fundo, t.destaque, 80), t.texto),
             // zebra bem leve nas linhas impares

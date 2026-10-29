@@ -206,6 +206,8 @@ papel=gradiente
 cor_papel=204060
 relogio_segundos=sim
 icones=sim
+arrastar_contorno=sim
+fuso=-3
 layout=abnt2
 pagina_inicial=disco:/paginas/index.html
 ```
@@ -213,6 +215,33 @@ pagina_inicial=disco:/paginas/index.html
 Os apps conversam com o gerenciador de janelas por pedidos (`janelas::Pedido`: abrir, fechar, abrir um arquivo,
 trocar o layout, redesenhar tudo depois de trocar o tema) e desenham com o mesmo kit de `gui/widgets.rs`, nas
 cores do tema escolhido.
+
+## Interface leve e mais bonita (0.10)
+
+Pensado para a TV box (1 GB, Cortex-A53, tela de 1920x1080 em RGB565 que o vídeo lê direto da RAM):
+
+- **Só o que mudou vai para a tela**, cada pedaço separado: o relógio e o mouse longe um do outro não viram um
+  retângulo enorme. A cena (a tela sem o cursor) vai direto para o framebuffer; o cursor, o contorno do arrasto e o
+  retângulo de seleção são desenhados por cima. Não há mais buffer de trás: um buffer de tela inteira a menos
+  (3 MB em 1024x768, 8 MB em 1080p). A área de trabalho parada usa uns 9 MB do heap em 1024x768.
+- **Conversão para RGB565 por fileira** e o cache limpo uma vez por área. Antes, cada pixel limpava uma linha
+  inteira de cache (60 linhas de cache por pixel na box).
+- **Arrastar só o contorno** (padrão, desligável em Personalizar): uma linha dupla, escura por fora e clara por
+  dentro, anda com o mouse, e a janela vai para o lugar ao soltar. Uns 9 mil pixels por movimento contra uns
+  350 mil redesenhando a janela e o que estava embaixo.
+- **Seleção em área**: arrastar no papel de parede desenha um retângulo translúcido e escolhe os ícones que ele
+  toca (Enter abre todos). No **Arquivos**, arrastar no espaço vazio da lista (fora do nome) faz o mesmo com as
+  linhas, rolando a lista na borda; Copiar, Recortar, Colar e Apagar valem para todos os escolhidos, e a barra de
+  estado mostra quantos são e o tamanho. Só as faixas do retângulo que mudaram são redesenhadas.
+- **Barra de tarefas** de 40 px: hora e data ("qui, 29/10/2026") à direita, pelo RTC e no fuso das
+  configurações (`fuso=-3`); botões planos e arredondados, com um tracinho embaixo da janela aberta (comprido na
+  ativa). A cada segundo só a caixa do relógio é redesenhada.
+- **Janelas**: barra de título de 30 px com brilho no alto, botões [_] e [x] arredondados, janela fora de foco
+  apagada, borda de 1 px e **cantos arredondados** (raio 8, 4x4 amostras por pixel, a borda acompanha a curva).
+  Nenhum buffer extra: só os pixels dos quatro cantos são guardados e repostos.
+- **Clique direito na área de trabalho**: "Alterar plano de fundo…" (abre o Personalizar) e "Próximo plano de
+  fundo" (troca na hora; o Salvar das Configurações guarda).
+- `rodar.py --acoes` ganhou `apertar` e `soltar` (captura no meio de um arrasto).
 
 ## Fontes e acentos (0.8)
 
