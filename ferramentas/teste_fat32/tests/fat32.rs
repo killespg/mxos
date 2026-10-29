@@ -336,7 +336,7 @@ fn operacoes_aleatorias() {
         }
     }
     let lista = verificar(&imagem, "aleatorio.img");
-    let originais = 25; // + /lib (ld-linux, libc, libresolv) e /bin/busybox-dinamico; // com /bin (ola, busybox) e /etc (com resolv.conf, hosts, nsswitch.conf) // arquivos que ja vinham na imagem
+    let originais = 24; // + /lib (ld-linux, libc, libresolv) e /bin/busybox-dinamico; // com /bin (ola, busybox) e /etc (com resolv.conf, hosts, nsswitch.conf) // arquivos que ja vinham na imagem
     assert_eq!(lista.iter().filter(|l| l.starts_with("ARQ ")).count(), modelo.len() + originais);
 }
 
