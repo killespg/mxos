@@ -65,7 +65,7 @@ struct Canal {
     trem_prof: u8,
     trem_pos: u8,
     trem_volume: i32,
-    ultimo_slide: u8,
+
     loop_linha: usize,
     loop_conta: u8,
     deslocamento: u8,
@@ -355,7 +355,7 @@ impl Tracker {
             let mut atrasada = None;
             let ch = &mut self.canais[c];
             let mut periodo = ch.periodo;
-            let mut slide = |ch: &mut Canal, pa: u8| {
+            let slide = |ch: &mut Canal, pa: u8| {
                 let (x, y) = (pa >> 4, pa & 0xF);
                 ch.volume = if x > 0 { (ch.volume + x as i32).min(64) } else { (ch.volume - y as i32).max(0) };
             };

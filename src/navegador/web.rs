@@ -32,6 +32,9 @@ const MAX_IMAGENS: usize = 40;
 const MAX_FUNDOS: usize = 20;
 const MAX_BYTES_IMAGEM: usize = 6 << 20;
 const MAX_BYTES_SCRIPT: usize = 8 << 20;
+const MAX_LADO_IMAGEM: i32 = 1280;
+/// Pixels de imagem por pagina (16 M = 64 MB): passou, as outras ficam sem.
+const MAX_PIXELS_PAGINA: usize = 16 << 20;
 
 static INTER: &[u8] = include_bytes!("../../ferramentas/fontes/Inter-Regular.ttf");
 static INTER_NEGRITO: &[u8] = include_bytes!("../../ferramentas/fontes/Inter-Bold.ttf");
@@ -69,6 +72,8 @@ struct Imgs {
     por_no: BTreeMap<Id, Imagem>,
     por_url: BTreeMap<String, Imagem>,
     tentadas: alloc::collections::BTreeSet<Id>,
+    /// Soma dos pixels guardados (limite MAX_PIXELS_PAGINA).
+    pixels: usize,
 }
 
 impl Imagens for Imgs {
@@ -117,7 +122,8 @@ fn imagem_de(u: &str) -> Option<Imagem> {
     if bytes.len() > MAX_BYTES_IMAGEM {
         return None;
     }
-    Some(imagem::decodificar(&bytes)?.reduzir(1920, 1920))
+    // a janela tem menos de 1280 px: maior que isso so gasta memoria
+    imagem::decodificar_max(&bytes, MAX_LADO_IMAGEM, MAX_LADO_IMAGEM)
 }
 
 fn src_de(e: &crate::web::dom::Elemento) -> Option<String> {
@@ -170,7 +176,11 @@ fn buscar_imagens(doc: &crate::web::dom::Documento, base: &str, imgs: &mut Imgs)
         }
         if let Some(s) = src_de(e) {
             imgs.tentadas.insert(id);
+            if imgs.pixels >= MAX_PIXELS_PAGINA {
+                continue;
+            }
             if let Some(i) = imagem_de(&url::resolver(base, &s)) {
+                imgs.pixels += i.px.len();
                 imgs.por_no.insert(id, i);
             }
         }
@@ -233,7 +243,11 @@ pub fn abrir(endereco: &str, largura: i32, altura: i32) -> PaginaWeb {
         }
     }
     for u in urls {
+        if imgs.pixels >= MAX_PIXELS_PAGINA {
+            break;
+        }
         if let Some(i) = imagem_de(&url::resolver(&base, &u)) {
+            imgs.pixels += i.px.len();
             imgs.por_url.insert(u, i);
         }
     }

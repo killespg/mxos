@@ -1,27 +1,15 @@
-//! Navegador do MXOS, escrito do zero e leve: le HTML (html.rs) com um
-//! CSS simples (css.rs), diagrama em linhas (layout.rs) e desenha numa
-//! Superficie (render.rs). Tambem tem um modo texto para a serial: o
-//! comando "navegar".
+//! Navegador do MXOS: o motor fica em crate::web (HTML5, CSS, layout,
+//! JavaScript), ligado a GUI por web.rs. Aqui ficam os enderecos, as
+//! paginas de erro e o modo texto para a serial (comando "navegar").
 //!
 //! Enderecos aceitos:
 //!   disco:/paginas/index.html   arquivo do disco FAT32 (armazenamento)
 //!   http[s]://host[:porta]/x    pagina da rede (https pelo TLS 1.3 proprio)
 //!
-//! Sem JavaScript e sem imagens (aparece o texto alternativo). O CSS vem
-//! de <style>, style="..." e <link rel="stylesheet"> (baixado aqui, do
-//! disco ou por http, antes de analisar a pagina).
-//!
-//! O app da area de trabalho (gui/apps/navegador.rs) usa `abrir`, que
-//! nunca falha: erro e arquivo que nao e texto viram uma pagina
-//! simples explicando o que houve.
 
 // Nem todo item publico e usado fora daqui (os testes no PC usam).
 #![allow(dead_code)]
 
-pub mod css;
-pub mod html;
-pub mod layout;
-pub mod render;
 pub mod web;
 
 use alloc::format;
@@ -32,20 +20,9 @@ use core::fmt::Write;
 use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-#[allow(unused_imports)]
-pub use html::{analisar, Documento};
-#[allow(unused_imports)]
-pub use layout::{diagramar, link_em, texto, Pagina};
-#[allow(unused_imports)]
-pub use render::desenhar;
 
 /// Tempo maximo para uma pagina chegar pela rede.
 const TEMPO_LIMITE_MS: u64 = 10_000;
-/// Folhas de estilo de fora por pagina, o tempo de cada uma e o tamanho
-/// maximo que lemos de cada.
-const MAX_FOLHAS: usize = 4;
-const TEMPO_LIMITE_FOLHA_MS: u64 = 5_000;
-const MAX_TAMANHO_FOLHA: usize = 256 * 1024;
 /// Largura do texto no comando "navegar".
 const COLUNAS_SERIAL: usize = 78;
 /// Bytes do comeco de um arquivo olhados para saber se e texto.
@@ -55,59 +32,6 @@ const SO_TEXTO: &str = "o conteúdo não é texto (imagem, programa…)";
 
 // ---------------------------------------------------------------------
 // Carregar
-
-/// Busca o conteudo de um endereco e devolve como HTML (texto UTF-8).
-/// Texto puro (.txt, text/plain) volta embrulhado em <pre>, para que
-/// `analisar` mostre do jeito que esta.
-pub fn carregar(url: &str) -> Result<String, &'static str> {
-    buscar(url).map(|(html, _)| html)
-}
-
-/// Uma pagina pronta para diagramar.
-pub struct Aberta {
-    pub html: String,
-    /// Endereco depois dos redirecionamentos: a base dos links relativos.
-    pub url_final: String,
-    /// Por que a pagina e uma pagina de erro feita aqui (None = deu certo).
-    pub erro: Option<&'static str>,
-}
-
-/// Como `carregar`, mas sempre devolve uma pagina: um erro vira uma
-/// pagina explicando o que houve.
-pub fn abrir(url: &str) -> Aberta {
-    let url = url.trim();
-    match buscar(url) {
-        Ok((html, url_final)) => Aberta { html, url_final, erro: None },
-        Err(motivo) => Aberta { html: pagina_de_erro(url, motivo), url_final: url.into(), erro: Some(motivo) },
-    }
-}
-
-/// Analisa a pagina ja com as folhas de estilo dos <link>, resolvidas
-/// contra `url_final`. Folha que nao vem (erro de rede...) e esquecida.
-pub fn documento(html: &str, url_final: &str) -> Documento {
-    let folhas: Vec<String> = html::folhas_externas(html, MAX_FOLHAS)
-        .iter()
-        .filter_map(|href| carregar_folha(&resolver_url(url_final, href)).ok())
-        .collect();
-    html::analisar_com_css(html, &folhas)
-}
-
-/// O texto de uma folha de estilo (sem embrulhar em HTML).
-fn carregar_folha(url: &str) -> Result<String, &'static str> {
-    let dados = if let Some(caminho) = sem_prefixo(url, "disco:") {
-        let caminho = decodificar_porcento(caminho.split(['#', '?']).next().unwrap_or(""));
-        crate::armazenamento::ler(&caminho).map_err(|e| e.descricao())?
-    } else if sem_prefixo(url, "http://").is_some() || sem_prefixo(url, "https://").is_some() {
-        let resposta = crate::rede::http_get(&codificar_url(url), TEMPO_LIMITE_FOLHA_MS).map_err(|e| e.descricao())?;
-        if resposta.status >= 400 {
-            return Err("a folha de estilo não veio");
-        }
-        resposta.corpo
-    } else {
-        return Err("folha de estilo só pelo disco ou pela rede");
-    };
-    Ok(html::para_texto(&dados[..dados.len().min(MAX_TAMANHO_FOLHA)]))
-}
 
 /// (HTML, endereco final) de `url`.
 fn buscar(url: &str) -> Result<(String, String), &'static str> {
@@ -236,7 +160,7 @@ fn parece_html(dados: &[u8]) -> bool {
 /// Bytes (UTF-8 ou Windows-1252) -> HTML em UTF-8. Texto puro vira <pre>
 /// com <, > e & escapados.
 fn como_html(dados: &[u8], e_html: bool) -> String {
-    let texto = html::para_texto(dados);
+    let texto = crate::web::html::codificacao::texto(dados, None);
     if e_html {
         return texto;
     }
@@ -471,9 +395,10 @@ fn navegar(url: &str, saida: &mut dyn Write) {
             return;
         }
     };
-    let doc = documento(&pagina, &url_final);
-    let (corpo, links) = texto(&doc, COLUNAS_SERIAL);
-    let titulo = if doc.titulo.is_empty() { url } else { doc.titulo.as_str() };
+    let doc = crate::web::html::analisar(&pagina);
+    let (corpo, links) = texto_da_pagina(&doc, COLUNAS_SERIAL);
+    let titulo_doc = doc.titulo();
+    let titulo = if titulo_doc.trim().is_empty() { url } else { titulo_doc.trim() };
     let _ = writeln!(saida, "{}", "=".repeat(COLUNAS_SERIAL));
     let _ = writeln!(saida, " {titulo}");
     let _ = writeln!(saida, "{}", "=".repeat(COLUNAS_SERIAL));
@@ -490,4 +415,86 @@ fn navegar(url: &str, saida: &mut dyn Write) {
         let _ = writeln!(saida, "(navegar N segue o link [N])");
     }
     HISTORICO.com(|guardados| *guardados = absolutos);
+}
+
+/// O texto da pagina quebrado em `colunas`, com [N] depois de cada link, e
+/// os hrefs na ordem.
+fn texto_da_pagina(doc: &crate::web::dom::Documento, colunas: usize) -> (String, Vec<String>) {
+    use crate::web::atomo::a;
+    use crate::web::dom::{NENHUM, RAIZ, Tipo};
+    const BLOCOS: &[&str] = &[
+        "p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "blockquote", "section", "article",
+        "header", "footer", "nav", "ul", "ol", "table", "dt", "dd", "hr", "main", "aside", "figure",
+    ];
+    let mut paragrafos: Vec<String> = alloc::vec![String::new()];
+    let mut links = Vec::new();
+    // percorre na ordem, sem entrar em script/style/head
+    let mut pilha = alloc::vec![RAIZ];
+    while let Some(id) = pilha.pop() {
+        if id == NENHUM {
+            continue;
+        }
+        let n = doc.no(id);
+        match &n.tipo {
+            Tipo::Texto(t) => {
+                let atual = paragrafos.last_mut().unwrap_or_else(|| unreachable!());
+                for p in t.split_whitespace() {
+                    if !atual.is_empty() && !atual.ends_with(' ') {
+                        atual.push(' ');
+                    }
+                    atual.push_str(p);
+                }
+                if t.ends_with(char::is_whitespace) && !atual.is_empty() {
+                    atual.push(' ');
+                }
+            }
+            Tipo::Elemento(e) => {
+                let nome = e.nome.texto();
+                if matches!(nome, "script" | "style" | "head" | "noscript" | "template" | "svg") {
+                    continue;
+                }
+                if BLOCOS.contains(&nome) && !paragrafos.last().is_some_and(|p| p.trim().is_empty()) {
+                    paragrafos.push(String::new());
+                }
+                if e.eh(a::A) {
+                    if let Some(h) = e.atributo(a::HREF).filter(|h| !h.starts_with('#') && !h.starts_with("javascript:")) {
+                        links.push(String::from(h));
+                        let atual = paragrafos.last_mut().unwrap_or_else(|| unreachable!());
+                        if !atual.is_empty() && !atual.ends_with(' ') {
+                            atual.push(' ');
+                        }
+                        atual.push_str(&format!("[{}]", links.len()));
+                    }
+                }
+                let filhos: Vec<_> = doc.filhos(id).collect();
+                for f in filhos.into_iter().rev() {
+                    pilha.push(f);
+                }
+            }
+            _ => {
+                let filhos: Vec<_> = doc.filhos(id).collect();
+                for f in filhos.into_iter().rev() {
+                    pilha.push(f);
+                }
+            }
+        }
+    }
+    let mut saida = String::new();
+    for p in paragrafos.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
+        let mut linha = String::new();
+        for palavra in p.split(' ') {
+            if !linha.is_empty() && linha.chars().count() + 1 + palavra.chars().count() > colunas {
+                saida.push_str(&linha);
+                saida.push('\n');
+                linha.clear();
+            }
+            if !linha.is_empty() {
+                linha.push(' ');
+            }
+            linha.push_str(palavra);
+        }
+        saida.push_str(&linha);
+        saida.push_str("\n\n");
+    }
+    (saida, links)
 }

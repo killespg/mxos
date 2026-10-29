@@ -65,6 +65,7 @@ struct Cabecalho {
     bitrate: u32,
     taxa: u32,
     indice_taxa: usize,
+    #[allow(dead_code)]
     padding: bool,
     modo: u32,
     modo_ext: u32,

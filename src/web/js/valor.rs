@@ -372,7 +372,7 @@ impl Heap {
                 if let Some(p) = o.proto {
                     pendentes.push(p);
                 }
-                let mut ver = |v: &Valor, pend: &mut Vec<Ref>| {
+                let ver = |v: &Valor, pend: &mut Vec<Ref>| {
                     if let Valor::Obj(x) = v {
                         pend.push(*x);
                     }

@@ -204,7 +204,7 @@ impl Visualizador {
         }
         match armazenamento::ler(&self.caminho) {
             Ok(d) if d.len() > MAX_IMAGEM => self.conteudo = Conteudo::Erro(String::from("imagem grande demais")),
-            Ok(d) => match imagem::decodificar(&d) {
+            Ok(d) => match imagem::decodificar_max(&d, 2560, 2560) {
                 Some(img) => {
                     self.descricao = format!("{} x {} pixels", img.largura, img.altura);
                     self.conteudo = Conteudo::Imagem(img);

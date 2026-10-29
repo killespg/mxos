@@ -22,6 +22,13 @@ use crate::web::js::vm::Vm;
 const LIMITE_PASSOS: u64 = 40_000_000;
 /// Timers por tique (setInterval de 0 ms nao pode prender o tique).
 const MAX_TIMERS_TIQUE: usize = 64;
+/// Passos por callback de timer (bem menos que um script inteiro).
+const LIMITE_PASSOS_TIMER: u64 = 4_000_000;
+/// Sem clique nem tecla por este tempo (ms), a pagina fica "parada": os
+/// timers so andam uma vez por segundo, como abas em segundo plano. Anuncio
+/// e analytics nao gastam a CPU da box.
+const OCIOSA_MS: f64 = 20_000.0;
+const PASSO_OCIOSO_MS: f64 = 1_000.0;
 
 pub enum FonteScript {
     Inline(String),
@@ -53,13 +60,17 @@ pub struct Scripts {
     executados: BTreeSet<Id>,
     /// De onde veio o script rodando (para as mensagens de erro).
     pub origem: String,
+    /// Ultimo clique/tecla (ou a carga da pagina), em ms do relogio dos timers.
+    ultima_interacao: f64,
+    ultimo_tique: f64,
+    agora: f64,
 }
 
 impl Scripts {
     pub fn novo(doc: Rc<RefCell<Documento>>, url: &str, largura: i32, altura: i32) -> Scripts {
         let mut vm = Vm::novo();
         jsdom::instalar(&mut vm, doc, url, largura as f32, altura as f32);
-        Scripts { vm, executados: BTreeSet::new(), origem: String::new() }
+        Scripts { vm, executados: BTreeSet::new(), origem: String::new(), ultima_interacao: 0.0, ultimo_tique: 0.0, agora: 0.0 }
     }
 
     fn doc(&mut self) -> Option<Rc<RefCell<Documento>>> {
@@ -233,8 +244,13 @@ impl Scripts {
     /// Avanca o relogio: roda timers vencidos e entrega respostas de rede.
     /// Devolve true se ainda ha timers (o anfitriao deve chamar de novo).
     pub fn tique(&mut self, agora: f64, buscar: &mut dyn FnMut(&PedidoRede) -> Option<Resposta>) -> bool {
+        self.agora = agora;
         com_dom(&mut self.vm, |_, d| d.agora = agora);
         self.rede(buscar);
+        if agora - self.ultima_interacao > OCIOSA_MS && agora - self.ultimo_tique < PASSO_OCIOSO_MS {
+            return com_dom(&mut self.vm, |_, d| !d.timers.is_empty()).unwrap_or(false);
+        }
+        self.ultimo_tique = agora;
         for _ in 0..MAX_TIMERS_TIQUE {
             let t = com_dom(&mut self.vm, |_, d| {
                 let i = d.timers.iter().enumerate().filter(|(_, t)| t.quando <= agora).min_by(|x, y| x.1.quando.total_cmp(&y.1.quando)).map(|(i, _)| i)?;
@@ -249,7 +265,7 @@ impl Scripts {
             })
             .flatten();
             let Some((f, args)) = t else { break };
-            self.chamar(&f, &args);
+            self.chamar_limitado(&f, &args, LIMITE_PASSOS_TIMER);
         }
         self.rede(buscar);
         com_dom(&mut self.vm, |_, d| !d.timers.is_empty()).unwrap_or(false)
@@ -275,8 +291,12 @@ impl Scripts {
     }
 
     fn chamar(&mut self, f: &Valor, args: &[Valor]) {
+        self.chamar_limitado(f, args, LIMITE_PASSOS);
+    }
+
+    fn chamar_limitado(&mut self, f: &Valor, args: &[Valor], limite: u64) {
         self.vm.passos = 0;
-        self.vm.limite_passos = LIMITE_PASSOS;
+        self.vm.limite_passos = limite;
         let g = Valor::Obj(self.vm.global);
         if let Err(e) = self.vm.chamar(f, &g, args) {
             self.relatar(&e);
@@ -342,6 +362,7 @@ impl Scripts {
     /// Dispara um evento num no. Devolve false se o script chamou
     /// preventDefault (o clique nao deve navegar, o form nao envia...).
     pub fn evento(&mut self, no: Id, tipo: &str, extras: &[(&str, Valor)]) -> bool {
+        self.ultima_interacao = self.agora;
         self.vm.passos = 0;
         self.vm.limite_passos = LIMITE_PASSOS;
         let r = jsdom::disparar(&mut self.vm, no, tipo, extras);

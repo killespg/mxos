@@ -236,6 +236,13 @@ fn idct(dados: &[i32; 64], saida: &mut [u8; 64]) {
 }
 
 pub fn decodificar(d: &[u8]) -> Option<Imagem> {
+    decodificar_max(d, usize::MAX, usize::MAX)
+}
+
+/// Decodifica ja reduzido por 2, 4 ou 8 (o maior que ainda deixa a imagem
+/// com pelo menos max_l x max_a): foto grande nao passa pela memoria em
+/// tamanho cheio (na escala 8 so o DC de cada bloco e usado).
+pub fn decodificar_max(d: &[u8], max_l: usize, max_a: usize) -> Option<Imagem> {
     if d.len() < 4 || d[0] != 0xFF || d[1] != 0xD8 {
         return None;
     }
@@ -523,29 +530,51 @@ pub fn decodificar(d: &[u8]) -> Option<Imagem> {
     if comps.is_empty() || l == 0 {
         return None;
     }
+    let mut escala = 1;
+    while escala < 8 && l / (escala * 2) >= max_l && a / (escala * 2) >= max_a {
+        escala *= 2;
+    }
+    let lado = 8 / escala; // pixels por bloco em cada direcao
     // IDCT de todos os blocos de cada componente
     let mut planos: Vec<(Vec<u8>, usize, usize, usize)> = Vec::new(); // (pixels, largura, h, v)
-    for c in &comps {
-        let pl = c.blocos_l * 8;
-        let mut plano = vec![0u8; pl * c.blocos_a * 8];
+    for c in &mut comps {
+        let pl = c.blocos_l * lado;
+        let mut plano = vec![0u8; pl * c.blocos_a * lado];
         let q = &qt[c.tq];
         let mut dq = [0i32; 64];
         let mut saida = [0u8; 64];
         for by in 0..c.blocos_a {
             for bx in 0..c.blocos_l {
                 let b = &c.coef[by * c.blocos_l + bx];
+                if escala == 8 {
+                    // so o DC: a media do bloco
+                    plano[by * pl + bx] = ((b[0] as i32 * q[0] as i32 + 4) / 8 + 128).clamp(0, 255) as u8;
+                    continue;
+                }
                 for k in 0..64 {
                     dq[k] = b[k] as i32 * q[k] as i32;
                 }
                 idct(&dq, &mut saida);
-                for r in 0..8 {
-                    let o = (by * 8 + r) * pl + bx * 8;
-                    plano[o..o + 8].copy_from_slice(&saida[r * 8..r * 8 + 8]);
+                for r in 0..lado {
+                    let o = (by * lado + r) * pl + bx * lado;
+                    for x in 0..lado {
+                        // media de escala x escala pixels
+                        let mut s = 0u32;
+                        for dy in 0..escala {
+                            for dx in 0..escala {
+                                s += saida[(r * escala + dy) * 8 + x * escala + dx] as u32;
+                            }
+                        }
+                        plano[o + x] = (s / (escala * escala) as u32) as u8;
+                    }
                 }
             }
         }
+        // os coeficientes nao servem mais: libera antes de montar a imagem
+        c.coef = Vec::new();
         planos.push((plano, pl, c.h, c.v));
     }
+    let (l, a) = (l.div_ceil(escala), a.div_ceil(escala));
     let mut px = vec![0u32; l * a];
     let amostra = |p: &(Vec<u8>, usize, usize, usize), x: usize, y: usize| -> i32 {
         let sx = x * p.2 / hmax;

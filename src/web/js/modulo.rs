@@ -102,7 +102,7 @@ pub fn transformar(fonte: &str, url: &str, mapa: &[(String, String)]) -> Result<
     let mut prof: i32 = 0;
     let mut anterior_ponto = false;
 
-    let mut dep = |spec: &str, deps: &mut Vec<String>, topo: &mut String| -> String {
+    let dep = |spec: &str, deps: &mut Vec<String>, topo: &mut String| -> String {
         let abs = resolver(spec, url, mapa);
         let k = match deps.iter().position(|d| *d == abs) {
             Some(k) => k,

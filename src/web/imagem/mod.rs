@@ -15,6 +15,13 @@ pub struct Imagem {
     pub px: Vec<u32>,
 }
 
+/// Como `decodificar`, mas ja perto de max_l x max_a quando o formato deixa
+/// (JPEG reduz por 2, 4 ou 8 na decodificacao) e reduzido no fim.
+pub fn decodificar_max(d: &[u8], max_l: i32, max_a: i32) -> Option<Imagem> {
+    let img = if d.starts_with(&[0xFF, 0xD8]) { jpeg::decodificar_max(d, max_l.max(1) as usize, max_a.max(1) as usize)? } else { decodificar(d)? };
+    Some(img.reduzir(max_l, max_a))
+}
+
 /// Decodifica pelo cabecalho (nao confia no Content-Type).
 pub fn decodificar(d: &[u8]) -> Option<Imagem> {
     if d.starts_with(b"\x89PNG") {

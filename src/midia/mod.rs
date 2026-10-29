@@ -137,6 +137,7 @@ impl Reamostrador {
         k
     }
 
+    #[allow(dead_code)]
     pub fn acabou(&self) -> bool {
         self.acabou
     }

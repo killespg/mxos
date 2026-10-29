@@ -2462,7 +2462,6 @@ impl ParIter for (Valor, Valor) {
 }
 
 pub fn potencia(x: f64, y: f64) -> f64 {
-    use crate::web::mat::F32Ext as _;
     if y.is_nan() {
         return f64::NAN;
     }
