@@ -37,8 +37,8 @@ fn rodar(nome: &str, url: &str) {
     let console = s.console();
     let erros: Vec<&str> = console.lines().filter(|l| l.starts_with("erro")).collect();
     println!("{nome:10} {n:3} externos, {:6} KB de JS, {ms:8.1} ms, {} erros", bytes_js / 1024, erros.len());
-    for e in erros.iter().take(6) {
-        println!("    {}", e.chars().take(220).collect::<String>());
+    for e in erros.iter().take(12) {
+        println!("    {}", e.chars().take(400).collect::<String>());
     }
 }
 

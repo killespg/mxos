@@ -186,10 +186,10 @@ impl Vm {
         let m = Valor::texto(msg);
         self.heap.get_mut(r).definir(chave("message"), Slot::oculto(m));
         // pilha: a linha atual, se houver
-        let pilha = match self.quadros.last() {
-            Some(q) => format!("    at {} (linha {})", q.proto.nome, q.proto.linhas.get(q.ip.saturating_sub(1)).copied().unwrap_or(0)),
-            None => String::new(),
-        };
+        let mut pilha = String::new();
+        for q in self.quadros.iter().rev().take(6) {
+            pilha.push_str(&format!("    at {} (pos {})\n", q.proto.nome, q.proto.linhas.get(q.ip.saturating_sub(1)).copied().unwrap_or(0)));
+        }
         self.heap.get_mut(r).definir(chave("stack"), Slot::oculto(Valor::texto(&pilha)));
         Valor::Obj(r)
     }

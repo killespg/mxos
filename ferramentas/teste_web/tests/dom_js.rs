@@ -194,3 +194,45 @@ fn pagina_com_layout() {
     caso(&mut s, "const r = document.getElementById('d').getBoundingClientRect(); r.width + 'x' + r.height", "200x120");
     caso(&mut s, "document.getElementById('d').offsetHeight", "120");
 }
+
+#[test]
+fn arquivo_externo() {
+    let Ok(a) = std::fs::read_to_string("C:/dev/mxos-tmp/arquivo_dom.js") else { return };
+    let (_, mut s) = pagina("<body></body>");
+    println!("ANTES {}", avaliar(&mut s, "typeof t + typeof e + Object.keys(globalThis).filter(k => k.length < 3).join()"));
+    s.rodar(0, &a);
+    println!("CONSOLE {}", s.console());
+    println!("TYPEOF {}", avaliar(&mut s, "typeof t + ' ' + typeof e"));
+}
+
+#[test]
+fn modulos_es() {
+    let doc = Rc::new(RefCell::new(html::analisar(
+        r#"<body><script type="module">
+            import padrao, { dobro as d, NOME } from './lib/a.js';
+            import * as tudo from './lib/b.js';
+            window.r = [padrao, d(21), NOME, tudo.b, tudo.dobro(1), typeof tudo.default].join();
+            import('./lib/b.js').then(m => { window.din = m.b; });
+        </script>
+        <script type="module">let t = 1; export const x = t;</script>
+        <script>var t = 'classico';</script></body>"#,
+    )));
+    let mut s = Scripts::novo(doc, "https://site.org/pasta/", 800, 600);
+    let mut pedidos = Vec::new();
+    s.rodar_todos(&mut |u| {
+        pedidos.push(u.to_string());
+        Some(match u {
+            "https://site.org/pasta/lib/a.js" => "import { b } from './b.js';\nexport function dobro(x) { return x * 2 }\nexport const NOME = 'a' + b;\nexport default 'P';".into(),
+            "https://site.org/pasta/lib/b.js" => "export let b = 7; export { dobro } from './a.js'; export * from './c.js';".into(),
+            "https://site.org/pasta/lib/c.js" => "export const c = 3;".into(),
+            _ => return None,
+        })
+    });
+    s.carregou();
+    let c = s.console();
+    assert!(!c.contains("erro"), "{c}");
+    caso(&mut s, "window.r", "P,42,a7,7,2,undefined");
+    caso(&mut s, "window.din", "7");
+    caso(&mut s, "t", "classico");
+    assert_eq!(pedidos.len(), 3, "{pedidos:?}");
+}

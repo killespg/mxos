@@ -721,6 +721,22 @@ impl Compilador {
         if usa_args {
             nomes.push(Rc::from("arguments"));
         }
+        // let/const/class do corpo moram no escopo da funcao
+        for s in &f.corpo {
+            match s {
+                Stmt::Decl(TipoDecl::Let | TipoDecl::Const, d) => {
+                    for (p, _) in d {
+                        nomes_padrao(p, &mut nomes);
+                    }
+                }
+                Stmt::Classe(c) => {
+                    if let Some(n) = &c.nome {
+                        nomes.push(n.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
         // o nome da propria funcao (expressao nomeada) fica visivel dentro
         let nome_proprio = f.nome.clone().filter(|n| !nomes.contains(n));
         if let Some(n) = &nome_proprio {
@@ -801,6 +817,12 @@ impl Compilador {
                 }
                 Expr::Ident(n) => {
                     self.guardar_nome(n);
+                }
+                Expr::Privado { obj, nome } => {
+                    self.expr(obj)?;
+                    self.emitir(Op::Troca);
+                    self.emitir(Op::PoePrivado(chave(&alloc::format!("#{nome}"))));
+                    self.emitir(Op::Pop);
                 }
                 _ => return Err(ErroCompilacao("alvo inválido".into())),
             },
@@ -886,8 +908,9 @@ impl Compilador {
                 _ => {}
             }
         }
-        let topo_global = self.f().global && self.f().escopos.len() == 1;
-        if nomes.is_empty() || topo_global {
+        // (o topo do script nao passa por aqui: compilar_script declara os globais)
+        if nomes.is_empty() {
+
             for s in v {
                 self.stmt(s)?;
             }
@@ -1711,6 +1734,21 @@ impl Compilador {
                         self.remendar(fim);
                     }
                 }
+                Expr::Privado { obj, nome } => {
+                    let k = chave(&alloc::format!("#{nome}"));
+                    self.expr(obj)?;
+                    self.emitir(Op::Dup);
+                    self.emitir(Op::PegaPrivado(k));
+                    let j = aplicar(self)?;
+                    self.emitir(Op::PoePrivado(k));
+                    if let Some(j) = j {
+                        let fim = self.emitir(Op::Salto(0));
+                        self.remendar(j);
+                        self.emitir(Op::Troca);
+                        self.emitir(Op::Pop);
+                        self.remendar(fim);
+                    }
+                }
                 _ => return Err(ErroCompilacao("alvo inválido".into())),
             },
             _ => return Err(ErroCompilacao("alvo inválido".into())),
@@ -2002,6 +2040,20 @@ impl Compilador {
                             self.emitir(Op::Pop);
                         }
                     }
+                    Expr::Privado { .. } => {
+                        // this.#x++: vira this.#x += 1 (o objeto e avaliado de novo)
+                        let um = Expr::Num(1.0);
+                        let op = if *mais { "+=" } else { "-=" };
+                        let p = Padrao::Alvo(alvo.clone());
+                        if *prefixo {
+                            self.atribuicao(op, &p, &um)?;
+                        } else {
+                            self.expr(alvo)?;
+                            self.emitir(Op::ParaNumero);
+                            self.atribuicao(op, &p, &um)?;
+                            self.emitir(Op::Pop);
+                        }
+                    }
                     _ => return Err(ErroCompilacao("alvo de ++/-- inválido".into())),
                 }
             }
@@ -2014,7 +2066,10 @@ impl Compilador {
                 self.expr(b)?;
                 self.remendar(fim);
             }
-            Expr::Chamada { f, args, opcional } => self.chamada(f, args, *opcional)?,
+            Expr::Chamada { f, args, opcional, pos } => {
+                self.linha = *pos;
+                self.chamada(f, args, *opcional)?
+            }
             Expr::Novo(f, args) => {
                 self.expr(f)?;
                 match self.args(args)? {
@@ -2097,15 +2152,14 @@ impl Compilador {
                 self.expr(a)?;
                 self.emitir(Op::Await);
             }
-            Expr::Importar(_) => {
-                // import() dinamico: devolve uma promessa rejeitada
-                self.emitir(Op::CarregaGlobal(chave("Promise")));
-                self.emitir(Op::Dup);
-                self.emitir(Op::Pega(chave("reject")));
-                self.emitir(Op::Troca);
-                let i = self.texto("módulos não suportados");
-                self.emitir(Op::Texto(i));
-                self.emitir(Op::Chama(1));
+            Expr::Importar(a) => {
+                // import() dinamico num script classico: o carregador de modulos
+                // (__importarDe(base, especificador) -> promessa)
+                self.emitir(Op::CarregaGlobal(chave("__importarDe")));
+                self.emitir(Op::Indef);
+                self.emitir(Op::Indef);
+                self.expr(a)?;
+                self.emitir(Op::Chama(2));
             }
         }
         Ok(())

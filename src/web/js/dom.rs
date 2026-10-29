@@ -267,6 +267,7 @@ fn propriedade(d: &mut Dom, vm: &mut Vm, no: Id, nome: &str) -> Option<R<Valor>>
             Valor::Num(doc.filhos(no).filter(|&f| doc.elemento(f).is_some()).count() as f64)
         }
         "ownerDocument" => objeto(vm, d, RAIZ),
+        "baseURI" => Valor::texto(&d.url),
         "isConnected" => Valor::Bool(doc_rc.borrow().dentro_de(no, RAIZ)),
         "textContent" | "innerText" | "nodeValue" | "data" | "wholeText" => {
             if tipo_no == 9 && nome == "textContent" {
@@ -1571,6 +1572,38 @@ fn btoa(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     Ok(Valor::texto(&out))
 }
 
+/// __compilarModulo(url, texto) -> { f, deps }
+fn compilar_modulo(vm: &mut Vm, c: &Ctx) -> R<Valor> {
+    let url = vm.para_texto(&c.arg(0))?;
+    let fonte = vm.para_texto(&c.arg(1))?;
+    // mapa de imports (<script type=importmap>), guardado pelo PRELUDIO
+    let mut mapa = Vec::new();
+    let g = Valor::Obj(vm.global);
+    if let Ok(Valor::Obj(r)) = vm.pegar(&g, chave("__mapaImport")) {
+        for k in vm.chaves_proprias(r, true) {
+            let ch = vm.chave_de(&k)?;
+            let v = vm.pegar(&Valor::Obj(r), ch)?;
+            mapa.push((String::from(&*vm.para_texto(&k)?), String::from(&*vm.para_texto(&v)?)));
+        }
+    }
+    let m = match super::modulo::transformar(&fonte, &url, &mapa) {
+        Ok(m) => m,
+        Err(e) => {
+            let p = vm.p.erro_sintaxe;
+            return Err(vm.novo_erro(p, &format!("{e} [{url}]")));
+        }
+    };
+    let f = super::avaliar(vm, &m.codigo)?;
+    let deps: Vec<Valor> = m.deps.iter().map(|d| Valor::texto(d)).collect();
+    let deps = vm.novo_array(deps);
+    let o = vm.novo_objeto();
+    if let Valor::Obj(r) = o {
+        vm.definir_propria(r, chave("f"), f);
+        vm.definir_propria(r, chave("deps"), deps);
+    }
+    Ok(o)
+}
+
 fn location_assign(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     let u = vm.para_texto(&c.arg(0))?;
     com_dom(vm, |_, d| d.navegar = Some(crate::web::url::resolver(&d.url, &u)));
@@ -1739,6 +1772,7 @@ pub fn instalar(vm: &mut Vm, doc: Rc<RefCell<Documento>>, url: &str, largura: f3
         ("postMessage", nada, 1),
         ("__xhrEnviar", xhr_enviar, 1),
         ("__estiloPor", estilo_por, 3),
+        ("__compilarModulo", compilar_modulo, 2),
         ("__estiloLer", estilo_ler, 2),
         ("__locationAssign", location_assign, 1),
         ("__locationReload", location_reload, 0),
@@ -2026,6 +2060,64 @@ pub const PRELUDIO: &str = r#"
   g.BroadcastChannel = class { postMessage() {} close() {} addEventListener() {} };
   g.Worker = class extends EventTarget { postMessage() {} terminate() {} };
   g.MessageChannel = class { constructor() { this.port1 = new EventTarget(); this.port2 = new EventTarget(); this.port1.postMessage = this.port2.postMessage = function (m) { const alvo = this === eu.port1 ? eu.port2 : eu.port1; setTimeout(() => alvo.dispatchEvent(Object.assign(new Event('message'), { data: m })), 0); }; const eu = this; this.port1.start = this.port2.start = function () {}; } };
+  // ---------------- modulos ES (o texto vira funcao em js::modulo)
+  const modulos = Object.create(null);
+  g.__defExp = function (ns, gs) { for (const k in gs) Object.defineProperty(ns, k, { get: gs[k], enumerable: true, configurable: true }); };
+  g.__estrela = function (ns, m) { for (const k of Object.keys(m)) if (k !== 'default' && !(k in ns)) Object.defineProperty(ns, k, { get: () => m[k], enumerable: true, configurable: true }); };
+  function registrar(url, texto) {
+    const m = modulos[url];
+    try { const c = __compilarModulo(url, texto); m.f = c.f; m.deps = c.deps; }
+    catch (e) { console.error('erro: módulo ' + url + ': ' + e); m.deps = []; }
+    for (const d of m.deps) buscarModulo(d);
+  }
+  // busca e compila um modulo (as dependencias comecam a vir em paralelo)
+  function buscarModulo(url, texto) {
+    let m = modulos[url];
+    if (m) return m.promessa;
+    m = modulos[url] = { ns: Object.create(null), estado: 0, deps: [], f: null };
+    m.promessa = texto != null ? Promise.resolve(registrar(url, texto))
+      : fetch(url).then(r => r.text()).then(t => registrar(url, t), e => { console.error('erro: módulo ' + url + ' não carregou'); });
+    return m.promessa;
+  }
+  // espera o modulo e o grafo todo de dependencias (ciclos nao travam)
+  function carregarModulo(url, texto, vistos) {
+    vistos = vistos || Object.create(null);
+    if (vistos[url]) return Promise.resolve();
+    vistos[url] = true;
+    return buscarModulo(url, texto).then(() => Promise.all(modulos[url].deps.map(d => carregarModulo(d, null, vistos))));
+  }
+  function avaliarModulo(url) {
+    const m = modulos[url];
+    if (!m) return Object.create(null);
+    if (m.estado) return m.ns;
+    m.estado = 1;
+    for (const d of m.deps) avaliarModulo(d);
+    if (m.f) {
+      const falhou = e => console.error('erro: ' + e + ' [' + url.split('/').pop() + '] ' + (e && e.stack || ''));
+      try { const p = m.f(m.ns, d => avaliarModulo(d), { url: url, resolve: s => resolverEspec(s, url) }); if (p && p.then) p.then(null, falhou); }
+      catch (e) { falhou(e); }
+    }
+    m.estado = 2;
+    return m.ns;
+  }
+  g.__carregarModulo = function (url, texto) { return carregarModulo(url, texto).then(() => avaliarModulo(url)); };
+  g.__mapaImport = Object.create(null);
+  g.__definirMapa = function (t) {
+    try { const im = JSON.parse(t).imports || {}; for (const k in im) __mapaImport[k] = new URL(im[k], location.href).href; }
+    catch (e) { console.error('erro: importmap: ' + e); }
+  };
+  function resolverEspec(spec, base) {
+    spec = String(spec);
+    if (spec in __mapaImport) return __mapaImport[spec];
+    let melhor = '';
+    for (const k in __mapaImport) if (k.endsWith('/') && spec.startsWith(k) && k.length > melhor.length) melhor = k;
+    if (melhor) return __mapaImport[melhor] + spec.slice(melhor.length);
+    return new URL(spec, base || location.href).href;
+  }
+  g.__importarDe = function (base, spec) {
+    const u = resolverEspec(spec, base);
+    return carregarModulo(u).then(() => { const m = modulos[u]; if (!m || !m.f) throw new TypeError('módulo não carregou: ' + u); return avaliarModulo(u); });
+  };
   g.WebSocket = class extends EventTarget { constructor() { super(); this.readyState = 3; setTimeout(() => this.dispatchEvent(new Event('error')), 0); } send() {} close() {} };
 })(globalThis);
 "#;

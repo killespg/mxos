@@ -51,6 +51,8 @@ fn funcoes_e_closures() {
     caso("function F() { this.v = 7 } new F().v", "7");
     caso("(function nome() { return typeof nome })()", "function");
     caso("var g = function() { return 1 }; g.name", "g");
+    caso("var q = 5; if (true) { let q = 1 } { const q = 2 } q", "5");
+    caso("var t = 5; (function () { let t = 1; const u = 2; class K {} })(); typeof u + typeof K + t", "undefinedundefined5");
     caso("Math.max.apply(null, [1, 5, 3])", "5");
     caso("var f = function(a) { return this.x + a }.bind({x: 10}, 5); f()", "15");
 }

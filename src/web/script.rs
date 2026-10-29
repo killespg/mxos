@@ -26,6 +26,10 @@ const MAX_TIMERS_TIQUE: usize = 64;
 pub enum FonteScript {
     Inline(String),
     Externo(String),
+    /// <script type=module>: (src, texto inline)
+    Modulo(Option<String>, String),
+    /// <script type=importmap>
+    MapaImport(String),
 }
 
 /// Uma resposta HTTP para fetch/XHR: status, corpo, cabecalhos.
@@ -47,13 +51,15 @@ pub struct PedidoRede<'a> {
 pub struct Scripts {
     pub vm: Vm,
     executados: BTreeSet<Id>,
+    /// De onde veio o script rodando (para as mensagens de erro).
+    pub origem: String,
 }
 
 impl Scripts {
     pub fn novo(doc: Rc<RefCell<Documento>>, url: &str, largura: i32, altura: i32) -> Scripts {
         let mut vm = Vm::novo();
         jsdom::instalar(&mut vm, doc, url, largura as f32, altura as f32);
-        Scripts { vm, executados: BTreeSet::new() }
+        Scripts { vm, executados: BTreeSet::new(), origem: String::new() }
     }
 
     fn doc(&mut self) -> Option<Rc<RefCell<Documento>>> {
@@ -73,6 +79,7 @@ impl Scripts {
             self.executados.insert(id);
             let tipo = e.atributo(a::TYPE).unwrap_or("").trim().to_ascii_lowercase();
             let eh_js = tipo.is_empty()
+                || tipo == "importmap"
                 || tipo == "module"
                 || tipo.contains("javascript")
                 || tipo.contains("ecmascript")
@@ -80,9 +87,17 @@ impl Scripts {
             if !eh_js || e.tem(Atomo::de("nomodule")) {
                 continue;
             }
-            return Some(match e.atributo(a::SRC) {
-                Some(s) if !s.trim().is_empty() => (id, FonteScript::Externo(String::from(s.trim()))),
-                _ => (id, FonteScript::Inline(doc.texto(id))),
+            if tipo == "importmap" {
+                return Some((id, FonteScript::MapaImport(doc.texto(id))));
+            }
+            let src = e.atributo(a::SRC).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+            if tipo == "module" {
+                let texto = if src.is_none() { doc.texto(id) } else { String::new() };
+                return Some((id, FonteScript::Modulo(src, texto)));
+            }
+            return Some(match src {
+                Some(s) => (id, FonteScript::Externo(s)),
+                None => (id, FonteScript::Inline(doc.texto(id))),
             });
         }
         None
@@ -94,8 +109,7 @@ impl Scripts {
         self.vm.passos = 0;
         self.vm.limite_passos = LIMITE_PASSOS;
         if let Err(e) = crate::web::js::avaliar(&mut self.vm, &fonte) {
-            let m = crate::web::js::descrever_erro(&mut self.vm, &e);
-            self.vm.console.push_str(&format!("erro: {m}\n"));
+            self.relatar(&e);
         }
         self.vm.rodar_microtarefas();
         self.vm.limite_passos = 0;
@@ -118,6 +132,20 @@ impl Scripts {
         }
     }
 
+    /// Erro de script no console: mensagem, onde e a pilha.
+    fn relatar(&mut self, e: &Valor) {
+        let m = crate::web::js::descrever_erro(&mut self.vm, e);
+        let pilha = match e {
+            Valor::Obj(_) => match self.vm.pegar(e, chave("stack")) {
+                Ok(Valor::Texto(t)) => String::from(&*t),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        };
+        let pilha = pilha.trim();
+        self.vm.console.push_str(&format!("erro: {m} [{}] {pilha}\n", self.origem));
+    }
+
     /// Roda todos os scripts, buscando os externos com `buscar`.
     pub fn rodar_todos(&mut self, buscar: &mut dyn FnMut(&str) -> Option<String>) {
         let base = self.url();
@@ -125,9 +153,43 @@ impl Scripts {
         for _ in 0..200 {
             let Some((id, f)) = self.proximo() else { break };
             match f {
-                FonteScript::Inline(t) => self.rodar(id, &t),
+                FonteScript::Inline(t) => {
+                    self.origem = String::from("inline");
+                    self.rodar(id, &t)
+                }
+                FonteScript::MapaImport(t) => {
+                    let g = Valor::Obj(self.vm.global);
+                    if let Ok(f) = self.vm.pegar(&g, chave("__definirMapa")) {
+                        let _ = self.vm.chamar(&f, &g, &[Valor::texto(&t)]);
+                    }
+                }
+                FonteScript::Modulo(src, texto) => {
+                    let (u, texto) = match src {
+                        Some(s) => {
+                            let u = crate::web::url::resolver(&base, &s);
+                            match buscar(&u) {
+                                Some(t) => (u, t),
+                                None => {
+                                    jsdom::disparar(&mut self.vm, id, "error", &[]);
+                                    continue;
+                                }
+                            }
+                        }
+                        None => (format!("{base}#modulo-{id}"), texto),
+                    };
+                    self.origem = u.rsplit('/').next().unwrap_or("").chars().take(40).collect();
+                    self.modulo(&u, &texto);
+                    // as dependencias vem pela rede ja (os modulos rodam antes do DOMContentLoaded)
+                    self.rede(&mut |p| {
+                        if p.metodo != "GET" {
+                            return None;
+                        }
+                        buscar(p.url).map(|corpo| Resposta { status: 200, corpo, cabecalhos: Vec::new(), url: String::from(p.url) })
+                    });
+                }
                 FonteScript::Externo(u) => {
                     let u = crate::web::url::resolver(&base, &u);
+                    self.origem = u.rsplit('/').next().unwrap_or("").chars().take(40).collect();
                     match buscar(&u) {
                         Some(t) => {
                             self.rodar(id, &t);
@@ -140,6 +202,20 @@ impl Scripts {
                 }
             }
         }
+    }
+
+    /// Carrega um modulo ES (as dependencias sao pedidos de rede).
+    fn modulo(&mut self, url: &str, texto: &str) {
+        let g = Valor::Obj(self.vm.global);
+        let Ok(f) = self.vm.pegar(&g, chave("__carregarModulo")) else { return };
+        let args = [Valor::texto(url), Valor::texto(texto)];
+        self.vm.passos = 0;
+        self.vm.limite_passos = LIMITE_PASSOS;
+        if let Err(e) = self.vm.chamar(&f, &g, &args) {
+            self.relatar(&e);
+        }
+        self.vm.rodar_microtarefas();
+        self.vm.limite_passos = 0;
     }
 
     /// Depois dos scripts: DOMContentLoaded e load.
@@ -189,8 +265,7 @@ impl Scripts {
         self.vm.limite_passos = LIMITE_PASSOS;
         let g = Valor::Obj(self.vm.global);
         if let Err(e) = self.vm.chamar(f, &g, args) {
-            let m = crate::web::js::descrever_erro(&mut self.vm, &e);
-            self.vm.console.push_str(&format!("erro: {m}\n"));
+            self.relatar(&e);
         }
         self.vm.rodar_microtarefas();
         self.vm.limite_passos = 0;
@@ -240,8 +315,7 @@ impl Scripts {
                 } else if !matches!(p.xhr, Valor::Indef) {
                     if let Ok(fim) = self.vm.pegar(&p.xhr, chave("_fim")) {
                         if let Err(e) = self.vm.chamar(&fim, &p.xhr, &[Valor::Num(status as f64), Valor::texto(corpo), cab]) {
-                            let m = crate::web::js::descrever_erro(&mut self.vm, &e);
-                            self.vm.console.push_str(&format!("erro em XHR: {m}\n"));
+                            self.relatar(&e);
                         }
                     }
                 }

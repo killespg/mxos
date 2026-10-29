@@ -29,18 +29,31 @@ pub struct Parser {
 
 /// Quebra o texto em tokens decidindo se '/' e divisao ou regex pelo
 /// token anterior.
-fn tokenizar(fonte: &str) -> Result<Vec<Token>, ErroSintaxe> {
+pub(crate) fn tokenizar(fonte: &str) -> Result<Vec<Token>, ErroSintaxe> {
     let mut lx = Lexico::novo(fonte);
     let mut v: Vec<Token> = Vec::with_capacity(fonte.len() / 4);
+    // para cada '(' aberto: veio depois de if/while/for/with? (entao o ')'
+    // que fecha comeca um comando e '/' ali e regex: `if (x) /a/.test(s)`)
+    let mut parens: Vec<bool> = Vec::new();
+    let mut fechou_controle = false;
     loop {
         let regex_ok = match v.last().map(|t| &t.tok) {
             None => true,
+            Some(Tok::Pont(")")) => fechou_controle,
             Some(Tok::Pont(p)) => !matches!(*p, ")" | "]"),
             Some(Tok::Palavra(p)) => !matches!(*p, "this" | "super" | "true" | "false" | "null"),
             Some(Tok::Template(_, _, false)) | Some(Tok::TemplateMeio(_, _, false)) => true,
             _ => false,
         };
         let t = lx.proximo(regex_ok).map_err(|e| ErroSintaxe { msg: e.msg.into(), linha: e.linha })?;
+        match &t.tok {
+            Tok::Pont("(") => {
+                let controle = matches!(v.last().map(|t| &t.tok), Some(Tok::Palavra("if" | "while" | "for" | "with")));
+                parens.push(controle);
+            }
+            Tok::Pont(")") => fechou_controle = parens.pop().unwrap_or(false),
+            _ => {}
+        }
         let fim = t.tok == Tok::Fim;
         v.push(t);
         if fim {
@@ -119,7 +132,7 @@ impl Parser {
     }
     fn erro<T>(&self, msg: &str) -> Result<T, ErroSintaxe> {
         let t = &self.t[self.i];
-        Err(ErroSintaxe { msg: format!("{msg} (perto de {:?})", t.tok), linha: t.linha })
+        Err(ErroSintaxe { msg: format!("{msg} (perto de {:?}, pos {})", t.tok, t.pos), linha: t.linha })
     }
     fn esperar(&mut self, p: &str) -> Result<(), ErroSintaxe> {
         if self.aceitar(p) { Ok(()) } else { self.erro(&format!("esperava '{p}'")) }
@@ -957,8 +970,9 @@ impl Parser {
                 self.avancar();
                 opcional_na_cadeia = true;
                 if self.eh("(") {
+                    let pos = self.t[self.i].pos;
                     let args = self.argumentos()?;
-                    e = Expr::Chamada { f: Box::new(e), args, opcional: true };
+                    e = Expr::Chamada { f: Box::new(e), args, opcional: true, pos };
                 } else if self.aceitar("[") {
                     let i = self.expressao()?;
                     self.esperar("]")?;
@@ -976,8 +990,9 @@ impl Parser {
                 self.esperar("]")?;
                 e = Expr::Indice { obj: Box::new(e), idx: Box::new(i), opcional: false };
             } else if self.eh("(") {
+                let pos = self.t[self.i].pos;
                 let args = self.argumentos()?;
-                e = Expr::Chamada { f: Box::new(e), args, opcional: false };
+                e = Expr::Chamada { f: Box::new(e), args, opcional: false, pos };
             } else if let Tok::Template(..) = self.tok() {
                 let (cozidos, crus, exprs) = self.template_partes()?;
                 e = Expr::TemplateTag(Box::new(e), cozidos, crus, exprs);

@@ -9,6 +9,7 @@ pub mod dom;
 pub mod embutidos;
 pub mod lexico;
 pub mod mat64;
+pub mod modulo;
 pub mod parser;
 pub mod regex;
 pub mod valor;

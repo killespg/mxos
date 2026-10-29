@@ -94,7 +94,7 @@ pub enum Expr {
     Atrib(&'static str, Box<Padrao>, Box<Expr>),
     Atualiza { prefixo: bool, mais: bool, alvo: Box<Expr> },
     Cond(Box<Expr>, Box<Expr>, Box<Expr>),
-    Chamada { f: Box<Expr>, args: Vec<Expr>, opcional: bool },
+    Chamada { f: Box<Expr>, args: Vec<Expr>, opcional: bool, pos: u32 },
     Novo(Box<Expr>, Vec<Expr>),
     Membro { obj: Box<Expr>, nome: Rc<str>, opcional: bool },
     Indice { obj: Box<Expr>, idx: Box<Expr>, opcional: bool },
