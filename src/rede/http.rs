@@ -1,4 +1,4 @@
-//! HTTP/1.1, so GET e so http:// (sem TLS).
+//! HTTP/1.1, so GET, em http:// e https:// (TLS 1.3 proprio, rede/tls.rs).
 //!
 //! Pedido: "GET caminho HTTP/1.1" + Host + User-Agent + Connection: close.
 //! Resposta: linha de status, cabecalhos ate a linha vazia e o corpo, que
@@ -14,6 +14,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::tcp::Estado;
+use super::tls::{self, Transporte};
 use super::{ErroRede, Resposta, com, esperar};
 
 const MAX_REDIRECIONAMENTOS: usize = 5;
@@ -24,6 +25,8 @@ const INCOMPLETA: ErroRede = ErroRede::Protocolo("resposta HTTP incompleta");
 
 /// URL ja separada.
 pub struct Url {
+    /// https:// (TLS)?
+    pub seguro: bool,
     pub host: String,
     pub porta: u16,
     /// Caminho com a consulta ("/a/b?x=1"), sem o fragmento.
@@ -31,14 +34,22 @@ pub struct Url {
 }
 
 impl Url {
-    /// "host" ou "host:porta" (a porta so aparece se nao for 80).
+    /// "host" ou "host:porta" (a porta so aparece se nao for a padrao).
     fn autoridade(&self) -> String {
-        if self.porta == 80 { self.host.clone() } else { format!("{}:{}", self.host, self.porta) }
+        if self.porta == self.porta_padrao() { self.host.clone() } else { format!("{}:{}", self.host, self.porta) }
     }
 
-    /// A URL inteira de novo, ja normalizada: "http://host[:porta]/caminho".
+    fn porta_padrao(&self) -> u16 {
+        if self.seguro { 443 } else { 80 }
+    }
+
+    fn esquema(&self) -> &'static str {
+        if self.seguro { "https" } else { "http" }
+    }
+
+    /// A URL inteira de novo, ja normalizada: "http[s]://host[:porta]/caminho".
     fn completa(&self) -> String {
-        format!("http://{}{}", self.autoridade(), self.caminho)
+        format!("{}://{}{}", self.esquema(), self.autoridade(), self.caminho)
     }
 }
 
@@ -46,17 +57,17 @@ impl Url {
 /// tambem vale ("exemplo.com/x" = "http://exemplo.com/x").
 pub fn ler_url(url: &str) -> Result<Url, ErroRede> {
     let url = url.trim();
-    let resto = match url.find("://") {
-        Some(i) if url[..i].eq_ignore_ascii_case("http") => &url[i + 3..],
-        Some(i) if url[..i].eq_ignore_ascii_case("https") => return Err(ErroRede::SoHttp),
+    let (seguro, resto) = match url.find("://") {
+        Some(i) if url[..i].eq_ignore_ascii_case("http") => (false, &url[i + 3..]),
+        Some(i) if url[..i].eq_ignore_ascii_case("https") => (true, &url[i + 3..]),
         Some(_) => return Err(ErroRede::UrlInvalida),
-        None => url,
+        None => (false, url),
     };
     let fim_host = resto.find(['/', '?', '#']).unwrap_or(resto.len());
     let (autoridade, caminho) = resto.split_at(fim_host);
     let (host, porta) = match autoridade.rsplit_once(':') {
         Some((host, porta)) => (host, porta.parse::<u16>().map_err(|_| ErroRede::UrlInvalida)?),
-        None => (autoridade, 80),
+        None => (autoridade, if seguro { 443 } else { 80 }),
     };
     let host_valido = host.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-' || c == b'_');
     if host.is_empty() || !host_valido || porta == 0 {
@@ -74,7 +85,7 @@ pub fn ler_url(url: &str) -> Result<Url, ErroRede> {
             _ => final_.push_str("%3F"),
         }
     }
-    Ok(Url { host: host.to_ascii_lowercase(), porta, caminho: final_ })
+    Ok(Url { seguro, host: host.to_ascii_lowercase(), porta, caminho: final_ })
 }
 
 /// URL absoluta de um Location (absoluto, "//host/x", "/x" ou relativo).
@@ -83,19 +94,19 @@ fn juntar(base: &Url, local: &str) -> String {
     if local.contains("://") {
         String::from(local)
     } else if let Some(resto) = local.strip_prefix("//") {
-        format!("http://{resto}")
+        format!("{}://{resto}", base.esquema())
     } else if local.starts_with('/') {
-        format!("http://{}{}", base.autoridade(), local)
+        format!("{}://{}{}", base.esquema(), base.autoridade(), local)
     } else {
         let sem_consulta = base.caminho.split('?').next().unwrap_or("/");
         let pasta = &sem_consulta[..sem_consulta.rfind('/').map_or(0, |i| i + 1)];
-        format!("http://{}{}{}", base.autoridade(), pasta, local)
+        format!("{}://{}{}{}", base.esquema(), base.autoridade(), pasta, local)
     }
 }
 
 fn pedido(url: &Url) -> String {
     format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: MXOS/0.11\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: MXOS/0.12\r\nAccept: */*\r\nConnection: close\r\n\r\n",
         url.caminho,
         url.autoridade()
     )
@@ -202,6 +213,71 @@ fn abortar<T>(erro: ErroRede) -> Result<T, ErroRede> {
     Err(erro)
 }
 
+/// A conexao TCP do navegador (a 0) como transporte do TLS.
+struct Tcp {
+    limite_ms: u64,
+}
+
+fn erro_tls(e: tls::Erro) -> ErroRede {
+    match e {
+        tls::Erro::Rede(_) => ErroRede::TempoEsgotado,
+        e => ErroRede::Protocolo(e.descricao()),
+    }
+}
+
+impl Transporte for Tcp {
+    fn enviar(&mut self, dados: &[u8]) -> Result<(), tls::Erro> {
+        match com(|p| p.tcp_enviar(dados)) {
+            Ok(true) => Ok(()),
+            _ => Err(tls::Erro::Fechou),
+        }
+    }
+
+    fn receber(&mut self, buf: &mut Vec<u8>) -> Result<bool, tls::Erro> {
+        esperar(self.limite_ms, |p| {
+            if p.tcp_ler(buf) > 0 {
+                Some(true)
+            } else if p.tcp.terminou() {
+                Some(false)
+            } else {
+                None
+            }
+        })
+        .map_err(|_| tls::Erro::Rede("tempo esgotado"))
+    }
+
+    fn entropia(&mut self) -> u64 {
+        crate::cpu::contador()
+    }
+}
+
+/// Recebe ate a resposta HTTP ficar completa. `chegar` acrescenta o que
+/// vier em `bruto` e diz se a conexao fechou.
+fn receber_resposta(mut chegar: impl FnMut(&mut Vec<u8>) -> Result<bool, ErroRede>) -> Result<Resposta, ErroRede> {
+    let mut bruto = Vec::new();
+    loop {
+        let fechou = chegar(&mut bruto)?;
+        if bruto.len() > MAX_RESPOSTA {
+            return Err(ErroRede::Protocolo("resposta grande demais"));
+        }
+        if let Some(resposta) = completa(&mut bruto, fechou)? {
+            return Ok(resposta);
+        }
+    }
+}
+
+/// GET por https://: TLS 1.3 sobre a conexao ja aberta.
+fn buscar_seguro(url: &Url, limite_ms: u64) -> Result<Resposta, ErroRede> {
+    let mut t = Tcp { limite_ms };
+    let agora = crate::plataforma::segundos_rtc() as i64;
+    let mut sessao = tls::conectar(&mut t, &url.host, agora).map_err(erro_tls)?;
+    sessao.enviar(&mut t, pedido(url).as_bytes()).map_err(erro_tls)?;
+    let resposta = receber_resposta(|bruto| Ok(!sessao.receber(&mut t, bruto).map_err(erro_tls)?))?;
+    sessao.fechar(&mut t);
+    let _ = com(|p| p.tcp_fechar());
+    Ok(resposta)
+}
+
 /// Um GET sem seguir redirecionamento.
 fn buscar(url: &Url, limite_ms: u64) -> Result<Resposta, ErroRede> {
     let ip = super::resolver(&url.host)?;
@@ -215,6 +291,9 @@ fn buscar(url: &Url, limite_ms: u64) -> Result<Resposta, ErroRede> {
         Err(e) => return abortar(e),
         Ok(Err(e)) => return Err(e),
         Ok(Ok(())) => {}
+    }
+    if url.seguro {
+        return buscar_seguro(url, limite_ms).or_else(abortar);
     }
     if !com(|p| p.tcp_enviar(pedido(url).as_bytes()))? {
         return abortar(ErroRede::Protocolo("conexão fechou antes do pedido"));

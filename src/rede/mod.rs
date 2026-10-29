@@ -36,6 +36,8 @@ mod ipv4;
 pub mod soquete;
 mod tcp;
 mod udp;
+mod ntp;
+pub mod tls;
 #[cfg(feature = "mxq")]
 mod meson_eth;
 mod virtio_net;
@@ -111,7 +113,7 @@ impl ErroRede {
             ErroRede::Recusado => "conexão recusada",
             ErroRede::NaoResolvido => "nome não encontrado",
             ErroRede::UrlInvalida => "URL inválida",
-            ErroRede::SoHttp => "só http:// é suportado (sem https)",
+            ErroRede::SoHttp => "endereço precisa começar com http:// ou https://",
             ErroRede::Protocolo(motivo) => motivo,
         }
     }
@@ -213,6 +215,10 @@ impl Pilha {
         let mut quadro = [0u8; virtio_net::MAX_QUADRO];
         while let Some(tamanho) = self.nic.receber(&mut quadro) {
             self.pacotes_rx += 1;
+            if self.pacotes_rx % 8 == 0 {
+                // a hora exata em que os pacotes chegam alimenta o gerador do TLS
+                crate::cripto::acaso::misturar(&cpu::contador().to_le_bytes());
+            }
             self.receber_quadro(&quadro[..tamanho]);
         }
         // o que mandamos para nos mesmos (cada resposta pode gerar outra)
@@ -303,12 +309,18 @@ pub fn iniciar() -> Result<InfoRede, ErroRede> {
     }
     let nic = achar_placa()?;
     com_global(|global| *global = Some(Pilha::nova(nic)))?;
+    if let Ok(mac) = com(|p| p.mac) {
+        crate::cripto::acaso::misturar(&mac);
+    }
+    crate::cripto::acaso::misturar(&cpu::contador().to_le_bytes());
     if let Err(e) = dhcp::configurar() {
         if let Ok(Some(pilha)) = com_global(|global| global.take()) {
             pilha.nic.encerrar();
         }
         return Err(e);
     }
+    // a hora certa para os certificados do HTTPS (sem NTP fica a do RTC)
+    let _ = ntp::acertar();
     info_ou_erro()
 }
 

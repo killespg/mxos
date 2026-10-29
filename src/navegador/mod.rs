@@ -5,14 +5,14 @@
 //!
 //! Enderecos aceitos:
 //!   disco:/paginas/index.html   arquivo do disco FAT32 (armazenamento)
-//!   http://host[:porta]/x       pagina da rede (so http, sem https)
+//!   http[s]://host[:porta]/x    pagina da rede (https pelo TLS 1.3 proprio)
 //!
 //! Sem JavaScript e sem imagens (aparece o texto alternativo). O CSS vem
 //! de <style>, style="..." e <link rel="stylesheet"> (baixado aqui, do
 //! disco ou por http, antes de analisar a pagina).
 //!
 //! O app da area de trabalho (gui/apps/navegador.rs) usa `abrir`, que
-//! nunca falha: erro, https e arquivo que nao e texto viram uma pagina
+//! nunca falha: erro e arquivo que nao e texto viram uma pagina
 //! simples explicando o que houve.
 
 // Nem todo item publico e usado fora daqui (os testes no PC usam).
@@ -72,25 +72,17 @@ pub struct Aberta {
 }
 
 /// Como `carregar`, mas sempre devolve uma pagina: um erro vira uma
-/// pagina explicando o que houve (https tem a sua propria).
+/// pagina explicando o que houve.
 pub fn abrir(url: &str) -> Aberta {
     let url = url.trim();
-    if sem_prefixo(url, "https://").is_some() {
-        let html = pagina_so_http(url, false);
-        return Aberta { html, url_final: url.into(), erro: Some(crate::rede::ErroRede::SoHttp.descricao()) };
-    }
     match buscar(url) {
         Ok((html, url_final)) => Aberta { html, url_final, erro: None },
-        Err(motivo) if motivo == crate::rede::ErroRede::SoHttp.descricao() => {
-            // http:// que o servidor mandou para https://
-            Aberta { html: pagina_so_http(url, true), url_final: url.into(), erro: Some(motivo) }
-        }
         Err(motivo) => Aberta { html: pagina_de_erro(url, motivo), url_final: url.into(), erro: Some(motivo) },
     }
 }
 
 /// Analisa a pagina ja com as folhas de estilo dos <link>, resolvidas
-/// contra `url_final`. Folha que nao vem (erro, https...) e esquecida.
+/// contra `url_final`. Folha que nao vem (erro de rede...) e esquecida.
 pub fn documento(html: &str, url_final: &str) -> Documento {
     let folhas: Vec<String> = html::folhas_externas(html, MAX_FOLHAS)
         .iter()
@@ -104,14 +96,14 @@ fn carregar_folha(url: &str) -> Result<String, &'static str> {
     let dados = if let Some(caminho) = sem_prefixo(url, "disco:") {
         let caminho = decodificar_porcento(caminho.split(['#', '?']).next().unwrap_or(""));
         crate::armazenamento::ler(&caminho).map_err(|e| e.descricao())?
-    } else if sem_prefixo(url, "http://").is_some() {
+    } else if sem_prefixo(url, "http://").is_some() || sem_prefixo(url, "https://").is_some() {
         let resposta = crate::rede::http_get(&codificar_url(url), TEMPO_LIMITE_FOLHA_MS).map_err(|e| e.descricao())?;
         if resposta.status >= 400 {
             return Err("a folha de estilo não veio");
         }
         resposta.corpo
     } else {
-        return Err("folha de estilo só pelo disco ou por http://");
+        return Err("folha de estilo só pelo disco ou pela rede");
     };
     Ok(html::para_texto(&dados[..dados.len().min(MAX_TAMANHO_FOLHA)]))
 }
@@ -125,7 +117,7 @@ fn buscar(url: &str) -> Result<(String, String), &'static str> {
     if sem_prefixo(url, "http://").is_some() || sem_prefixo(url, "https://").is_some() {
         return carregar_da_rede(url);
     }
-    Err("endereço inválido (use disco:/caminho ou http://…)")
+    Err("endereço inválido (use disco:/caminho, http:// ou https://)")
 }
 
 fn carregar_do_disco(caminho: &str) -> Result<String, &'static str> {
@@ -290,27 +282,6 @@ pub fn pagina_de_erro(url: &str, motivo: &str) -> String {
     pagina
 }
 
-/// Pagina para https://: o navegador ainda nao tem TLS. `redirecionou` =
-/// pediu http:// e o servidor mandou para https://.
-pub fn pagina_so_http(url: &str, redirecionou: bool) -> String {
-    let mut pagina = String::from("<title>Só http</title><h1>Este endereço precisa de https://</h1>");
-    if redirecionou {
-        let _ = write!(pagina, "<p>O servidor de <code>{}</code> mandou abrir a versão segura (https://).</p>", escapar(url));
-    } else {
-        let _ = write!(pagina, "<p>Endereço: <code>{}</code></p>", escapar(url));
-    }
-    pagina.push_str(
-        "<p>O navegador do MXOS fala só <b>http://</b>: o https precisa de criptografia (TLS), \
-         que o MXOS ainda não tem. Páginas do disco (<code>disco:/</code>) sempre funcionam.</p><ul>",
-    );
-    if let Some(resto) = sem_prefixo(url, "https://") {
-        let http = escapar(&format!("http://{resto}"));
-        let _ = write!(pagina, "<li>Tentar sem criptografia: <a href=\"{http}\">{http}</a></li>");
-    }
-    pagina.push_str("<li><a href=\"disco:/paginas/index.html\">Página inicial do disco</a></li></ul>");
-    pagina
-}
-
 /// `texto` sem o `prefixo` (ignorando maiusculas), se comecar com ele.
 fn sem_prefixo<'a>(texto: &'a str, prefixo: &str) -> Option<&'a str> {
     let n = prefixo.len();
@@ -422,7 +393,8 @@ fn normalizar_caminho(caminho: &str) -> String {
 }
 
 /// O que a pessoa digitou -> endereco completo:
-/// "/paginas/x.html" -> "disco:/paginas/x.html", "exemplo.com" -> "http://exemplo.com/".
+/// "/paginas/x.html" -> "disco:/paginas/x.html", "exemplo.com" -> "https://exemplo.com/",
+/// "10.0.2.2:8000" e "localhost" -> http:// (servidores locais nao tem certificado).
 pub fn normalizar_url(entrada: &str) -> String {
     let entrada = entrada.trim();
     if entrada.starts_with('/') {
@@ -431,7 +403,10 @@ pub fn normalizar_url(entrada: &str) -> String {
     if tem_esquema(entrada) && (entrada.contains("://") || sem_prefixo(entrada, "disco:").is_some()) {
         return resolver_url("", entrada);
     }
-    if entrada.contains('/') { format!("http://{entrada}") } else { format!("http://{entrada}/") }
+    let host = entrada.split(['/', ':']).next().unwrap_or("");
+    let local = host.bytes().all(|c| c.is_ascii_digit() || c == b'.') || host.eq_ignore_ascii_case("localhost") || entrada.contains(':');
+    let esquema = if local { "http" } else { "https" };
+    if entrada.contains('/') { format!("{esquema}://{entrada}") } else { format!("{esquema}://{entrada}/") }
 }
 
 // ---------------------------------------------------------------------

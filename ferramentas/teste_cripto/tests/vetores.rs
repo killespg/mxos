@@ -183,3 +183,17 @@ fn x25519_rfc7748() {
     let s2 = x25519::multiplicar_ponto(&b, &pa);
     assert_eq!(s1, s2);
 }
+
+#[test]
+fn curvas_nist() {
+    use teste_cripto::cripto::ec::{Contexto, Curva};
+    for (curva, n) in [(Curva::P256, 32), (Curva::P384, 48)] {
+        let c = Contexto::novo(curva);
+        assert!(c.conferir(), "{curva:?}: G fora da curva ou n*G != infinito");
+        let a: Vec<u8> = (0..n).map(|i| (i * 7 + 3) as u8).collect();
+        let b: Vec<u8> = (0..n).map(|i| (i * 13 + 1) as u8 & 0x7f).collect();
+        let pa = c.publica(&a).unwrap();
+        let pb = c.publica(&b).unwrap();
+        assert_eq!(c.segredo(&a, &pb), c.segredo(&b, &pa));
+    }
+}

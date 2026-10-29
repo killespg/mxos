@@ -1499,7 +1499,8 @@ pub fn acordar_futex(t: &mut Tabela, i: usize, endereco: usize, quantos: usize) 
 
 fn getrandom(t: &mut Tabela, i: usize, endereco: usize, tamanho: usize) -> R {
     let tamanho = tamanho.min(1 << 16);
-    let bytes: Vec<u8> = (0..tamanho.div_ceil(16)).flat_map(|k| elf::aleatorio(k as u64 + endereco as u64)).take(tamanho).collect();
+    let mut bytes = alloc::vec![0u8; tamanho];
+    crate::cripto::acaso::preencher(&mut bytes, crate::cpu::contador());
     escrever_mem(t, i, endereco, &bytes)?;
     Ok(tamanho as i64)
 }
