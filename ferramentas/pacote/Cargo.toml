@@ -1,0 +1,15 @@
+[package]
+name = "pacote"
+version = "0.1.0"
+edition = "2024"
+description = "Instalador de pacotes do Debian (arm64) para rodar dentro do MXOS"
+
+[dependencies]
+lzma-rs = "0.3"
+miniz_oxide = "0.8"
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true
