@@ -12,6 +12,7 @@ mod atualizacao;
 mod audio;
 mod config;
 mod cpu;
+mod cripto;
 mod drivers;
 mod entrada;
 mod excecao;

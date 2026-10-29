@@ -1,0 +1,12 @@
+# Testes do src/cripto do kernel no PC (std), com os vetores dos RFCs/NIST.
+#
+#   cd ferramentas/teste_cripto
+#   cargo +stable-x86_64-pc-windows-gnu test --release
+[package]
+name = "teste_cripto"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# pacote independente: nao faz parte do kernel
+[workspace]
