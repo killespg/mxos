@@ -32,6 +32,8 @@ mod navegador;
 mod plataforma;
 mod psci;
 #[cfg(not(feature = "mxq"))]
+mod processo;
+#[cfg(not(feature = "mxq"))]
 mod rede;
 mod shell;
 #[cfg(not(feature = "mxq"))]

@@ -55,6 +55,8 @@ pub struct Shell {
     pendente: [u8; 4],
     pendentes: usize,
     ultimo_foi_cr: bool,
+    /// Processo em primeiro plano: o prompt so volta quando ele termina.
+    esperando: Option<u32>,
 }
 
 impl Shell {
@@ -74,6 +76,7 @@ impl Shell {
             pendente: [0; 4],
             pendentes: 0,
             ultimo_foi_cr: false,
+            esperando: None,
         }
     }
 
@@ -94,12 +97,52 @@ impl Shell {
     pub fn rodar(mut self) -> ! {
         self.banner();
         loop {
+            self.atender_processos();
+            if processos::tem_prontos() {
+                // com processo para rodar a CPU nao dorme: so olha a serial
+                processar_fundo();
+                if let Some(byte) = self.console.tentar_receber() {
+                    self.tecla(byte);
+                }
+                continue;
+            }
+            // o tique de 100 Hz acorda (um processo dormindo pode ter de acordar)
+            let tique = timer::tiques();
             let byte = irq::esperar(|| {
                 processar_fundo();
-                self.console.tentar_receber()
+                match self.console.tentar_receber() {
+                    Some(byte) => Some(Some(byte)),
+                    None => (timer::tiques() != tique).then_some(None),
+                }
             });
-            self.tecla(byte);
+            if let Some(byte) = byte {
+                self.tecla(byte);
+            }
         }
+    }
+
+    /// Roda os processos um pouco, mostra o que eles escreveram e, quando o
+    /// do primeiro plano termina, devolve o prompt. Devolve true se mudou
+    /// alguma coisa na tela.
+    pub fn atender_processos(&mut self) -> bool {
+        processos::rodar();
+        let saida = processos::tirar_saida();
+        let mut mudou = !saida.is_empty();
+        if mudou {
+            let texto = String::from_utf8_lossy(&saida);
+            escreva!(self, "{texto}");
+        }
+        if let Some(pid) = self.esperando {
+            if let Some(codigo) = processos::terminou(pid) {
+                self.esperando = None;
+                if codigo != 0 {
+                    diga!(self, "[processo {pid} saiu com o código {codigo}]");
+                }
+                escreva!(self, "{PROMPT}");
+                mudou = true;
+            }
+        }
+        mudou
     }
 
     pub fn banner(&mut self) {
@@ -125,6 +168,11 @@ impl Shell {
     /// backspace (8 ou 127, apaga o caractere inteiro) e Enter (\r, \n ou
     /// \r\n, que conta uma vez so). No Enter executa e mostra o prompt.
     pub fn tecla(&mut self, byte: u8) {
+        if self.esperando.is_some() {
+            // o teclado e do processo em primeiro plano
+            processos::tecla(byte);
+            return;
+        }
         // terminais mandam \r, \n ou \r\n no Enter: \r\n conta como um so
         if byte == b'\n' && self.ultimo_foi_cr {
             self.ultimo_foi_cr = false;
@@ -210,7 +258,9 @@ impl Shell {
         let tamanho = core::mem::take(&mut self.tamanho);
         let texto = core::str::from_utf8(&linha[..tamanho]).unwrap_or("");
         self.executar(texto.trim());
-        escreva!(self, "{PROMPT}");
+        if self.esperando.is_none() {
+            escreva!(self, "{PROMPT}");
+        }
     }
 
     fn executar(&mut self, linha: &str) {
@@ -235,6 +285,7 @@ impl Shell {
             "som" => self.som(),
             "clear" | "limpar" => self.console.limpar(),
             "erro" => self.erro(argumentos),
+            "processo" => self.processo(argumentos),
             "reboot" | "reiniciar" => {
                 diga!(self, "Reiniciando…");
                 psci::chamar(self.psci, psci::REINICIAR);
@@ -300,6 +351,10 @@ impl Shell {
         diga!(self, "  navegar U     abre a página U em modo texto (http:// ou disco:/)");
         diga!(self, "  drivers       dispositivos achados e o driver de cada um");
         diga!(self, "  tarefas       janelas abertas, com o tempo de CPU e a memória de cada uma");
+        diga!(self, "  processo M [&] programa de teste em EL0: ola, conta, falha, eco (& = no fundo)");
+        diga!(self, "  processos     lista os processos (pid, estado, CPU, memória)");
+        diga!(self, "  matar PID     finaliza um processo");
+        diga!(self, "  syscalls      chamadas de sistema pedidas que o MXOS ainda não tem");
     }
 
     #[cfg(feature = "mxq")]
@@ -491,6 +546,19 @@ impl Shell {
         );
     }
 
+    /// "processo ola" (primeiro plano) ou "processo conta &" (fundo).
+    fn processo(&mut self, argumentos: &str) {
+        let (modo, fundo) = match argumentos.strip_suffix('&') {
+            Some(resto) => (resto.trim(), true),
+            None => (argumentos.trim(), false),
+        };
+        match processos::criar_teste(modo, !fundo) {
+            Ok(pid) if fundo => diga!(self, "[{pid}] rodando no fundo"),
+            Ok(pid) => self.esperando = Some(pid),
+            Err(motivo) => diga!(self, "processo: {motivo}  (modos: ola, conta, falha, eco; & no fim roda no fundo)"),
+        }
+    }
+
     fn erro(&mut self, tipo: &str) {
         match tipo {
             "" | "brk" => {
@@ -529,6 +597,7 @@ fn processar_fundo() {}
 #[cfg(not(feature = "mxq"))]
 fn comando_de_modulo(saida: &mut Terminal, nome: &str, argumentos: &str) -> bool {
     crate::armazenamento::comando(nome, argumentos, &mut *saida)
+        || crate::processo::comando(nome, argumentos, &mut *saida)
         || crate::rede::comando(nome, argumentos, &mut *saida)
         || crate::navegador::comando(nome, argumentos, &mut *saida)
         || crate::drivers::comando(nome, argumentos, &mut *saida)
@@ -537,6 +606,35 @@ fn comando_de_modulo(saida: &mut Terminal, nome: &str, argumentos: &str) -> bool
 #[cfg(feature = "mxq")]
 fn comando_de_modulo(_saida: &mut Terminal, _nome: &str, _argumentos: &str) -> bool {
     false
+}
+
+/// Os processos (src/processo/) so existem no QEMU por enquanto; na TV box
+/// estas funcoes nao fazem nada.
+#[cfg(not(feature = "mxq"))]
+mod processos {
+    pub use crate::processo::{criar_teste, rodar, tecla, tem_prontos, terminou, tirar_saida};
+}
+
+#[cfg(feature = "mxq")]
+mod processos {
+    use alloc::vec::Vec;
+
+    pub fn rodar() -> bool {
+        false
+    }
+    pub fn tem_prontos() -> bool {
+        false
+    }
+    pub fn tirar_saida() -> Vec<u8> {
+        Vec::new()
+    }
+    pub fn terminou(_pid: u32) -> Option<i32> {
+        None
+    }
+    pub fn tecla(_byte: u8) {}
+    pub fn criar_teste(_modo: &str, _primeiro_plano: bool) -> Result<u32, &'static str> {
+        Err("processos ainda não existem na TV box")
+    }
 }
 
 /// O painel de drivers (so no QEMU) mostra o video que o terminal ligou.

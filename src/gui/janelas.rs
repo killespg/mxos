@@ -45,6 +45,8 @@ pub enum EventoApp {
     Roda(i32),
     /// Uns 10 por segundo.
     Tique,
+    /// Os processos escreveram algo ou terminaram (so o terminal liga).
+    Processos,
 }
 
 /// Um programa que mora numa janela.

@@ -131,6 +131,7 @@ impl App for AppTerminal {
                 }
                 true
             }
+            (EventoApp::Processos, Some(shell)) => shell.atender_processos(),
             _ => false,
         }
     }

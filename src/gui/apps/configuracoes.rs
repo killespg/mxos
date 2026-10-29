@@ -828,7 +828,7 @@ impl App for Configuracoes {
             EventoApp::Botao { x, y, botao: Botao::Esquerdo, pressionado: true } => self.clicar(e, x, y),
             EventoApp::Botao { .. } | EventoApp::Mouse { .. } => self.abas_evento(e) | self.campo_evento(e),
             EventoApp::Caractere(_) | EventoApp::Tecla { .. } => self.tecla(e),
-            EventoApp::Roda(_) => false,
+            EventoApp::Roda(_) | EventoApp::Processos => false,
         }
     }
 

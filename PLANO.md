@@ -222,3 +222,17 @@ A rodada de acentos foi interrompida no meio. Compila limpo (QEMU e mxq), mas:
 - Problema que custou tempo: uma troca em massa de `margem_pendente = true` por `pedir_margem()` pegou a linha de
   dentro do próprio `pedir_margem` (recursão infinita, sem mensagem). Achado pelo PC da CPU no monitor do QEMU
   (`info registers`) + `llvm-objdump` (`rustup component add llvm-tools`).
+
+### Passo 2 (feito): processos em EL0
+
+- Escolha: kernel no mapa identidade só-EL1 em todas as tabelas; programa em endereços baixos (0x1000 a
+  0x8000000, abaixo dos periféricos). A raiz do processo é cópia da do kernel com a entrada 0 trocada por uma L2
+  própria (periféricos copiados + L3 do programa). ASID de 8 bits por processo, páginas nG.
+- Troca de contexto "o kernel chama o programa": `entrar_usuario` salva x19-x30, sp, d8-d15, FPCR do kernel e
+  faz eret; os vetores 8-11 (EL0, 64 bits) salvam o programa no Contexto e restauram o kernel, que vê o retorno
+  com o motivo. Syscalls rodam em contexto normal do kernel. IRQ vinda de EL0 só tira o programa da CPU: ela é
+  atendida quando o kernel religa as interrupções.
+- Chamadas já com os números do Linux: read (só tty), write (1 e 2), exit/exit_group, nanosleep, clock_gettime,
+  sched_yield, kill, getpid/getppid/gettid, getuid... Desconhecida → -ENOSYS e anotada (`syscalls`).
+- Programa de teste embutido (assembly, `global_asm!`): ola, conta, falha, eco. Conferido: falha só mata o
+  processo; dois `conta` dividem a CPU (~48% cada, captura da aba Processos); eco lê o teclado.

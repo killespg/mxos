@@ -30,7 +30,7 @@ use crate::entrada::{Entrada, Layout};
 use crate::shell::Shell;
 use crate::uart::Uart;
 use crate::video::tela::Tela;
-use crate::{drivers, excecao, irq, rede, timer};
+use crate::{drivers, excecao, irq, processo, rede, timer};
 use apps::terminal::{self, AppTerminal};
 use grafico::Superficie;
 use janelas::{EventoApp, Gerenciador, Pedido};
@@ -80,9 +80,14 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
             gerenciador.tique();
             atender_externos(&mut gerenciador, &mut entrada);
         }
+        // os processos rodam ate o proximo tique; o shell da janela mostra a saida
+        gerenciador.enviar(id_terminal, EventoApp::Processos);
         mostrar(&mut gerenciador, &mut fundo, &framebuffer);
-        // o tique de 100 Hz acorda; teclado e mouse sao lidos na volta
-        irq::cochilar();
+        // o tique de 100 Hz acorda; teclado e mouse sao lidos na volta.
+        // Com processo pronto a CPU nao dorme: ele usa o tempo ate o tique.
+        if !processo::tem_prontos() {
+            irq::cochilar();
+        }
     }
 }
 

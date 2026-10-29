@@ -5,6 +5,10 @@
 //! memoria do conteudo dela. "Finalizar tarefa" (ou Delete) pede ao
 //! gerenciador de janelas que feche a selecionada.
 //!
+//! Aba "Processos": os programas rodando em EL0 (processo::lista), com o
+//! PID, o estado, a CPU do ultimo segundo e a memoria de cada um.
+//! "Finalizar processo" (ou Delete) mata o selecionado.
+//!
 //! Aba "Desempenho": uso da CPU nos ultimos 60 s (o tempo que ela NAO
 //! passou dormindo no WFI, de irq::contadores), memoria do heap,
 //! interrupcoes por segundo e tempo ligado.
@@ -25,7 +29,7 @@ use crate::gui::janelas::{self, App, EventoApp, Pedido};
 use crate::gui::tema::{self, Tema};
 use crate::gui::widgets::{self, ALTURA_BOTAO, Abas, AcaoLista, Icone, ItemLista, Lista};
 use crate::fonte::{self, Fonte, INTER, INTER_NEGRITO, INTER_TITULO};
-use crate::{cpu, heap, irq};
+use crate::{cpu, heap, irq, processo};
 
 pub const TITULO: &str = "Tarefas";
 const LARGURA: i32 = 560;
@@ -35,10 +39,14 @@ const ESPACO: i32 = 8;
 const ALTURA_ABAS: i32 = 28;
 /// Onde comeca o conteudo das abas.
 const TOPO: i32 = MARGEM + ALTURA_ABAS + ESPACO;
-const NOMES_ABAS: [&str; 2] = ["Aplicativos", "Desempenho"];
-const ABA_DESEMPENHO: usize = 1;
+const NOMES_ABAS: [&str; 3] = ["Aplicativos", "Processos", "Desempenho"];
+const ABA_APLICATIVOS: usize = 0;
+const ABA_PROCESSOS: usize = 1;
+const ABA_DESEMPENHO: usize = 2;
 const COLUNAS: [&str; 3] = ["Nome", "CPU", "Memória"];
 const LARGURAS: [i32; 3] = [330, 80, 100];
+const COLUNAS_PROCESSOS: [&str; 5] = ["PID", "Nome", "Estado", "CPU", "Memória"];
+const LARGURAS_PROCESSOS: [i32; 5] = [50, 160, 140, 70, 90];
 const LARGURA_FINALIZAR: i32 = 136;
 /// Segundos guardados no grafico da CPU.
 const AMOSTRAS: usize = 60;
@@ -87,6 +95,15 @@ struct Linha {
     id: usize,
     titulo: String,
     /// CPU no ultimo segundo, em milesimos (None = ainda sem medida).
+    cpu: Option<u32>,
+    memoria: usize,
+}
+
+/// Um processo na aba Processos.
+struct LinhaProcesso {
+    pid: u32,
+    nome: String,
+    estado: &'static str,
     cpu: Option<u32>,
     memoria: usize,
 }
@@ -159,6 +176,10 @@ pub struct Tarefas {
     fechando: Vec<(usize, u64)>,
     pedidos: Vec<Pedido>,
     desempenho: Desempenho,
+    lista_processos: Lista,
+    processos: Vec<LinhaProcesso>,
+    /// tempo_cpu de cada processo na ultima amostra: (pid, ticks).
+    tempos_processos: Vec<(u32, u64)>,
     /// cpu::contador da ultima amostra.
     ultima: u64,
     /// A primeira amostra sai no primeiro Tique, sem esperar um segundo.
@@ -200,6 +221,13 @@ fn tamanho(bytes: usize) -> String {
     }
 }
 
+fn item_do_processo(p: &LinhaProcesso) -> ItemLista {
+    ItemLista {
+        icone: Some(Icone::Chip),
+        colunas: vec![format!("{}", p.pid), p.nome.clone(), String::from(p.estado), texto_cpu(p.cpu), tamanho(p.memoria)],
+    }
+}
+
 fn icone_da_janela(titulo: &str) -> Icone {
     ICONES.iter().find(|(prefixo, _)| titulo.starts_with(*prefixo)).map_or(Icone::Monitor, |&(_, icone)| icone)
 }
@@ -231,6 +259,8 @@ impl Tarefas {
     pub fn nova() -> Tarefas {
         let mut lista = Lista::nova();
         lista.definir_colunas(&COLUNAS, &LARGURAS);
+        let mut lista_processos = Lista::nova();
+        lista_processos.definir_colunas(&COLUNAS_PROCESSOS, &LARGURAS_PROCESSOS);
         let mut app = Tarefas {
             abas: Abas::novas(&NOMES_ABAS),
             lista,
@@ -239,11 +269,15 @@ impl Tarefas {
             fechando: Vec::new(),
             pedidos: Vec::new(),
             desempenho: Desempenho::novo(),
+            lista_processos,
+            processos: Vec::new(),
+            tempos_processos: Vec::new(),
             ultima: cpu::contador(),
             amostrou: false,
         };
         // as linhas aparecem logo; a CPU de cada uma so na primeira amostra
         app.atualizar_linhas(1);
+        app.atualizar_processos(1);
         app
     }
 
@@ -258,7 +292,78 @@ impl Tarefas {
         self.ultima = agora;
         self.desempenho.amostrar();
         self.atualizar_linhas(passou.max(1));
+        self.atualizar_processos(passou.max(1));
         true
+    }
+
+    /// Refaz a aba Processos (a CPU de cada um e a diferenca do tempo_cpu).
+    fn atualizar_processos(&mut self, passou: u64) {
+        let selecionado = self.pid_selecionado();
+        let anteriores = core::mem::take(&mut self.tempos_processos);
+        let lista = processo::lista();
+        self.processos = lista
+            .iter()
+            .map(|p| LinhaProcesso {
+                pid: p.pid,
+                nome: p.nome.clone(),
+                estado: p.estado,
+                cpu: anteriores
+                    .iter()
+                    .find(|&&(pid, _)| pid == p.pid)
+                    .map(|&(_, antes)| milesimos(p.tempo_cpu.wrapping_sub(antes), passou)),
+                memoria: p.memoria,
+            })
+            .collect();
+        self.tempos_processos = lista.iter().map(|p| (p.pid, p.tempo_cpu)).collect();
+        self.lista_processos.definir_itens(self.processos.iter().map(item_do_processo).collect());
+        let indice = selecionado.and_then(|pid| self.processos.iter().position(|p| p.pid == pid));
+        if self.lista_processos.selecionado() != indice {
+            self.lista_processos.selecionar(indice);
+        }
+    }
+
+    fn pid_selecionado(&self) -> Option<u32> {
+        self.lista_processos.selecionado().and_then(|i| self.processos.get(i)).map(|p| p.pid)
+    }
+
+    /// Mata o processo selecionado; ele some da lista na hora.
+    fn finalizar_processo(&mut self) -> bool {
+        let Some(pid) = self.pid_selecionado() else { return false };
+        processo::matar(pid);
+        self.atualizar_processos(1);
+        true
+    }
+
+    fn evento_processos(&mut self, e: EventoApp) -> bool {
+        match e {
+            EventoApp::Botao { x, y, botao: Botao::Esquerdo, pressionado: true } if botao_finalizar().contem(x, y) => {
+                self.finalizar_processo()
+            }
+            EventoApp::Tecla { codigo: KEY_DELETE, pressionada: true } => self.finalizar_processo(),
+            _ => self.lista_processos.evento(e, area_lista()) != AcaoLista::Nada,
+        }
+    }
+
+    fn desenhar_processos(&self, s: &mut Superficie, t: &Tema) {
+        let area = area_lista();
+        self.lista_processos.desenhar(s, area);
+        if self.processos.is_empty() {
+            let aviso = "Nenhum processo. No terminal: processo conta &";
+            s.texto_com(area.x + 12, area.y + 48, aviso, apagado(t), &INTER);
+        }
+        let botao = botao_finalizar();
+        widgets::botao(s, botao, "Finalizar processo", self.lista_processos.selecionado().is_some());
+        let soma_cpu: u32 = self.processos.iter().filter_map(|p| p.cpu).sum();
+        let memoria: usize = self.processos.iter().map(|p| p.memoria).sum();
+        let resumo = format!(
+            "{} processo(s)  ·  CPU {}  ·  memória {}",
+            self.processos.len(),
+            texto_cpu(Some(soma_cpu.min(1000))),
+            tamanho(memoria)
+        );
+        let largura = botao.x - MARGEM - ESPACO;
+        let base = INTER.base_centralizada(botao.y, ALTURA_BOTAO);
+        s.texto_com(MARGEM, base, fonte::cortar(&resumo, largura, &INTER), apagado(t), &INTER);
     }
 
     /// Refaz as linhas com o resumo das janelas. `passou` = ticks do
@@ -376,7 +481,7 @@ impl Tarefas {
         let linhas = [
             ("Interrupções", format!("{total} por segundo (timer {timer}, serial {serial}, outras {outras})")),
             ("Ligado há", format!("{}h {:02}m {:02}s", segundos / 3600, segundos / 60 % 60, segundos % 60)),
-            ("Janelas", format!("{} abertas", self.linhas.len())),
+            ("Janelas", format!("{} abertas, {} processo(s)", self.linhas.len(), self.processos.len())),
             ("CPU ociosa", format!("{},{}% do tempo desde o boot", ocioso / 10, ocioso % 10)),
         ];
         let largura = r.largura - 2 * DENTRO - COLUNA_VALOR;
@@ -415,10 +520,10 @@ impl App for Tarefas {
         let t = tema::atual();
         s.limpar(t.fundo_janela);
         self.abas.desenhar(s, area_abas());
-        if self.abas.atual() == ABA_DESEMPENHO {
-            self.desenhar_desempenho(s, &t);
-        } else {
-            self.desenhar_aplicativos(s, &t);
+        match self.abas.atual() {
+            ABA_PROCESSOS => self.desenhar_processos(s, &t),
+            ABA_DESEMPENHO => self.desenhar_desempenho(s, &t),
+            _ => self.desenhar_aplicativos(s, &t),
         }
     }
 
@@ -429,7 +534,11 @@ impl App for Tarefas {
         if self.abas.evento(e, area_abas()) {
             return true;
         }
-        self.abas.atual() != ABA_DESEMPENHO && self.evento_aplicativos(e)
+        match self.abas.atual() {
+            ABA_APLICATIVOS => self.evento_aplicativos(e),
+            ABA_PROCESSOS => self.evento_processos(e),
+            _ => false,
+        }
     }
 
     fn pedidos(&mut self) -> Vec<Pedido> {

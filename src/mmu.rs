@@ -10,6 +10,11 @@
 //!
 //! Paginas de 4 KB, enderecos virtuais de 39 bits (3 niveis de tabela):
 //!   L1: 1 GB por entrada -> L2: 2 MB por entrada -> L3: 4 KB por entrada
+//!
+//! Processos (src/processo/): cada um tem a propria raiz, que repete o
+//! mapa do kernel (so EL1 acessa) e acrescenta as paginas do programa em
+//! enderecos baixos (de 0x400000 ate 0x8000000, abaixo dos perifericos),
+//! marcadas como nao globais e com o ASID do processo no TTBR0.
 
 use core::arch::asm;
 use core::cell::UnsafeCell;
@@ -33,6 +38,10 @@ const ACESSADA: u64 = 1 << 10; // flag AF (sem ela o primeiro acesso falha)
 const NAO_EXECUTA_KERNEL: u64 = 1 << 53; // PXN
 const NAO_EXECUTA_USUARIO: u64 = 1 << 54; // UXN
 const NAO_EXECUTA: u64 = NAO_EXECUTA_KERNEL | NAO_EXECUTA_USUARIO;
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+const USUARIO: u64 = 1 << 6; // AP[1]: EL0 tambem acessa
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+const NAO_GLOBAL: u64 = 1 << 11; // nG: a traducao vale so para o ASID atual
 const ENDERECO: u64 = 0x0000_FFFF_FFFF_F000;
 
 // MAIR_EL1: tipos de memoria. 0 = Device-nGnRE, 1 = Normal write-back.
@@ -45,6 +54,30 @@ const RAM: u64 = ATTR_NORMAL | COMPARTILHADA | ACESSADA | NAO_EXECUTA;
 const CODIGO: u64 = ATTR_NORMAL | COMPARTILHADA | ACESSADA | SO_LEITURA | NAO_EXECUTA_USUARIO;
 const CONSTANTES: u64 = ATTR_NORMAL | COMPARTILHADA | ACESSADA | SO_LEITURA | NAO_EXECUTA;
 
+/// Paginas de programa (EL0). O kernel nunca executa nenhuma delas.
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+const BASE_USUARIO: u64 = ATTR_NORMAL | COMPARTILHADA | ACESSADA | USUARIO | NAO_GLOBAL | NAO_EXECUTA_KERNEL;
+/// Le e executa (codigo do programa).
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub const USUARIO_CODIGO: u64 = BASE_USUARIO | SO_LEITURA;
+/// Le e escreve (dados, pilha, heap).
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub const USUARIO_DADOS: u64 = BASE_USUARIO | NAO_EXECUTA_USUARIO;
+/// So le.
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub const USUARIO_LEITURA: u64 = BASE_USUARIO | SO_LEITURA | NAO_EXECUTA_USUARIO;
+/// Tudo (le, escreve e executa): programas que pedem RWX no mmap.
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub const USUARIO_TUDO: u64 = BASE_USUARIO;
+/// Descritor de tabela (L1 -> L2, L2 -> L3).
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub const DESCRITOR_TABELA: u64 = VALIDO | TABELA_OU_PAGINA;
+/// Descritor de pagina de 4 KB (L3): endereco | atributos | isto.
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub const DESCRITOR_PAGINA: u64 = VALIDO | TABELA_OU_PAGINA;
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub const ENTRADAS_TABELA: usize = ENTRADAS;
+
 pub const MAX_TABELAS: usize = 8;
 
 #[repr(C, align(4096))]
@@ -56,6 +89,7 @@ unsafe impl Sync for Tabelas {}
 
 static TABELAS: Tabelas = Tabelas(UnsafeCell::new([const { Tabela([0; ENTRADAS]) }; MAX_TABELAS]));
 static TABELAS_USADAS: AtomicUsize = AtomicUsize::new(0);
+static RAIZ_KERNEL: AtomicUsize = AtomicUsize::new(0);
 
 struct Mapeador {
     tabelas: &'static mut [Tabela; MAX_TABELAS],
@@ -141,6 +175,7 @@ pub fn ligar() {
 
     TABELAS_USADAS.store(m.usadas, Ordering::Relaxed);
     let raiz = m.endereco(0);
+    RAIZ_KERNEL.store(raiz as usize, Ordering::Relaxed);
     limpar_cache(raiz as usize, m.usadas * PAGINA);
     ativar(raiz);
 }
@@ -259,4 +294,60 @@ pub fn traduzir(virtual_: u64) -> Option<Traducao> {
         tipo_memoria: (leitura >> 56) as u8,
         escrita: escrita & 1 == 0,
     })
+}
+
+// ------------------------------------------------------------ processos
+// (so no QEMU por enquanto: na TV box as funcoes abaixo ficam sem uso)
+
+/// As 512 entradas da raiz (L1) do kernel, para a raiz de um processo
+/// copiar.
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub fn raiz_kernel() -> [u64; ENTRADAS] {
+    let raiz = RAIZ_KERNEL.load(Ordering::Relaxed) as *const [u64; ENTRADAS];
+    unsafe { *raiz }
+}
+
+/// As entradas da tabela L2 que a entrada `i` da raiz do kernel aponta
+/// (zeros se for um bloco ou estiver vazia).
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub fn l2_kernel(i: usize) -> [u64; ENTRADAS] {
+    let descritor = raiz_kernel()[i];
+    if descritor & (VALIDO | TABELA_OU_PAGINA) != VALIDO | TABELA_OU_PAGINA {
+        return [0; ENTRADAS];
+    }
+    unsafe { *((descritor & ENDERECO) as *const [u64; ENTRADAS]) }
+}
+
+/// Passa a traduzir pelas tabelas de um processo (`raiz`, com o ASID).
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub fn usar_espaco(raiz: u64, asid: u16) {
+    let ttbr = raiz & ENDERECO | (asid as u64) << 48;
+    unsafe { asm!("msr ttbr0_el1, {}", "isb", in(reg) ttbr, options(nostack)) };
+}
+
+/// Volta para as tabelas do kernel (ASID 0).
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub fn usar_espaco_do_kernel() {
+    usar_espaco(RAIZ_KERNEL.load(Ordering::Relaxed) as u64, 0);
+}
+
+/// Esquece as traducoes guardadas no TLB para um ASID (o processo saiu ou
+/// mudou o proprio mapa).
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub fn esquecer_asid(asid: u16) {
+    let valor = (asid as u64) << 48;
+    unsafe { asm!("dsb ishst", "tlbi aside1is, {}", "dsb ish", "isb", in(reg) valor, options(nostack)) };
+}
+
+/// Codigo novo escrito pelo kernel numa pagina de programa: limpa o cache
+/// de dados ate o ponto de unificacao e invalida o de instrucoes.
+#[cfg_attr(feature = "mxq", allow(dead_code))]
+pub fn sincronizar_codigo(inicio: usize, tamanho: usize) {
+    let ctr: u64;
+    unsafe { asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack)) };
+    let linha = 4 << (ctr >> 16 & 0xF);
+    for endereco in (inicio & !(linha - 1)..inicio + tamanho).step_by(linha) {
+        unsafe { asm!("dc cvau, {}", in(reg) endereco, options(nostack)) };
+    }
+    unsafe { asm!("dsb ish", "ic ialluis", "dsb ish", "isb", options(nostack)) };
 }

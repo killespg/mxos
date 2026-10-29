@@ -62,7 +62,7 @@ saem (o teclado americano não tem teclas mortas). Pela serial (`--teste`) tudo 
 | Arquivo | O que faz |
 |---|---|
 | `src/boot.s` | Cabeçalho `Image` do ARM64, escolhe o núcleo 0, desce de EL2 para EL1, liga o FP, prepara as pilhas e o BSS |
-| `src/vetores.s` | Tabela de exceções (16 entradas); a IRQ salva os registradores e chama `tratar_irq` |
+| `src/vetores.s` | Tabela de exceções (16 entradas); a IRQ salva os registradores e chama `tratar_irq`; `entrar_usuario`/`sair_do_usuario` levam o processo para EL0 e trazem de volta |
 | `src/excecao.rs` | Explica a exceção na serial (inclusive falhas da MMU e estouro de pilha) e, com a área de trabalho ligada, numa tela de erro desenhada direto no framebuffer (o `panic` usa a mesma tela), sem alocar e sem travas |
 | `src/mmu.rs` | Tabelas de páginas (4 KB, 3 níveis), permissões por região, liga MMU e caches |
 | `src/gic.rs` | GICv2 (GIC-400 na box): liga cada interrupção, confirma e finaliza |
@@ -88,6 +88,7 @@ saem (o teclado americano não tem teclas mortas). Pela serial (`--teste`) tudo 
 | `src/entrada/` | Teclado e mouse virtio-input (layouts US e ABNT2, com teclas mortas e ç) |
 | `src/armazenamento/` | Driver virtio-blk e FAT32 com nomes longos em UTF-16 (ler, gravar, pastas, renomear) e os comandos `ls`, `cat`, `escrever`... |
 | `src/rede/` | Driver virtio-net e a rede feita do zero: Ethernet, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP e cliente HTTP |
+| `src/processo/` | Processos em EL0: tabela e escalonador (`mod.rs`), espaço de endereços com tabelas de páginas próprias (`memoria.rs`) e chamadas de sistema no padrão do Linux aarch64 (`chamadas.rs`) |
 | `src/navegador/` | Motor do navegador: HTML tolerante, CSS leve (`css.rs`), diagramação com quebra de linha e caixas, desenho e modo texto (`navegar`); o app da janela fica em `src/gui/apps/navegador.rs` |
 | `ferramentas/criar_disco.py` | Cria a imagem FAT32 do disco do zero e confere imagens (`--verificar`) |
 | `ferramentas/gerar_fontes.py` | Gera `src/fonte/*.mxf` a partir das fontes TrueType em `ferramentas/fontes/` (precisa do Pillow e do fontTools só no PC) |
@@ -244,6 +245,33 @@ gravado: /documentos/Olá.txt (21 bytes)
 mxos> cat /documentos/Anotações.txt
 ```
 
+## Processos (EL0) e chamadas de sistema
+
+Programas rodam em EL0, cada um com a própria memória, e falam com o kernel por `svc` com os números e as regras do
+Linux aarch64 (número em `x8`, argumentos em `x0`-`x5`, resposta em `x0`, erro = `-errno`).
+
+- **Como o kernel roda um programa**: o laço principal (área de trabalho ou shell da serial) chama `processo::rodar`
+  a cada volta. `entrar_usuario` (em `vetores.s`) guarda os registradores do kernel e faz `eret` para o programa.
+  Qualquer exceção vinda dele (SVC, interrupção, erro) cai nos vetores de "EL inferior", que salvam o programa inteiro
+  (x0-x30, SP_EL0, PC, SPSR, TPIDR_EL0, q0-q31, FPCR/FPSR) e voltam para o kernel como se `entrar_usuario` tivesse
+  retornado. Assim a chamada de sistema roda no kernel normal: pode alocar, ler o disco, esperar.
+- **Preempção**: o timer de 100 Hz tira o programa da CPU; os prontos se revezam (round-robin) e a área de trabalho
+  continua respondendo. Com processo pronto o laço não dorme no WFI; sem nenhum, a CPU volta a ficar ~97% ociosa.
+- **Memória**: o kernel continua no mapa identidade, só para EL1, em todas as tabelas. Cada processo tem a raiz
+  própria (com ASID no TTBR0) e as páginas dele de `0x1000` a `0x8000000` (128 MB abaixo dos periféricos), não
+  globais, com código só leitura + execução e dados sem execução. As páginas vêm do heap; o kernel lê e escreve a
+  memória do programa pelos quadros, sem depender da tabela ativa.
+- **Erros**: um acesso inválido ou instrução desconhecida mata só o processo, com a mensagem no terminal
+  (`[processo 2 (teste-falha) morreu: falha de segmentação ao escrever 0x10, no PC 0x40009c]`, código 139).
+- **Esperar**: `read` sem tecla, `nanosleep` e `wait4` voltam o PC para o `svc` e marcam o processo; quando a condição
+  muda ele roda de novo e repete a chamada.
+- **Terminal**: `write` em 1 e 2 vai para o terminal; o processo em primeiro plano recebe o teclado com eco e edição
+  de linha (Backspace, Enter, Ctrl+D = fim de arquivo, Ctrl+C = mata).
+
+Comandos: `processo ola|conta|falha|eco [&]` (programa de teste embutido, em assembly; `&` roda no fundo),
+`processos` (pid, estado, CPU, memória), `matar PID` e `syscalls` (chamadas pedidas que ainda não existem). O app
+**Tarefas** ganhou a aba **Processos**, com a CPU de cada um e "Finalizar processo".
+
 ## CSS no navegador
 
 O navegador lê CSS de `<style>`, do atributo `style="..."` e de `<link rel="stylesheet">` (baixado do disco ou por
@@ -290,7 +318,7 @@ A página `disco:/paginas/css.html` (com `estilo.css` por `<link>`) mostra tudo 
 5. ~~Aplicativos da área de trabalho: gerenciador de arquivos e discos, gerenciador de tarefas, navegador,
    personalização, configurações e painel de drivers~~ (feito na 0.7).
 6. ~~Fontes com antialiasing e acentos em todo o sistema~~ (feito na 0.8).
-7. Processos em EL0 e chamadas de sistema (`svc`).
+7. ~~Processos em EL0 e chamadas de sistema (`svc`)~~ (feito).
 8. FAT32 no cartão SD da TV box (o FAT32 já existe; falta o driver do SD da Amlogic).
 9. Carregador de executáveis: ELF primeiro, depois PE (`.exe`) compilado para ARM64.
 10. `.exe` de Windows x86: precisa de um tradutor de instruções x86 para ARM e de uma reimplementação da API do Windows (o que o Box64 e o Wine fazem juntos). É o projeto mais longo da lista.
