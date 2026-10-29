@@ -255,6 +255,20 @@ impl Scripts {
         com_dom(&mut self.vm, |_, d| !d.timers.is_empty()).unwrap_or(false)
     }
 
+    /// O foco esta num input/textarea?
+    pub fn foco_editavel(&mut self) -> bool {
+        com_dom(&mut self.vm, |_, d| {
+            let doc = d.doc.borrow();
+            d.foco != NENHUM && (doc.eh(d.foco, a::INPUT) || doc.eh(d.foco, a::TEXTAREA))
+        })
+        .unwrap_or(false)
+    }
+
+    /// Ha fetch/XHR esperando resposta?
+    pub fn tem_pedidos(&mut self) -> bool {
+        com_dom(&mut self.vm, |_, d| !d.pedidos.is_empty()).unwrap_or(false)
+    }
+
     /// Quando vence o proximo timer (ms), se houver.
     pub fn proximo_timer(&mut self) -> Option<f64> {
         com_dom(&mut self.vm, |_, d| d.timers.iter().map(|t| t.quando).min_by(|a, b| a.total_cmp(b))).flatten()

@@ -75,6 +75,26 @@ const COR_AVISO: Cor = 0x0070_7070;
 /// Da borda do campo ate o texto (a mesma margem do widgets::CampoTexto).
 const MARGEM_CAMPO: i32 = 6;
 
+/// Nome DOM (KeyboardEvent.key) de uma tecla especial.
+fn nome_tecla(codigo: u16) -> &'static str {
+    match codigo {
+        KEY_UP => "ArrowUp",
+        KEY_DOWN => "ArrowDown",
+        KEY_LEFT => "ArrowLeft",
+        KEY_RIGHT => "ArrowRight",
+        KEY_PAGEUP => "PageUp",
+        KEY_PAGEDOWN => "PageDown",
+        KEY_HOME => "Home",
+        KEY_END => "End",
+        KEY_DELETE => "Delete",
+        TECLA_F5 => "F5",
+        TECLA_F6 => "F6",
+        1 => "Escape",
+        15 => "Tab",
+        _ => "Unidentified",
+    }
+}
+
 // Codigos evdev que nao estao no teclado.rs.
 const TECLA_F5: u16 = 63;
 const TECLA_F6: u16 = 64;
@@ -162,6 +182,8 @@ struct Visita {
 pub struct Navegador {
     /// Endereco da pagina mostrada (o final, depois dos redirecionamentos).
     url: String,
+    /// Onde o botao foi apertado na pagina (clique = soltar perto).
+    clique_pagina: Option<(i32, i32)>,
     pagina: Option<web::PaginaWeb>,
     titulo: String,
     historico: Vec<Visita>,
@@ -291,6 +313,7 @@ impl Navegador {
             link_apertado: None,
             arrasto: None,
             pedidos: Vec::new(),
+            clique_pagina: None,
             sujo: SUJO_TUDO,
             tema_desenhado: None,
             rolagem_desenhada: 0,
@@ -557,6 +580,9 @@ impl Navegador {
             self.apertar_trilho(y);
         } else {
             self.link_apertado = self.link_no_ponto(x, y);
+            if AREA_PAGINA.contem(x, y) {
+                self.clique_pagina = Some((x, y));
+            }
         }
     }
 
@@ -570,10 +596,18 @@ impl Navegador {
         if self.arrasto.take().is_some() {
             self.sujo |= SUJO_ROLAGEM;
         }
-        if let Some(link) = self.link_apertado.take()
-            && self.link_no_ponto(x, y).as_deref() == Some(link.as_str())
+        self.link_apertado = None;
+        // clique na pagina: eventos para os scripts (que podem impedir o link)
+        if let Some((x0, y0)) = self.clique_pagina.take()
+            && (x - x0).abs() < 6
+            && (y - y0).abs() < 6
+            && let Some(pagina) = &mut self.pagina
         {
-            self.pedir(link, Destino::Nova, 0);
+            match web::clicar(pagina, x - AREA_PAGINA.x, y - AREA_PAGINA.y, self.rolagem) {
+                web::Clique::Navegar(u) => self.pedir(u, Destino::Nova, 0),
+                web::Clique::Mudou => self.pagina_mudou(),
+                web::Clique::Nada => {}
+            }
         }
     }
 
@@ -610,9 +644,48 @@ impl Navegador {
         }
     }
 
+    /// Os scripts mudaram a pagina: titulo, altura e desenho.
+    fn pagina_mudou(&mut self) {
+        let Some(pagina) = &self.pagina else { return };
+        self.titulo = titulo_da_janela(&pagina.titulo, &self.url);
+        let maximo = (pagina.altura - AREA_PAGINA.altura).max(0);
+        self.rolagem = self.rolagem.clamp(0, maximo);
+        self.atualizar_link();
+        self.sujo |= SUJO_PAGINA | SUJO_ROLAGEM;
+    }
+
+    /// Tecla ou caractere para a pagina (campo com foco, atalhos dos
+    /// scripts). true = a pagina tratou.
+    fn tecla_na_pagina(&mut self, nome: &str, c: Option<char>) -> bool {
+        let Some(pagina) = &mut self.pagina else { return false };
+        let tratou = web::tecla(pagina, nome, c);
+        let navegar = web::navegacao(pagina);
+        if tratou {
+            self.pagina_mudou();
+        }
+        if let Some(u) = navegar {
+            self.pedir(u, Destino::Nova, 0);
+            return true;
+        }
+        tratou
+    }
+
     fn tique(&mut self) {
         if self.endereco.focado() {
             self.evento_endereco(EventoApp::Tique); // cursor piscando
+        }
+        // timers e respostas de rede dos scripts
+        if self.carga.is_none()
+            && let Some(pagina) = &mut self.pagina
+        {
+            let mudou = web::tique(pagina);
+            let navegar = web::navegacao(pagina);
+            if mudou {
+                self.pagina_mudou();
+            }
+            if let Some(u) = navegar {
+                self.pedir(u, Destino::Nova, 0);
+            }
         }
         let Some(carga) = &mut self.carga else { return };
         carga.tiques = carga.tiques.saturating_add(1);
@@ -738,8 +811,29 @@ impl App for Navegador {
         match e {
             EventoApp::Tique => self.tique(),
             EventoApp::Caractere(_) | EventoApp::Tecla { .. } if focado => self.evento_endereco(e),
-            EventoApp::Tecla { codigo, pressionada: true } => self.tecla(codigo),
-            EventoApp::Caractere('\u{8}') => self.executar(Comando::Voltar),
+            EventoApp::Tecla { codigo, pressionada: true } => {
+                // letras chegam tambem como Caractere: aqui so as especiais
+                let nome = nome_tecla(codigo);
+                let campo = self.pagina.as_mut().is_some_and(web::campo_focado);
+                let tratou = nome != "Unidentified" && self.tecla_na_pagina(nome, None);
+                if !tratou && (!campo || matches!(codigo, TECLA_F5 | TECLA_F6)) {
+                    self.tecla(codigo)
+                }
+            }
+            EventoApp::Caractere('\u{8}') => {
+                let campo = self.pagina.as_mut().is_some_and(web::campo_focado);
+                if campo {
+                    self.tecla_na_pagina("Backspace", None);
+                } else {
+                    self.executar(Comando::Voltar)
+                }
+            }
+            EventoApp::Caractere('\r' | '\n') => {
+                self.tecla_na_pagina("Enter", None);
+            }
+            EventoApp::Caractere(c) if !c.is_control() => {
+                self.tecla_na_pagina(&String::from(c), Some(c));
+            }
             EventoApp::Botao { x, y, botao, pressionado } => self.botao(x, y, botao, pressionado),
             EventoApp::Mouse { x, y, botoes } => self.mover(x, y, botoes),
             EventoApp::Roda(passos) => self.rolar(passos.saturating_mul(-PASSO_RODA)),

@@ -972,6 +972,31 @@ impl Vm {
         Ok(())
     }
 
+    /// Descricao curta de um valor para mensagens de erro.
+    pub fn descrever_curto(&mut self, v: &Valor) -> String {
+        match v {
+            Valor::Obj(r) => {
+                let classe = match &self.heap.get(*r).classe {
+                    Classe::Dom(id) => return format!("nó DOM {id}"),
+                    Classe::Array(a) => return format!("array[{}]", a.len()),
+                    Classe::Funcao { proto, .. } => return format!("função {}", proto.nome),
+                    _ => "objeto",
+                };
+                // nome do construtor, se houver
+                let ctor = self.pegar(v, chave("constructor")).unwrap_or_default();
+                let nome = match &ctor {
+                    Valor::Obj(_) => self.pegar(&ctor, chave("name")).ok().and_then(|n| if let Valor::Texto(t) = n { Some(t) } else { None }),
+                    _ => None,
+                };
+                match nome {
+                    Some(n) if !n.is_empty() => format!("{classe} {n}"),
+                    _ => String::from(classe),
+                }
+            }
+            outro => String::from(self.typeof_(outro)),
+        }
+    }
+
     fn compilar_pendente(&mut self, p: &Rc<Prototipo>) -> R<Rc<Prototipo>> {
         if let Some(x) = p.pronto.get() {
             return Ok(x.clone());
@@ -1947,7 +1972,8 @@ impl Vm {
                         }
                         if !self.eh_chamavel(&f) {
                             let nome = self.nome_do_alvo(&proto, ip);
-                            lancar!(self.erro_tipo::<()>(&format!("{nome} não é uma função")).unwrap_err());
+                            let em = self.descrever_curto(&this);
+                            lancar!(self.erro_tipo::<()>(&format!("{nome} não é uma função (em {em})")).unwrap_err());
                         }
                         let v = t!(self.chamar(&f, &this, &args));
                         push!(v);

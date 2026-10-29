@@ -715,7 +715,7 @@ fn arr_ctor(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     if c.args.len() == 1 {
         if let Valor::Num(n) = c.args[0] {
             if n < 0.0 || n.fract() != 0.0 || n > 1e8 {
-                return vm.erro_faixa("tamanho de array inválido");
+                return vm.erro_faixa(&format!("tamanho de array inválido: {n}"));
             }
             return Ok(vm.novo_array(alloc::vec![Valor::Indef; n as usize]));
         }

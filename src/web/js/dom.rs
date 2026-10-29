@@ -83,6 +83,8 @@ pub struct Dom {
     pub foco: Id,
     pub script_atual: Id,
     pub escrito: String,
+    /// <template> -> fragmento do content
+    pub conteudos: BTreeMap<Id, Id>,
 }
 
 impl Anfitriao for Dom {
@@ -136,7 +138,10 @@ fn no_de(vm: &Vm, v: &Valor) -> Option<Id> {
 fn this_no(vm: &mut Vm, c: &Ctx) -> R<Id> {
     match no_de(vm, c.this) {
         Some(id) => Ok(id),
-        None => vm.erro_tipo("this não é um nó do DOM"),
+        None => {
+            let d = vm.descrever_curto(c.this);
+            vm.erro_tipo(&format!("this não é um nó do DOM ({d})"))
+        }
     }
 }
 
@@ -406,6 +411,24 @@ fn propriedade(d: &mut Dom, vm: &mut Vm, no: Id, nome: &str) -> Option<R<Valor>>
             Valor::Num(ops.iter().position(|&o| doc.elemento(o).is_some_and(|x| x.tem(a::SELECTED))).map_or(0.0, |p| p as f64))
         }
         "shadowRoot" => Valor::Nulo,
+        "content" if doc_rc.borrow().eh(no, a::TEMPLATE) => {
+            // o conteudo de um <template>: um fragmento com os filhos dele
+            let frag = match d.conteudos.get(&no) {
+                Some(&f) => f,
+                None => {
+                    let mut doc = doc_rc.borrow_mut();
+                    let f = doc.criar_elemento(Atomo::de("#fragment"), crate::web::dom::Espaco::Html, Vec::new());
+                    let filhos: Vec<Id> = doc.filhos(no).collect();
+                    for x in filhos {
+                        doc.anexar(f, x);
+                    }
+                    drop(doc);
+                    d.conteudos.insert(no, f);
+                    f
+                }
+            };
+            objeto(vm, d, frag)
+        }
         "contentWindow" | "contentDocument" => Valor::Nulo,
         n if n.starts_with("on") => {
             // handler definido por propriedade
@@ -1240,7 +1263,7 @@ fn estilo_get(vm: &mut Vm, c: &Ctx) -> R<Valor> {
 // ------------------------------------------------------------- eventos
 
 fn add_listener(vm: &mut Vm, c: &Ctx) -> R<Valor> {
-    let alvo = if matches!(c.this, Valor::Obj(r) if *r == vm.global) { JANELA } else { this_no(vm, c)? };
+    let alvo = if c.this.eh_nulo_ou_indef() || matches!(c.this, Valor::Obj(r) if *r == vm.global) { JANELA } else { this_no(vm, c)? };
     let tipo = vm.para_texto(&c.arg(0))?;
     let f = c.arg(1);
     if !vm.eh_chamavel(&f) && !matches!(f, Valor::Obj(_)) {
@@ -1261,7 +1284,7 @@ fn add_listener(vm: &mut Vm, c: &Ctx) -> R<Valor> {
 }
 
 fn remove_listener(vm: &mut Vm, c: &Ctx) -> R<Valor> {
-    let alvo = if matches!(c.this, Valor::Obj(r) if *r == vm.global) { JANELA } else { this_no(vm, c)? };
+    let alvo = if c.this.eh_nulo_ou_indef() || matches!(c.this, Valor::Obj(r) if *r == vm.global) { JANELA } else { this_no(vm, c)? };
     let tipo = vm.para_texto(&c.arg(0))?;
     let f = c.arg(1);
     com_dom(vm, |_, d| d.ouvintes.retain(|o| !(o.alvo == alvo && o.tipo == tipo && o.f == f)));
@@ -1269,7 +1292,7 @@ fn remove_listener(vm: &mut Vm, c: &Ctx) -> R<Valor> {
 }
 
 fn dispatch(vm: &mut Vm, c: &Ctx) -> R<Valor> {
-    let alvo = if matches!(c.this, Valor::Obj(r) if *r == vm.global) { JANELA } else { this_no(vm, c)? };
+    let alvo = if c.this.eh_nulo_ou_indef() || matches!(c.this, Valor::Obj(r) if *r == vm.global) { JANELA } else { this_no(vm, c)? };
     let ev = c.arg(0);
     let tipo = vm.pegar(&ev, chave("type"))?;
     let tipo = vm.para_texto(&tipo)?;
@@ -1647,6 +1670,7 @@ pub fn instalar(vm: &mut Vm, doc: Rc<RefCell<Documento>>, url: &str, largura: f3
         foco: NENHUM,
         script_atual: NENHUM,
         escrito: String::new(),
+        conteudos: BTreeMap::new(),
     };
     vm.anfitriao = Some(alloc::boxed::Box::new(d));
     let m: &[(&str, super::vm::FnNativa, u8)] = &[
@@ -1880,6 +1904,8 @@ pub const PRELUDIO: &str = r#"
   function ctor(proto, nome) { const f = function () { throw new TypeError('Illegal constructor'); }; f.prototype = proto; def(proto, 'constructor', f); g[nome] = f; return f; }
   ctor(protoNo, 'Node'); ctor(protoEl, 'Element'); ctor(protoTexto, 'Text');
   ctor(Object.getPrototypeOf(document), 'Document');
+  for (const n of ['HTMLMetaElement','HTMLParagraphElement','HTMLHeadingElement','HTMLUListElement','HTMLOListElement','HTMLLIElement','HTMLTableElement','HTMLTableRowElement','HTMLTableCellElement','HTMLLabelElement','HTMLOptionElement','HTMLPreElement','HTMLBRElement','HTMLHRElement','HTMLPictureElement','HTMLSourceElement','HTMLAudioElement','HTMLDialogElement','HTMLDetailsElement','HTMLSlotElement','HTMLTitleElement','HTMLBaseElement','HTMLObjectElement','HTMLEmbedElement','HTMLFieldSetElement','HTMLOutputElement','HTMLProgressElement','HTMLMeterElement','HTMLDataElement','HTMLTimeElement','HTMLQuoteElement','HTMLModElement','HTMLAreaElement','HTMLMapElement','HTMLTrackElement','HTMLMenuElement','HTMLFrameElement','HTMLFrameSetElement','HTMLLegendElement','HTMLDListElement','HTMLTableSectionElement','HTMLTableColElement','HTMLTableCaptionElement','SVGSVGElement','SVGGraphicsElement','SVGPathElement','ShadowRoot','Attr','CSSStyleSheet','CSSStyleDeclaration','DOMRect','DOMTokenList','NamedNodeMap','Range','Selection','StyleSheet','MediaQueryList','Storage','Location','History','Navigator','Screen','Window'])
+    if (!g[n]) g[n] = n.indexOf('Element') >= 0 ? g.Element : function () {};
   for (const n of ['HTMLElement','HTMLDivElement','HTMLAnchorElement','HTMLImageElement','HTMLInputElement','HTMLButtonElement','HTMLFormElement','HTMLScriptElement','HTMLStyleElement','HTMLLinkElement','HTMLIFrameElement','HTMLCanvasElement','HTMLVideoElement','HTMLMediaElement','HTMLTemplateElement','HTMLSelectElement','HTMLTextAreaElement','HTMLSpanElement','HTMLBodyElement','HTMLHeadElement','HTMLHtmlElement','SVGElement','HTMLUnknownElement','DocumentFragment','CharacterData','Comment','HTMLCollection','NodeList'])
     if (!g[n]) g[n] = n.indexOf('Element') >= 0 ? g.Element : function () {};
   Object.assign(protoNo, { ELEMENT_NODE: 1, TEXT_NODE: 3, COMMENT_NODE: 8, DOCUMENT_NODE: 9, DOCUMENT_FRAGMENT_NODE: 11 });
