@@ -1,7 +1,8 @@
 //! Programa de Linux comum (Rust + musl, estatico) que o MXOS roda sem
 //! mudar nada: mostra os argumentos, o ambiente, a hora, le um arquivo e
-//! cria outro. "ola sinais", "ola threads" e "ola rede [host]" testam
-//! tratadores de sinal, alarm, fork, std::thread e std::net. Compilar: cd ferramentas/ola && cargo build --release
+//! cria outro. "ola sinais", "ola threads", "ola rede [host]" e "ola unix"
+//! testam tratadores de sinal, alarm, fork, std::thread, std::net e
+//! AF_UNIX (com SCM_RIGHTS). Compilar: cd ferramentas/ola && cargo build --release
 
 use std::io::{self, BufRead, Write};
 
@@ -13,6 +14,10 @@ fn main() {
     }
     if args.get(1).is_some_and(|a| a == "threads") {
         testar_threads();
+        return;
+    }
+    if args.get(1).is_some_and(|a| a == "unix") {
+        testar_unix();
         return;
     }
     if args.get(1).is_some_and(|a| a == "rede") {
@@ -182,4 +187,85 @@ fn testar_rede(host: &str) {
         Ok((n, de)) => println!("UDP: {n} bytes de {de}, id {:02x}{:02x}", buf[0], buf[1]),
         Err(e) => println!("UDP sem resposta: {e}"),
     }
+}
+
+// ---------------------------------------------------------------------
+// AF_UNIX (ola unix): socketpair, servidor por caminho e SCM_RIGHTS
+
+#[repr(C)]
+struct Iovec {
+    base: *mut u8,
+    tamanho: usize,
+}
+
+#[repr(C)]
+struct Msghdr {
+    nome: *mut u8,
+    tamanho_nome: u32,
+    iov: *mut Iovec,
+    quantos_iov: usize,
+    controle: *mut u8,
+    tamanho_controle: usize,
+    flags: i32,
+}
+
+unsafe extern "C" {
+    fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isize;
+    fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize;
+    fn pipe(fds: *mut i32) -> i32;
+    fn write(fd: i32, dados: *const std::ffi::c_void, n: usize) -> isize;
+    fn read(fd: i32, dados: *mut std::ffi::c_void, n: usize) -> isize;
+}
+
+fn testar_unix() {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let (mut a, mut b) = UnixStream::pair().unwrap();
+    a.write_all(b"oi, par").unwrap();
+    let mut buf = [0u8; 64];
+    let n = b.read(&mut buf).unwrap();
+    println!("socketpair: {:?}", String::from_utf8_lossy(&buf[..n]));
+
+    let ouvinte = UnixListener::bind("/tmp/teste.sock").unwrap();
+    let cliente = std::thread::spawn(|| {
+        let mut c = UnixStream::connect("/tmp/teste.sock").unwrap();
+        c.write_all(b"pergunta do cliente").unwrap();
+        c.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut resposta = String::new();
+        c.read_to_string(&mut resposta).unwrap();
+        resposta
+    });
+    let (mut s, _) = ouvinte.accept().unwrap();
+    let mut pergunta = String::new();
+    s.read_to_string(&mut pergunta).unwrap();
+    println!("servidor recebeu: {pergunta:?}");
+    s.write_all(b"resposta do servidor").unwrap();
+    drop(s);
+    println!("cliente recebeu: {:?}", cliente.join().unwrap());
+
+    // manda o lado de escrita de um pipe pelo socketpair
+    let mut tubo = [0i32; 2];
+    unsafe { pipe(tubo.as_mut_ptr()) };
+    let mut byte = *b"x";
+    let mut iov = Iovec { base: byte.as_mut_ptr(), tamanho: 1 };
+    let mut controle = [0u8; 24];
+    controle[..8].copy_from_slice(&20u64.to_le_bytes());
+    controle[8..12].copy_from_slice(&1i32.to_le_bytes());
+    controle[12..16].copy_from_slice(&1i32.to_le_bytes());
+    controle[16..20].copy_from_slice(&tubo[1].to_le_bytes());
+    let msg = Msghdr { nome: std::ptr::null_mut(), tamanho_nome: 0, iov: &mut iov, quantos_iov: 1, controle: controle.as_mut_ptr(), tamanho_controle: 24, flags: 0 };
+    let enviado = unsafe { sendmsg(a.as_raw_fd(), &msg, 0) };
+    let mut recebido = [0u8; 1];
+    let mut iov2 = Iovec { base: recebido.as_mut_ptr(), tamanho: 1 };
+    let mut controle2 = [0u8; 24];
+    let mut msg2 = Msghdr { nome: std::ptr::null_mut(), tamanho_nome: 0, iov: &mut iov2, quantos_iov: 1, controle: controle2.as_mut_ptr(), tamanho_controle: 24, flags: 0 };
+    let n = unsafe { recvmsg(b.as_raw_fd(), &mut msg2, 0) };
+    let novo = i32::from_le_bytes(controle2[16..20].try_into().unwrap());
+    println!("SCM_RIGHTS: enviado {enviado}, recebido {n} byte, controle {} bytes, fd {} virou fd {novo}", msg2.tamanho_controle, tubo[1]);
+    let texto = b"escrito pelo fd recebido";
+    unsafe { write(novo, texto.as_ptr().cast(), texto.len()) };
+    let mut lido = [0u8; 64];
+    let n = unsafe { read(tubo[0], lido.as_mut_ptr().cast(), 64) };
+    println!("pipe leu: {:?}", String::from_utf8_lossy(&lido[..n.max(0) as usize]));
 }

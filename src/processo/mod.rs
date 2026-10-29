@@ -30,6 +30,7 @@ pub mod memoria;
 pub mod proc;
 pub mod sinais;
 pub mod soquetes;
+pub mod unix;
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
@@ -607,6 +608,11 @@ pub fn rodar() -> bool {
                 let _ = writeln!(Saida(t), "\n[processo {pid}: erro assíncrono da CPU]");
                 t.terminar(i, 7);
                 novidade = true;
+            }
+            if unix::mexeu() {
+                // um soquete local mudou: quem espera por ele tenta de novo
+                // ja, sem esperar o proximo tique
+                t.acordar(true);
             }
             if timer::tiques() != tique {
                 // a fatia acabou: o proximo da fila comeca na proxima volta

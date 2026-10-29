@@ -5,27 +5,33 @@
 //!   AF_INET + SOCK_DGRAM    UDP (bind, connect, sendto, recvfrom...)
 //!   AF_INET + ICMP          ping (SOCK_RAW ou SOCK_DGRAM com IPPROTO_ICMP)
 //!
-//! AF_UNIX e IPv6 ainda nao existem: devolvem o erro que o Linux daria
-//! sem suporte, e os programas se viram. 127.x.x.x vira o nosso IP (a
-//! pilha entrega para si mesma sem passar pela placa).
+//!   AF_UNIX                 entre processos e com o kernel (unix.rs)
+//!
+//! IPv6 ainda nao existe: devolve o erro que o Linux daria sem suporte, e
+//! os programas se viram. 127.x.x.x vira o nosso IP (a pilha entrega para
+//! si mesma sem passar pela placa).
 //!
 //! Chamada que espera (connect, recv sem dados) segue a regra das outras:
 //! Fim::Esperar e o SVC repete na proxima volta; com O_NONBLOCK (ou
 //! MSG_DONTWAIT) volta EAGAIN/EINPROGRESS na hora.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::arquivos::*;
+use super::unix::{self, Ponta, Unix};
 use super::chamadas::{Fim, escrever_mem, ler_mem};
 use super::Tabela;
 use crate::rede::soquete::{self as rede, EstadoTcp};
 use crate::rede::ErroRede;
 
 const AF_UNSPEC: u16 = 0;
+const AF_UNIX: u64 = 1;
 const AF_INET: u64 = 2;
 const SOCK_STREAM: u64 = 1;
 const SOCK_DGRAM: u64 = 2;
 const SOCK_RAW: u64 = 3;
+const SOCK_SEQPACKET: u64 = 5;
 const SOCK_NONBLOCK: u64 = 0o4000;
 const SOCK_CLOEXEC: u64 = 0o2000000;
 const IPPROTO_ICMP: u64 = 1;
@@ -37,6 +43,7 @@ const EDESTADDRREQ: i64 = 89;
 const EPROTONOSUPPORT: i64 = 93;
 const EOPNOTSUPP: i64 = 95;
 const EAFNOSUPPORT: i64 = 97;
+const EADDRINUSE: i64 = 98;
 const ENETUNREACH: i64 = 101;
 const ECONNRESET: i64 = 104;
 const EISCONN: i64 = 106;
@@ -48,6 +55,12 @@ const EINPROGRESS: i64 = 115;
 
 /// Endereco IPv4 + porta.
 type Endereco = ([u8; 4], u16);
+
+/// O que um recv devolve: dados, de onde vieram e descritores (AF_UNIX).
+pub type Recebido = (Vec<u8>, Option<Endereco>, Vec<Aberto>);
+
+/// Erro de mentira: "espera e tenta de novo" (nunca chega ao programa).
+const ESPERAR: i64 = -1;
 
 pub enum Soquete {
     Tcp {
@@ -69,6 +82,7 @@ pub enum Soquete {
         bruto: bool,
         remoto: Option<[u8; 4]>,
     },
+    Unix(Unix),
 }
 
 impl Drop for Soquete {
@@ -140,7 +154,69 @@ fn com_soquete<R>(t: &Tabela, i: usize, fd: u64, acao: impl FnOnce(&mut Soquete,
     }
 }
 
+/// A familia de um sockaddr no programa.
+fn familia(t: &Tabela, i: usize, endereco: usize, tamanho: usize) -> Result<u64, i64> {
+    if endereco == 0 || tamanho < 2 {
+        return Err(EINVAL);
+    }
+    let b = ler_mem(t, i, endereco, 2)?;
+    Ok(u16::from_le_bytes([b[0], b[1]]) as u64)
+}
+
+/// struct sockaddr_un -> nome.
+fn ler_nome_unix(t: &Tabela, i: usize, endereco: usize, tamanho: usize) -> Result<String, i64> {
+    let b = ler_mem(t, i, endereco, tamanho.min(110))?;
+    unix::nome_do_endereco(&b).ok_or(EINVAL)
+}
+
+fn escrever_nome_unix(t: &mut Tabela, i: usize, endereco: usize, tamanho: usize, nome: Option<&str>) -> Result<(), i64> {
+    if endereco == 0 || tamanho == 0 {
+        return Ok(());
+    }
+    let cabe = ler_mem(t, i, tamanho, 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)?;
+    let s = unix::endereco_do_nome(nome);
+    escrever_mem(t, i, endereco, &s[..cabe.min(s.len())])?;
+    escrever_mem(t, i, tamanho, &(s.len() as u32).to_le_bytes())
+}
+
+/// Poe `soquete` num descritor novo (SOCK_NONBLOCK e SOCK_CLOEXEC de `tipo`).
+fn novo_soquete(t: &mut Tabela, i: usize, soquete: Soquete, tipo: u64) -> Result<usize, i64> {
+    let flags = O_RDWR | if tipo & SOCK_NONBLOCK != 0 { O_NONBLOCK } else { 0 };
+    let aberto = Descricao::nova(Tipo::Soquete(soquete), flags);
+    t.processos[i].linux.novo_descritor(aberto, tipo & SOCK_CLOEXEC != 0)
+}
+
+/// socketpair (so AF_UNIX): dois soquetes ja ligados, em `vetor[0..2]`.
+pub fn socketpair(t: &mut Tabela, i: usize, familia: u64, tipo: u64, vetor: usize) -> Result<i64, i64> {
+    if familia != AF_UNIX {
+        return Err(EAFNOSUPPORT);
+    }
+    if !matches!(tipo & 0xF, SOCK_STREAM | SOCK_DGRAM | SOCK_SEQPACKET) {
+        return Err(EPROTONOSUPPORT);
+    }
+    let (a, b) = Ponta::par();
+    let fa = novo_soquete(t, i, Soquete::Unix(Unix::Conectado { ponta: a, outro: None }), tipo)?;
+    let fb = match novo_soquete(t, i, Soquete::Unix(Unix::Conectado { ponta: b, outro: None }), tipo) {
+        Ok(fd) => fd,
+        Err(e) => {
+            t.processos[i].linux.fechar(fa as u64);
+            return Err(e);
+        }
+    };
+    let mut v = [0u8; 8];
+    v[..4].copy_from_slice(&(fa as i32).to_le_bytes());
+    v[4..].copy_from_slice(&(fb as i32).to_le_bytes());
+    escrever_mem(t, i, vetor, &v)?;
+    Ok(0)
+}
+
 pub fn socket(t: &mut Tabela, i: usize, familia: u64, tipo: u64, protocolo: u64) -> Result<i64, i64> {
+    if familia == AF_UNIX {
+        if !matches!(tipo & 0xF, SOCK_STREAM | SOCK_DGRAM | SOCK_SEQPACKET) {
+            return Err(EPROTONOSUPPORT);
+        }
+        return novo_soquete(t, i, Soquete::Unix(Unix::Novo { nome: None }), tipo).map(|fd| fd as i64);
+    }
     if familia != AF_INET {
         return Err(EAFNOSUPPORT);
     }
@@ -159,6 +235,21 @@ pub fn socket(t: &mut Tabela, i: usize, familia: u64, tipo: u64, protocolo: u64)
 }
 
 pub fn connect(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize) -> Fim {
+    if familia(t, i, endereco, tamanho) == Ok(AF_UNIX) {
+        let r = ler_nome_unix(t, i, endereco, tamanho).and_then(|nome| {
+            com_soquete(t, i, fd, |s, _| match s {
+                Soquete::Unix(u @ Unix::Novo { .. }) => {
+                    let ponta = unix::conectar(&nome).ok_or(if nome.starts_with('@') { ECONNREFUSED } else { ENOENT })?;
+                    *u = Unix::Conectado { ponta, outro: Some(nome) };
+                    Ok(0)
+                }
+                Soquete::Unix(Unix::Conectado { .. }) => Err(EISCONN),
+                Soquete::Unix(_) => Err(EINVAL),
+                _ => Err(EAFNOSUPPORT),
+            })?
+        });
+        return Fim::Valor(r.unwrap_or_else(|e| -e));
+    }
     let destino = match ler_endereco(t, i, endereco, tamanho) {
         Ok(d) => d,
         Err(e) => return Fim::Valor(-e),
@@ -201,6 +292,7 @@ pub fn connect(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usiz
                 *remoto = destino.map(|d| d.0);
                 Ok(Some(0))
             }
+            Soquete::Unix(_) => Err(EAFNOSUPPORT),
         }
     });
     match r {
@@ -211,6 +303,17 @@ pub fn connect(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usiz
 }
 
 pub fn bind(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize) -> Result<i64, i64> {
+    if familia(t, i, endereco, tamanho)? == AF_UNIX {
+        let nome = ler_nome_unix(t, i, endereco, tamanho)?;
+        return com_soquete(t, i, fd, |s, _| match s {
+            Soquete::Unix(Unix::Novo { nome: atual @ None }) => {
+                *atual = Some(nome);
+                Ok(0)
+            }
+            Soquete::Unix(_) => Err(EINVAL),
+            _ => Err(EAFNOSUPPORT),
+        })?;
+    }
     let local = ler_endereco(t, i, endereco, tamanho)?;
     com_soquete(t, i, fd, |s, _| match s {
         Soquete::Udp { porta, .. } => {
@@ -236,12 +339,43 @@ pub fn listen(t: &mut Tabela, i: usize, fd: u64) -> Result<i64, i64> {
             Ok(0)
         }
         Soquete::Tcp { .. } => Err(EINVAL),
+        Soquete::Unix(u @ Unix::Novo { nome: Some(_) }) => {
+            let Unix::Novo { nome } = u else { unreachable!() };
+            let nome = nome.clone().unwrap();
+            let escuta = unix::escutar(&nome).map_err(|_| EADDRINUSE)?;
+            *u = Unix::Escutando { nome, escuta };
+            Ok(0)
+        }
+        Soquete::Unix(Unix::Escutando { .. }) => Ok(0),
+        Soquete::Unix(_) => Err(EINVAL),
         _ => Err(EOPNOTSUPP),
     })?
 }
 
 /// accept e accept4: um socket novo com a conexao que chegou.
 pub fn accept(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize, flags: u64) -> Fim {
+    let unix_r = com_soquete(t, i, fd, |s, nao_bloqueia| match s {
+        Soquete::Unix(Unix::Escutando { escuta, .. }) => Some(match escuta.borrow_mut().fila.pop_front() {
+            Some(p) => Ok(Some(p)),
+            None if nao_bloqueia => Err(EAGAIN),
+            None => Ok(None),
+        }),
+        Soquete::Unix(_) => Some(Err(EINVAL)),
+        _ => None,
+    });
+    match unix_r {
+        Err(e) | Ok(Some(Err(e))) => return Fim::Valor(-e),
+        Ok(Some(Ok(None))) => return Fim::Esperar("esperando uma conexão"),
+        Ok(Some(Ok(Some(ponta)))) => {
+            let soquete = Soquete::Unix(Unix::Conectado { ponta, outro: None });
+            let r = novo_soquete(t, i, soquete, flags).and_then(|novo| {
+                escrever_nome_unix(t, i, endereco, tamanho, None)?;
+                Ok(novo as i64)
+            });
+            return Fim::Valor(r.unwrap_or_else(|e| -e));
+        }
+        Ok(None) => {}
+    }
     let r = com_soquete(t, i, fd, |s, nao_bloqueia| match s {
         Soquete::Tcp { local: Some(porta), escutando: true, .. } => match rede::tcp_aceitar(*porta) {
             Some(cliente) => Ok(Some(cliente)),
@@ -273,6 +407,18 @@ pub fn accept(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize
 
 /// getsockname (`do_outro` = false) e getpeername (true).
 pub fn nome(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize, do_outro: bool) -> Result<i64, i64> {
+    let nome_unix = com_soquete(t, i, fd, |s, _| match s {
+        Soquete::Unix(Unix::Novo { nome }) if !do_outro => Some(Ok(nome.clone())),
+        Soquete::Unix(Unix::Escutando { nome, .. }) if !do_outro => Some(Ok(Some(nome.clone()))),
+        Soquete::Unix(Unix::Conectado { outro, .. }) if do_outro => Some(Ok(outro.clone())),
+        Soquete::Unix(Unix::Conectado { .. }) => Some(Ok(None)),
+        Soquete::Unix(_) => Some(Err(ENOTCONN)),
+        _ => None,
+    })?;
+    if let Some(n) = nome_unix {
+        escrever_nome_unix(t, i, endereco, tamanho, n?.as_deref())?;
+        return Ok(0);
+    }
     let valor = com_soquete(t, i, fd, |s, _| match s {
         Soquete::Tcp { remoto, .. } if do_outro => remoto.ok_or(ENOTCONN),
         Soquete::Udp { remoto, .. } if do_outro => remoto.ok_or(ENOTCONN),
@@ -290,9 +436,19 @@ pub fn getsockopt(t: &mut Tabela, i: usize, fd: u64, nivel: u64, opcao: u64, val
     const SOL_SOCKET: u64 = 1;
     const SO_TYPE: u64 = 3;
     const SO_ERROR: u64 = 4;
+    const SO_PEERCRED: u64 = 17;
+    if (nivel, opcao) == (SOL_SOCKET, SO_PEERCRED) && valor != 0 {
+        // struct ucred (pid, uid, gid): todo mundo e root, e o outro lado
+        // aparece como o proprio processo
+        let mut c = [0u8; 12];
+        c[..4].copy_from_slice(&t.processos[i].pid.to_le_bytes());
+        escrever_mem(t, i, valor, &c)?;
+        escrever_mem(t, i, tamanho, &12u32.to_le_bytes())?;
+        return Ok(0);
+    }
     let resposta = com_soquete(t, i, fd, |s, _| match (nivel, opcao) {
         (SOL_SOCKET, SO_TYPE) => match s {
-            Soquete::Tcp { .. } => SOCK_STREAM as i32,
+            Soquete::Tcp { .. } | Soquete::Unix(_) => SOCK_STREAM as i32,
             Soquete::Udp { .. } => SOCK_DGRAM as i32,
             Soquete::Icmp { bruto, .. } => if *bruto { SOCK_RAW as i32 } else { SOCK_DGRAM as i32 },
         },
@@ -323,13 +479,25 @@ pub fn shutdown(t: &mut Tabela, i: usize, fd: u64, como: u64) -> Result<i64, i64
             Ok(0)
         }
         Soquete::Tcp { .. } => Err(ENOTCONN),
+        Soquete::Unix(Unix::Conectado { ponta, .. }) => {
+            if como != 0 {
+                ponta.saida.borrow_mut().fechado = true;
+                unix::avisar();
+            }
+            Ok(0)
+        }
         _ => Ok(0),
     })?
 }
 
 /// Envia `dados` (para `destino`, se veio no sendto/sendmsg).
 pub fn enviar(t: &mut Tabela, i: usize, fd: u64, dados: &[u8], destino: Option<Endereco>) -> Fim {
-    let r = com_soquete(t, i, fd, |s, _| -> Result<i64, i64> {
+    enviar_com(t, i, fd, dados, destino, Vec::new())
+}
+
+/// Envia com descritores junto (SCM_RIGHTS; so AF_UNIX usa).
+fn enviar_com(t: &mut Tabela, i: usize, fd: u64, dados: &[u8], destino: Option<Endereco>, mut descritores: Vec<Aberto>) -> Fim {
+    let r = com_soquete(t, i, fd, |s, nao_bloqueia| -> Result<i64, i64> {
         match s {
             Soquete::Tcp { conexao: Some(id), .. } => match rede::tcp_estado(*id) {
                 EstadoTcp::Fechada(erro) => Err(erro.map_or(EPIPE, errno_rede)),
@@ -350,9 +518,25 @@ pub fn enviar(t: &mut Tabela, i: usize, fd: u64, dados: &[u8], destino: Option<E
                 rede::icmp_enviar(ip, dados).map_err(errno_rede)?;
                 Ok(dados.len() as i64)
             }
+            Soquete::Unix(Unix::Conectado { ponta, .. }) => {
+                let mut saida = ponta.saida.borrow_mut();
+                if saida.sem_leitor || saida.fechado {
+                    return Err(EPIPE);
+                }
+                if saida.dados.len() >= unix::TAMANHO_CANAL && !dados.is_empty() {
+                    return Err(if nao_bloqueia { EAGAIN } else { ESPERAR });
+                }
+                if !descritores.is_empty() {
+                    let pos = saida.fim();
+                    saida.fds.push_back((pos, core::mem::take(&mut descritores)));
+                }
+                Ok(saida.escrever(dados) as i64)
+            }
+            Soquete::Unix(_) => Err(ENOTCONN),
         }
     });
     match r {
+        Ok(Err(ESPERAR)) => Fim::Esperar("escrevendo num soquete"),
         Ok(Ok(n)) => Fim::Valor(n),
         Ok(Err(EPIPE)) => {
             let pid = t.processos[i].pid;
@@ -380,8 +564,8 @@ fn cabecalho_ip(origem: [u8; 4], destino: [u8; 4], tamanho: usize) -> [u8; 20] {
 }
 
 /// Recebe ate `maximo` bytes. Devolve os dados e de onde vieram.
-pub fn receber(t: &mut Tabela, i: usize, fd: u64, maximo: usize, flags: u64) -> Result<Result<(Vec<u8>, Option<Endereco>), i64>, &'static str> {
-    let r = com_soquete(t, i, fd, |s, nao_bloqueia| -> Result<Option<(Vec<u8>, Option<Endereco>)>, i64> {
+pub fn receber(t: &mut Tabela, i: usize, fd: u64, maximo: usize, flags: u64) -> Result<Result<Recebido, i64>, &'static str> {
+    let r = com_soquete(t, i, fd, |s, nao_bloqueia| -> Result<Option<Recebido>, i64> {
         let espera = !(nao_bloqueia || flags & MSG_DONTWAIT != 0);
         match s {
             Soquete::Tcp { conexao: Some(id), remoto, .. } => {
@@ -395,7 +579,7 @@ pub fn receber(t: &mut Tabela, i: usize, fd: u64, maximo: usize, flags: u64) -> 
                 if dados.is_empty() && !fim {
                     return if espera { Ok(None) } else { Err(EAGAIN) };
                 }
-                Ok(Some((dados, *remoto)))
+                Ok(Some((dados, *remoto, Vec::new())))
             }
             Soquete::Tcp { .. } => Err(ENOTCONN),
             Soquete::Udp { porta, .. } => {
@@ -405,7 +589,7 @@ pub fn receber(t: &mut Tabela, i: usize, fd: u64, maximo: usize, flags: u64) -> 
                 match rede::udp_tirar(porta.unwrap()) {
                     Some((ip, porta_origem, mut dados)) => {
                         dados.truncate(maximo);
-                        Ok(Some((dados, Some((ip, porta_origem)))))
+                        Ok(Some((dados, Some((ip, porta_origem)), Vec::new())))
                     }
                     None if espera => Ok(None),
                     None => Err(EAGAIN),
@@ -419,11 +603,26 @@ pub fn receber(t: &mut Tabela, i: usize, fd: u64, maximo: usize, flags: u64) -> 
                     }
                     dados.extend_from_slice(&mensagem);
                     dados.truncate(maximo);
-                    Ok(Some((dados, Some((ip, 0)))))
+                    Ok(Some((dados, Some((ip, 0)), Vec::new())))
                 }
                 None if espera => Ok(None),
                 None => Err(EAGAIN),
             },
+            Soquete::Unix(Unix::Conectado { ponta, .. }) => {
+                let mut e = ponta.entrada.borrow_mut();
+                if e.dados.is_empty() {
+                    if e.fechado {
+                        return Ok(Some((Vec::new(), None, Vec::new())));
+                    }
+                    return if espera { Ok(None) } else { Err(EAGAIN) };
+                }
+                if flags & MSG_PEEK != 0 {
+                    return Ok(Some((e.dados.iter().take(maximo).copied().collect(), None, Vec::new())));
+                }
+                let (dados, fds) = e.ler(maximo);
+                Ok(Some((dados, None, fds)))
+            }
+            Soquete::Unix(_) => Err(ENOTCONN),
         }
     });
     match r {
@@ -445,6 +644,9 @@ pub fn prontidao(s: &Soquete) -> (bool, bool, bool) {
         Soquete::Tcp { .. } => (false, false, true),
         Soquete::Udp { porta, .. } => (porta.is_some_and(rede::udp_legivel), true, false),
         Soquete::Icmp { .. } => (rede::icmp_legivel(), true, false),
+        Soquete::Unix(Unix::Conectado { ponta, .. }) => (ponta.legivel(), ponta.gravavel(), false),
+        Soquete::Unix(Unix::Escutando { escuta, .. }) => (!escuta.borrow().fila.is_empty(), false, false),
+        Soquete::Unix(Unix::Novo { .. }) => (false, false, false),
     }
 }
 
@@ -471,7 +673,7 @@ pub fn recvfrom(t: &mut Tabela, i: usize, fd: u64, buf: usize, tamanho: usize, f
     match receber(t, i, fd, tamanho.min(1 << 20), flags) {
         Err(motivo) => Fim::Esperar(motivo),
         Ok(Err(e)) => Fim::Valor(-e),
-        Ok(Ok((dados, origem))) => {
+        Ok(Ok((dados, origem, _))) => {
             let r = escrever_mem(t, i, buf, &dados).and_then(|_| match origem {
                 Some(o) => escrever_endereco(t, i, endereco, tamanho_endereco, o),
                 None => Ok(()),
@@ -484,8 +686,11 @@ pub fn recvfrom(t: &mut Tabela, i: usize, fd: u64, buf: usize, tamanho: usize, f
     }
 }
 
-/// struct msghdr: (nome, tamanho do nome, iov, quantos iov).
-fn ler_msghdr(t: &Tabela, i: usize, msg: usize) -> Result<(usize, usize, Vec<(usize, usize)>), i64> {
+/// struct msghdr: (nome, tamanho do nome, pedacos (iov), controle e o
+/// tamanho dele).
+type Msghdr = (usize, usize, Vec<(usize, usize)>, usize, usize);
+
+fn ler_msghdr(t: &Tabela, i: usize, msg: usize) -> Result<Msghdr, i64> {
     let b = ler_mem(t, i, msg, 56)?;
     let campo = |k: usize| u64::from_le_bytes(b[k..k + 8].try_into().unwrap()) as usize;
     let (nome, tamanho_nome, iov, quantos) = (campo(0), campo(8) & 0xFFFF_FFFF, campo(16), campo(24).min(1024));
@@ -498,27 +703,59 @@ fn ler_msghdr(t: &Tabela, i: usize, msg: usize) -> Result<(usize, usize, Vec<(us
             pedacos.push((base, n));
         }
     }
-    Ok((nome, tamanho_nome, pedacos))
+    Ok((nome, tamanho_nome, pedacos, campo(32), campo(40)))
+}
+
+/// Os descritores de um SCM_RIGHTS nos dados de controle do sendmsg.
+fn descritores_do_controle(t: &Tabela, i: usize, controle: usize, tamanho: usize) -> Result<Vec<Aberto>, i64> {
+    let mut abertos = Vec::new();
+    if controle == 0 || tamanho < 16 {
+        return Ok(abertos);
+    }
+    let b = ler_mem(t, i, controle, tamanho.min(4096))?;
+    let mut k = 0;
+    while k + 16 <= b.len() {
+        let len = u64::from_le_bytes(b[k..k + 8].try_into().unwrap()) as usize;
+        let nivel = i32::from_le_bytes(b[k + 8..k + 12].try_into().unwrap());
+        let tipo = i32::from_le_bytes(b[k + 12..k + 16].try_into().unwrap());
+        if len < 16 || k + len > b.len() {
+            break;
+        }
+        // SOL_SOCKET + SCM_RIGHTS: um int por descritor
+        if (nivel, tipo) == (1, 1) {
+            for f in b[k + 16..k + len].chunks_exact(4) {
+                let fd = i32::from_le_bytes(f.try_into().unwrap());
+                abertos.push(t.processos[i].linux.fd_aberto(fd as u64)?);
+            }
+        }
+        k += (len + 7) & !7;
+    }
+    Ok(abertos)
 }
 
 pub fn sendmsg(t: &mut Tabela, i: usize, fd: u64, msg: usize) -> Fim {
-    let r = (|| -> Result<(Vec<u8>, Option<Endereco>), i64> {
-        let (nome, tamanho_nome, pedacos) = ler_msghdr(t, i, msg)?;
+    let r = (|| -> Result<(Vec<u8>, Option<Endereco>, Vec<Aberto>), i64> {
+        let (nome, tamanho_nome, pedacos, controle, tamanho_controle) = ler_msghdr(t, i, msg)?;
         let mut dados = Vec::new();
         for (base, n) in pedacos {
             dados.extend(ler_mem(t, i, base, n.min(1 << 20))?);
         }
-        let destino = if nome != 0 { ler_endereco(t, i, nome, tamanho_nome)? } else { None };
-        Ok((dados, destino))
+        let destino = if nome != 0 && familia(t, i, nome, tamanho_nome)? != AF_UNIX {
+            ler_endereco(t, i, nome, tamanho_nome)?
+        } else {
+            None
+        };
+        let descritores = descritores_do_controle(t, i, controle, tamanho_controle)?;
+        Ok((dados, destino, descritores))
     })();
     match r {
-        Ok((dados, destino)) => enviar(t, i, fd, &dados, destino),
+        Ok((dados, destino, descritores)) => enviar_com(t, i, fd, &dados, destino, descritores),
         Err(e) => Fim::Valor(-e),
     }
 }
 
 pub fn recvmsg(t: &mut Tabela, i: usize, fd: u64, msg: usize, flags: u64) -> Fim {
-    let (nome, _, pedacos) = match ler_msghdr(t, i, msg) {
+    let (nome, _, pedacos, controle, tamanho_controle) = match ler_msghdr(t, i, msg) {
         Ok(m) => m,
         Err(e) => return Fim::Valor(-e),
     };
@@ -526,7 +763,7 @@ pub fn recvmsg(t: &mut Tabela, i: usize, fd: u64, msg: usize, flags: u64) -> Fim
     match receber(t, i, fd, cabe.min(1 << 20), flags) {
         Err(motivo) => Fim::Esperar(motivo),
         Ok(Err(e)) => Fim::Valor(-e),
-        Ok(Ok((dados, origem))) => {
+        Ok(Ok((dados, origem, descritores))) => {
             let r = (|| -> Result<(), i64> {
                 let mut feito = 0;
                 for (base, n) in pedacos {
@@ -538,8 +775,26 @@ pub fn recvmsg(t: &mut Tabela, i: usize, fd: u64, msg: usize, flags: u64) -> Fim
                     // msg_namelen fica no msghdr, logo depois do ponteiro
                     escrever_endereco(t, i, nome, msg + 8, o)?;
                 }
-                // sem dados de controle; msg_flags = 0
-                escrever_mem(t, i, msg + 40, &0u64.to_le_bytes())?;
+                // descritores que vieram (SCM_RIGHTS) viram descritores
+                // deste processo; msg_flags = 0
+                let mut usado = 0u64;
+                if !descritores.is_empty() && controle != 0 {
+                    const MSG_CMSG_CLOEXEC: u64 = 0x4000_0000;
+                    let mut cmsg = Vec::new();
+                    let len = 16 + 4 * descritores.len();
+                    cmsg.extend_from_slice(&(len as u64).to_le_bytes());
+                    cmsg.extend_from_slice(&1i32.to_le_bytes());
+                    cmsg.extend_from_slice(&1i32.to_le_bytes());
+                    for aberto in descritores {
+                        let novo = t.processos[i].linux.novo_descritor(aberto, flags & MSG_CMSG_CLOEXEC != 0)?;
+                        cmsg.extend_from_slice(&(novo as i32).to_le_bytes());
+                    }
+                    cmsg.resize((len + 7) & !7, 0);
+                    let n = cmsg.len().min(tamanho_controle);
+                    escrever_mem(t, i, controle, &cmsg[..n])?;
+                    usado = n as u64;
+                }
+                escrever_mem(t, i, msg + 40, &usado.to_le_bytes())?;
                 escrever_mem(t, i, msg + 48, &0u32.to_le_bytes())?;
                 Ok(())
             })();

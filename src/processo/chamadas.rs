@@ -131,6 +131,13 @@ impl Linux {
         self.fd(fd)
     }
 
+    /// Fecha o descritor (se estiver aberto).
+    pub fn fechar(&mut self, fd: u64) {
+        if let Some(lugar) = self.fds.get_mut(fd as usize) {
+            *lugar = None;
+        }
+    }
+
     /// Poe `aberto` no menor descritor livre.
     pub fn novo_descritor(&mut self, aberto: Aberto, fecha_no_exec: bool) -> Result<usize, i64> {
         self.novo_fd(aberto, fecha_no_exec, 0)
@@ -318,7 +325,7 @@ fn despachar(t: &mut Tabela, i: usize, numero: u64, a: [u64; 6]) -> Fim {
         293 => Err(ENOSYS), // rseq: a glibc vive sem
         // rede (soquetes.rs)
         198 => soquetes::socket(t, i, a[0], a[1], a[2]),
-        199 => Err(97), // socketpair: so AF_UNIX, que nao existe
+        199 => soquetes::socketpair(t, i, a[0], a[1], a[3] as usize),
         200 => soquetes::bind(t, i, a[0], a[1] as usize, a[2] as usize),
         201 => soquetes::listen(t, i, a[0]),
         202 => return soquetes::accept(t, i, a[0], a[1] as usize, a[2] as usize, 0),
