@@ -32,3 +32,32 @@ fn transformar_modulo() {
         println!("MOD {}\nDEPS {:?}", m.codigo, m.deps);
     }
 }
+
+#[test]
+fn velocidade_compilacao() {
+    use std::time::Instant;
+    let pasta = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/paginas/");
+    for nome in ["https___github_githubassets_com_assets_landing_pages_016ffb52746df72b_js", "https___github_githubassets_com_assets_primer_react_911369ee234690ef_js"] {
+        let Ok(f) = std::fs::read_to_string(format!("{pasta}{nome}")) else { continue };
+        let t = Instant::now();
+        let m = teste_web::web::js::modulo::transformar(&f, "https://x/", &[]).unwrap();
+        let t1 = t.elapsed().as_secs_f64() * 1000.0;
+        let t = Instant::now();
+        let toks = teste_web::web::js::parser::tokenizar(&m.codigo).unwrap();
+        let t2 = t.elapsed().as_secs_f64() * 1000.0;
+        let t = Instant::now();
+        let ast = teste_web::web::js::parser::analisar(&m.codigo).unwrap();
+        let t3 = t.elapsed().as_secs_f64() * 1000.0;
+        let t = Instant::now();
+        let p = teste_web::web::js::compilador::compilar_script(&ast, &m.codigo).unwrap();
+        let t4 = t.elapsed().as_secs_f64() * 1000.0;
+        println!("VEL {} KB: transformar {t1:.1} ms, tokens {t2:.1} ms ({} tokens), analisar(tokens+parse) {t3:.1} ms, compilar {t4:.1} ms", f.len() / 1024, toks.len());
+        drop(p);
+    }
+}
+
+#[test]
+fn tamanhos_ast() {
+    use teste_web::web::js::ast::*;
+    println!("TAM Expr {} Stmt {} Padrao {} Funcao {} Op {}", std::mem::size_of::<Expr>(), std::mem::size_of::<Stmt>(), std::mem::size_of::<Padrao>(), std::mem::size_of::<Funcao>(), std::mem::size_of::<teste_web::web::js::bytecode::Op>());
+}

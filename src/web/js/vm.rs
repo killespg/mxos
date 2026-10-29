@@ -129,6 +129,10 @@ pub struct Vm {
     /// Limite de passos (protege a box de laco infinito): 0 = sem.
     pub limite_passos: u64,
     pub ids: Ids,
+    /// Perfil das nativas (id -> chamadas, ms com o que rodou dentro);
+    /// ligado so para medir (precisa do RELOGIO).
+    pub perfil: Option<alloc::collections::BTreeMap<u16, (u64, f64)>>,
+    pub nomes_nativas: Vec<Rc<str>>,
 }
 
 /// Ids de nativas que a VM usa por dentro.
@@ -160,6 +164,8 @@ impl Vm {
             passos: 0,
             limite_passos: 0,
             ids: Ids::default(),
+            perfil: None,
+            nomes_nativas: Vec::new(),
         };
         super::embutidos::instalar(&mut vm);
         vm
@@ -212,6 +218,10 @@ impl Vm {
     /// Registra uma funcao nativa e devolve o objeto funcao.
     pub fn nativa(&mut self, nome: &str, f: FnNativa, aridade: u8) -> Valor {
         let id = self.registrar(f);
+        if self.nomes_nativas.len() <= id as usize {
+            self.nomes_nativas.resize(id as usize + 1, Rc::from(""));
+        }
+        self.nomes_nativas[id as usize] = Rc::from(nome);
         self.nativa_com(id, nome, aridade, Valor::Indef)
     }
 
@@ -862,7 +872,14 @@ impl Vm {
                 let (id, dado) = (*id, dado.clone());
                 let fun = self.nativas[id as usize];
                 self.nativas_ativas += 1;
+                let relogio = if self.perfil.is_some() { unsafe { super::embutidos::RELOGIO } } else { None };
+                let t0 = relogio.map(|f| f());
                 let res = fun(self, &Ctx { this, args, dado: &dado, novo: None });
+                if let (Some(f), Some(t0), Some(p)) = (relogio, t0, self.perfil.as_mut()) {
+                    let e = p.entry(id).or_insert((0, 0.0));
+                    e.0 += 1;
+                    e.1 += f() - t0;
+                }
                 self.nativas_ativas -= 1;
                 res
             }
@@ -918,10 +935,17 @@ impl Vm {
     }
 
     pub fn empurrar_quadro(&mut self, r: Ref, mut this: Valor, args: Vec<Valor>, novo_alvo: Valor, construindo: bool) -> R<()> {
-        let (proto, amb, this_lex) = match &self.heap.get(r).classe {
+        let (mut proto, amb, this_lex) = match &self.heap.get(r).classe {
             Classe::Funcao { proto, amb, this, .. } => (proto.clone(), amb.clone(), this.clone()),
             _ => return self.erro_tipo("não é função JS"),
         };
+        if proto.pendente.is_some() {
+            // primeira chamada: compila agora e guarda no objeto funcao
+            proto = self.compilar_pendente(&proto)?;
+            if let Classe::Funcao { proto: p, .. } = &mut self.heap.get_mut(r).classe {
+                *p = proto.clone();
+            }
+        }
         if self.quadros.len() > 4000 {
             return self.erro_faixa("pilha de chamadas estourou (recursão infinita?)");
         }
@@ -946,6 +970,22 @@ impl Vm {
             construindo,
         });
         Ok(())
+    }
+
+    fn compilar_pendente(&mut self, p: &Rc<Prototipo>) -> R<Rc<Prototipo>> {
+        if let Some(x) = p.pronto.get() {
+            return Ok(x.clone());
+        }
+        match super::compilador::compilar_pendente(p) {
+            Ok(x) => {
+                let _ = p.pronto.set(x.clone());
+                Ok(x)
+            }
+            Err(e) => {
+                let ps = self.p.erro_sintaxe;
+                Err(self.novo_erro(ps, &e.0))
+            }
+        }
     }
 
     /// new f(args)
@@ -1951,6 +1991,11 @@ impl Vm {
                     }
                     Op::Closure(i) => {
                         let filho = proto.filhos[*i as usize].clone();
+                        // ja compilada por outra closure do mesmo codigo?
+                        let filho = match filho.pronto.get() {
+                            Some(x) => x.clone(),
+                            None => filho,
+                        };
                         let amb = q!().amb.clone();
                         let (this, casa) = if filho.seta {
                             let casa = match &q!().funcao {

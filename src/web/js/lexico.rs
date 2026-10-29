@@ -32,6 +32,8 @@ pub struct Token {
     pub linha_antes: bool,
     pub pos: u32,
     pub linha: u32,
+    /// Fim do token no texto (byte depois do ultimo).
+    pub fim: u32,
 }
 
 const PALAVRAS: &[&str] = &[
@@ -60,6 +62,27 @@ pub struct Lexico<'a> {
     /// Profundidade de chaves dentro de cada ${ } de template aberto.
     templates: Vec<u32>,
     chaves: u32,
+    /// Nomes ja vistos (codigo minificado repete os mesmos: um Rc so).
+    nomes: Vec<Option<Rc<str>>>,
+    n_nomes: usize,
+}
+
+/// FNV-1a
+fn hash(b: &[u8]) -> u32 {
+    let mut h: u32 = 0x811C_9DC5;
+    for &x in b {
+        h = (h ^ x as u32).wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+/// A palavra reservada com este texto (o &'static do PALAVRAS).
+fn palavra(s: &str) -> Option<&'static str> {
+    let b = s.as_bytes();
+    if b.len() < 2 || b.len() > 10 || !b[0].is_ascii_lowercase() {
+        return None;
+    }
+    PALAVRAS.iter().find(|p| p.len() == b.len() && p.as_bytes()[0] == b[0] && **p == s).copied()
 }
 
 #[derive(Debug, Clone)]
@@ -78,7 +101,7 @@ fn parte_ident(c: char) -> bool {
 
 impl<'a> Lexico<'a> {
     pub fn novo(s: &'a str) -> Self {
-        Lexico { s, b: s.as_bytes(), i: 0, linha: 1, templates: Vec::new(), chaves: 0 }
+        Lexico { s, b: s.as_bytes(), i: 0, linha: 1, templates: Vec::new(), chaves: 0, nomes: alloc::vec![None; 1024], n_nomes: 0 }
     }
 
     fn espiar(&self, k: usize) -> u8 {
@@ -93,6 +116,22 @@ impl<'a> Lexico<'a> {
     fn pular(&mut self) -> Result<bool, ErroLexico> {
         let mut quebra = false;
         loop {
+            // caminho rapido: espaco ASCII
+            match self.espiar(0) {
+                b' ' | b'\t' => {
+                    self.i += 1;
+                    continue;
+                }
+                b'\n' => {
+                    quebra = true;
+                    self.linha += 1;
+                    self.i += 1;
+                    continue;
+                }
+                b'/' | b'<' | b'-' | b'\r' | b'\x0B' | b'\x0C' => {}
+                b if b < 0x80 => return Ok(quebra),
+                _ => {}
+            }
             let Some(c) = self.char_em() else { return Ok(quebra) };
             match c {
                 '\n' | '\r' | '\u{2028}' | '\u{2029}' => {
@@ -154,18 +193,92 @@ impl<'a> Lexico<'a> {
         let pos = self.i as u32;
         let linha = self.linha;
         let tok = self.ler(regex_ok)?;
-        Ok(Token { tok, linha_antes: quebra, pos, linha })
+        Ok(Token { tok, linha_antes: quebra, pos, linha, fim: self.i as u32 })
     }
 
     fn erro(&self, msg: &'static str) -> ErroLexico {
         ErroLexico { msg, linha: self.linha }
     }
 
+    /// O Rc unico deste nome.
+    fn internar(&mut self, s: &str) -> Rc<str> {
+        let mascara = self.nomes.len() - 1;
+        let mut k = hash(s.as_bytes()) as usize & mascara;
+        loop {
+            match &self.nomes[k] {
+                Some(n) if &**n == s => return n.clone(),
+                Some(_) => k = (k + 1) & mascara,
+                None => break,
+            }
+        }
+        let n: Rc<str> = Rc::from(s);
+        self.nomes[k] = Some(n.clone());
+        self.n_nomes += 1;
+        if self.n_nomes * 2 > self.nomes.len() {
+            // dobra a tabela
+            let dobro = self.nomes.len() * 2;
+            let velhos = core::mem::replace(&mut self.nomes, alloc::vec![None; dobro]);
+            let mascara = self.nomes.len() - 1;
+            for v in velhos.into_iter().flatten() {
+                let mut k = hash(v.as_bytes()) as usize & mascara;
+                while self.nomes[k].is_some() {
+                    k = (k + 1) & mascara;
+                }
+                self.nomes[k] = Some(v);
+            }
+        }
+        n
+    }
+
     fn ler(&mut self, regex_ok: bool) -> Result<Tok, ErroLexico> {
+        // caminho rapido: nomes ASCII
+        let b0 = self.espiar(0);
+        if b0.is_ascii_alphabetic() || b0 == b'_' || b0 == b'$' {
+            let ini = self.i;
+            let mut j = ini + 1;
+            while j < self.b.len() && (self.b[j].is_ascii_alphanumeric() || self.b[j] == b'_' || self.b[j] == b'$') {
+                j += 1;
+            }
+            if j >= self.b.len() || self.b[j] < 0x80 && self.b[j] != b'\\' {
+                self.i = j;
+                let s = &self.s[ini..j];
+                if let Some(p) = palavra(s) {
+                    return Ok(Tok::Palavra(p));
+                }
+                return Ok(Tok::Ident(self.internar(s)));
+            }
+        }
+        // pontuacao de um caractere (a mais comum)
+        match b0 {
+            b'(' | b')' | b'[' | b']' | b';' | b',' | b':' | b'~' | b'@' => {
+                self.i += 1;
+                return Ok(Tok::Pont(match b0 {
+                    b'(' => "(",
+                    b')' => ")",
+                    b'[' => "[",
+                    b']' => "]",
+                    b';' => ";",
+                    b',' => ",",
+                    b':' => ":",
+                    b'~' => "~",
+                    _ => "@",
+                }));
+            }
+            b'{' => {
+                self.i += 1;
+                self.chaves += 1;
+                return Ok(Tok::Pont("{"));
+            }
+            b'.' if self.espiar(1) != b'.' && !self.espiar(1).is_ascii_digit() => {
+                self.i += 1;
+                return Ok(Tok::Pont("."));
+            }
+            _ => {}
+        }
         let Some(c) = self.char_em() else { return Ok(Tok::Fim) };
         if inicio_ident(c) || c == '\\' {
             let nome = self.identificador()?;
-            if let Some(p) = PALAVRAS.iter().find(|p| **p == &*nome) {
+            if let Some(p) = palavra(&nome) {
                 return Ok(Tok::Palavra(p));
             }
             return Ok(Tok::Ident(nome));
@@ -195,7 +308,7 @@ impl<'a> Lexico<'a> {
             _ => {}
         }
         for p in PONTUACAO {
-            if self.s[self.i..].starts_with(p) {
+            if p.as_bytes()[0] == b0 && self.s[self.i..].starts_with(p) {
                 // "?." seguido de digito e o ternario
                 if *p == "?." && self.espiar(2).is_ascii_digit() {
                     continue;

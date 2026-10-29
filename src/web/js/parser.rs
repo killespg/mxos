@@ -25,11 +25,15 @@ pub struct Parser {
     em_gerador: bool,
     em_async: bool,
     sem_in: bool,
+    /// Profundidade de funcoes: corpos de funcoes dentro de funcoes sao
+    /// pulados (lidos so quando a funcao rodar).
+    prof_funcao: u32,
+    adiado: Option<(Rc<[Rc<str>]>, bool)>,
 }
 
 /// Quebra o texto em tokens decidindo se '/' e divisao ou regex pelo
 /// token anterior.
-pub(crate) fn tokenizar(fonte: &str) -> Result<Vec<Token>, ErroSintaxe> {
+pub fn tokenizar(fonte: &str) -> Result<Vec<Token>, ErroSintaxe> {
     let mut lx = Lexico::novo(fonte);
     let mut v: Vec<Token> = Vec::with_capacity(fonte.len() / 4);
     // para cada '(' aberto: veio depois de if/while/for/with? (entao o ')'
@@ -62,9 +66,33 @@ pub(crate) fn tokenizar(fonte: &str) -> Result<Vec<Token>, ErroSintaxe> {
     }
 }
 
+/// Le de novo uma funcao (compilacao preguicosa): o trecho [ini, fim) do
+/// texto. `tipo`: 0 = function, 1 = metodo (desde o '('), 2 = seta.
+pub fn analisar_funcao(fonte: &str, ini: u32, fim: u32, tipo: u8, assincrona: bool, geradora: bool, nome: Rc<str>) -> Result<Rc<Funcao>, ErroSintaxe> {
+    let trecho = fonte.get(ini as usize..fim as usize).ok_or(ErroSintaxe { msg: "trecho inválido".into(), linha: 0 })?;
+    let mut t = tokenizar(trecho)?;
+    for x in &mut t {
+        x.pos += ini;
+        x.fim += ini;
+    }
+    let mut p = Parser { t, i: 0, em_funcao: true, em_gerador: geradora, em_async: assincrona, sem_in: false, prof_funcao: 0, adiado: None };
+    match tipo {
+        0 => p.funcao(assincrona, true),
+        1 => p.metodo(if nome.is_empty() { None } else { Some(nome) }, assincrona, geradora),
+        _ => {
+            let ini_seta = p.t[0].pos;
+            let (params, resto) = if p.eh("(") { p.params()? } else { (alloc::vec![(Padrao::Ident(p.nome()?), None)], None) };
+            match p.seta(ini_seta, params, resto, assincrona)? {
+                Expr::Funcao(f) => Ok(f),
+                _ => p.erro("seta inválida"),
+            }
+        }
+    }
+}
+
 pub fn analisar(fonte: &str) -> Result<Vec<Stmt>, ErroSintaxe> {
     let t = tokenizar(fonte)?;
-    let mut p = Parser { t, i: 0, em_funcao: false, em_gerador: false, em_async: false, sem_in: false };
+    let mut p = Parser { t, i: 0, em_funcao: false, em_gerador: false, em_async: false, sem_in: false, prof_funcao: 0, adiado: None };
     let mut v = Vec::new();
     while !p.fim() {
         let antes = p.i;
@@ -513,7 +541,50 @@ impl Parser {
         Ok((v, resto))
     }
 
+    /// Corpo `{...}` de uma funcao aninhada: pula ate o '}' que fecha sem
+    /// montar AST, guardando os nomes usados (para a analise de capturas).
+    fn pular_corpo(&mut self) -> Result<(), ErroSintaxe> {
+        let estrito = matches!(self.tok_em(1), Tok::Texto(s) if &**s == "use strict");
+        let mut prof = 0i32;
+        let mut nomes: Vec<Rc<str>> = Vec::new();
+        let mut depois_ponto = false;
+        loop {
+            let Some(t) = self.t.get(self.i) else { return self.erro("bloco sem fim") };
+            match &t.tok {
+                Tok::Pont("{") => prof += 1,
+                Tok::Pont("}") => {
+                    prof -= 1;
+                    if prof == 0 {
+                        self.i += 1;
+                        break;
+                    }
+                }
+                Tok::Ident(n) if !depois_ponto => nomes.push(n.clone()),
+                Tok::Palavra(p) if !depois_ponto && contextual(p) => nomes.push(Rc::from(*p)),
+                Tok::Fim => return self.erro("bloco sem fim"),
+                _ => {}
+            }
+            depois_ponto = matches!(t.tok, Tok::Pont("." | "?."));
+            self.i += 1;
+        }
+        nomes.sort_unstable();
+        nomes.dedup();
+        self.adiado = Some((nomes.into(), estrito));
+        Ok(())
+    }
+
     fn corpo_funcao(&mut self, assincrona: bool, geradora: bool) -> Result<Vec<Stmt>, ErroSintaxe> {
+        if self.prof_funcao > 0 && self.eh("{") {
+            self.pular_corpo()?;
+            return Ok(Vec::new());
+        }
+        self.prof_funcao += 1;
+        let r = self.corpo_funcao_lido(assincrona, geradora);
+        self.prof_funcao -= 1;
+        r
+    }
+
+    fn corpo_funcao_lido(&mut self, assincrona: bool, geradora: bool) -> Result<Vec<Stmt>, ErroSintaxe> {
         let salvo = (self.em_funcao, self.em_gerador, self.em_async, self.sem_in);
         self.em_funcao = true;
         self.em_gerador = geradora;
@@ -536,8 +607,11 @@ impl Parser {
         let nome = if self.eh("(") && expressao { None } else { Some(self.nome()?) };
         let (params, resto) = self.params()?;
         let corpo = self.corpo_funcao(assincrona, geradora)?;
-        let fim = self.t[self.i.saturating_sub(1)].pos + 1;
-        let estrito = Self::eh_estrito(&corpo);
+        let fim = self.t[self.i.saturating_sub(1)].fim;
+        let (adiado, estrito) = match self.adiado.take() {
+            Some((n, e)) => (Some(n), e),
+            None => (None, Self::eh_estrito(&corpo)),
+        };
         Ok(Rc::new(Funcao {
             nome,
             params,
@@ -550,6 +624,7 @@ impl Parser {
             construtor_derivado: false,
             estrito,
             fonte: (ini, fim),
+            adiado,
         }))
     }
 
@@ -557,7 +632,8 @@ impl Parser {
         let ini = self.t[self.i].pos;
         let (params, resto) = self.params()?;
         let corpo = self.corpo_funcao(assincrona, geradora)?;
-        let fim = self.t[self.i.saturating_sub(1)].pos + 1;
+        let fim = self.t[self.i.saturating_sub(1)].fim;
+        let adiado = self.adiado.take().map(|x| x.0);
         Ok(Rc::new(Funcao {
             nome,
             params,
@@ -570,30 +646,39 @@ impl Parser {
             construtor_derivado: false,
             estrito: true,
             fonte: (ini, fim),
+            adiado,
         }))
     }
 
-    fn seta(&mut self, params: Vec<(Padrao, Option<Expr>)>, resto: Option<Padrao>, assincrona: bool) -> Result<Expr, ErroSintaxe> {
-        let ini = self.t[self.i].pos;
+    /// `ini`: onde comecam os parametros (para reler a funcao depois).
+    fn seta(&mut self, ini: u32, params: Vec<(Padrao, Option<Expr>)>, resto: Option<Padrao>, assincrona: bool) -> Result<Expr, ErroSintaxe> {
         self.esperar("=>")?;
-        let corpo = if self.eh("{") {
+        let corpo = if self.eh("{") && self.prof_funcao > 0 {
+            self.pular_corpo()?;
+            Vec::new()
+        } else if self.eh("{") {
             let salvo = (self.em_funcao, self.em_gerador, self.em_async, self.sem_in);
             self.em_funcao = true;
             self.em_gerador = false;
             self.em_async = assincrona;
             self.sem_in = false;
+            self.prof_funcao += 1;
             let r = self.bloco();
+            self.prof_funcao -= 1;
             (self.em_funcao, self.em_gerador, self.em_async, self.sem_in) = salvo;
             r?
         } else {
             let salvo = (self.em_gerador, self.em_async);
             self.em_gerador = false;
             self.em_async = assincrona;
+            self.prof_funcao += 1;
             let e = self.atribuicao();
+            self.prof_funcao -= 1;
             (self.em_gerador, self.em_async) = salvo;
             alloc::vec![Stmt::Retorno(Some(e?))]
         };
-        let fim = self.t[self.i.saturating_sub(1)].pos + 1;
+        let fim = self.t[self.i.saturating_sub(1)].fim;
+        let adiado = self.adiado.take().map(|x| x.0);
         Ok(Expr::Funcao(Rc::new(Funcao {
             nome: None,
             params,
@@ -606,6 +691,7 @@ impl Parser {
             construtor_derivado: false,
             estrito: false,
             fonte: (ini, fim),
+            adiado,
         })))
     }
 
@@ -744,25 +830,29 @@ impl Parser {
         if self.eh("async") && !self.t[self.i + 1].linha_antes {
             if matches!(self.tok_em(1), Tok::Ident(_)) && self.eh_em(2, "=>") {
                 self.avancar();
+                let ini = self.t[self.i].pos;
                 let n = self.nome()?;
-                return self.seta(alloc::vec![(Padrao::Ident(n), None)], None, true);
+                return self.seta(ini, alloc::vec![(Padrao::Ident(n), None)], None, true);
             }
             if self.eh_em(1, "(") {
                 let f = self.fecha_paren(self.i + 1);
                 if matches!(self.t.get(f + 1).map(|t| &t.tok), Some(Tok::Pont("=>"))) {
                     self.avancar();
+                    let ini = self.t[self.i].pos;
                     let (p, r) = self.params()?;
-                    return self.seta(p, r, true);
+                    return self.seta(ini, p, r, true);
                 }
             }
         }
         if self.eh_seta_adiante() {
+            let ini = self.t[self.i].pos;
             let (p, r) = self.params()?;
-            return self.seta(p, r, false);
+            return self.seta(ini, p, r, false);
         }
         if (matches!(self.tok(), Tok::Ident(_)) || matches!(self.tok(), Tok::Palavra(p) if contextual(p))) && self.eh_em(1, "=>") {
+            let ini = self.t[self.i].pos;
             let n = self.nome()?;
-            return self.seta(alloc::vec![(Padrao::Ident(n), None)], None, false);
+            return self.seta(ini, alloc::vec![(Padrao::Ident(n), None)], None, false);
         }
         if self.eh("yield") && self.em_gerador {
             self.avancar();

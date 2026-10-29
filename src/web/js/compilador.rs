@@ -14,7 +14,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::ast::*;
-use super::bytecode::{Bin, Op, Prototipo, Un};
+use super::bytecode::{Bin, Op, Pendente, Prototipo, Un};
 use super::valor::chave;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -273,6 +273,20 @@ impl Coletor {
     }
 
     fn funcao(&mut self, f: &Funcao) {
+        if let Some(nomes) = &f.adiado {
+            // corpo pulado pelo parser: os nomes usados la dentro
+            self.internos.extend(nomes.iter().cloned());
+            if f.seta && nomes.iter().any(|n| &**n == "arguments") {
+                self.usa_argumentos = true;
+            }
+            for (p, d) in &f.params {
+                self.padrao(p, true);
+                if let Some(d) = d {
+                    self.expr(d, true);
+                }
+            }
+            return;
+        }
         // tudo dentro de uma funcao interna conta como capturado
         let mut c = Coletor { internos: BTreeSet::new(), usa_argumentos: false, usa_this_super: false };
         for (p, d) in &f.params {
@@ -436,6 +450,35 @@ pub struct Compilador {
     linha: u32,
 }
 
+/// Compila agora uma funcao preguicosa (primeira chamada).
+pub fn compilar_pendente(p: &Prototipo) -> R<Rc<Prototipo>> {
+    let Some(pend) = &p.pendente else { return Err(ErroCompilacao("função já compilada".into())) };
+    let f = super::parser::analisar_funcao(&p.fonte, p.fonte_ini, p.fonte_fim, pend.tipo, p.assincrona, p.geradora, p.nome.clone())
+        .map_err(|e| ErroCompilacao(alloc::format!("{} (linha {})", e.msg, e.linha)))?;
+    let mut c = Compilador { fs: Vec::new(), fonte: p.fonte.clone(), linha: 0 };
+    for nivel in &pend.escopos {
+        let mut fc = FuncC::nova(false, false, false, false);
+        for esc in nivel {
+            fc.escopos.push(Escopo {
+                ligacoes: esc.iter().map(|(n, i)| Ligacao { nome: n.clone(), onde: Onde::Amb(*i) }).collect(),
+                tem_amb: true,
+                tamanho_amb: esc.len() as u16,
+            });
+        }
+        c.fs.push(fc);
+    }
+    let mut f = f;
+    {
+        let m = Rc::make_mut(&mut f);
+        m.metodo = p.metodo;
+        m.construtor_derivado = p.derivado;
+        if pend.tipo != 0 {
+            m.nome = if p.nome.is_empty() { None } else { Some(p.nome.clone()) };
+        }
+    }
+    c.compilar_funcao(&f, None)
+}
+
 /// Compila um script inteiro (topo = escopo global).
 pub fn compilar_script(stmts: &[Stmt], fonte: &str) -> R<Rc<Prototipo>> {
     let mut c = Compilador { fs: Vec::new(), fonte: Rc::from(fonte), linha: 0 };
@@ -487,7 +530,7 @@ pub fn compilar_script(stmts: &[Stmt], fonte: &str) -> R<Rc<Prototipo>> {
     c.emitir(Op::CarregaLocal(resultado));
     c.emitir(Op::Retorna);
     let f = c.fs.pop().unwrap_or_else(|| unreachable!());
-    Ok(Rc::new(f.prototipo(Rc::from("<script>"), 0, 0, false, false, false, false, false, c.fonte.clone())))
+    Ok(Rc::new(f.prototipo(Rc::from("<script>"), 0, 0, false, false, false, false, false, (c.fonte.clone(), 0, 0))))
 }
 
 impl FuncC {
@@ -512,7 +555,8 @@ impl FuncC {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prototipo(self, nome: Rc<str>, n_params: u16, amb: u16, metodo: bool, derivado: bool, classe: bool, estrito: bool, usa_args: bool, fonte: Rc<str>) -> Prototipo {
+    #[allow(clippy::too_many_arguments)]
+    fn prototipo(self, nome: Rc<str>, n_params: u16, amb: u16, metodo: bool, derivado: bool, classe: bool, estrito: bool, usa_args: bool, fonte: (Rc<str>, u32, u32)) -> Prototipo {
         Prototipo {
             nome,
             codigo: self.codigo,
@@ -529,8 +573,12 @@ impl FuncC {
             eh_classe: classe,
             estrito,
             usa_argumentos: usa_args,
-            fonte,
+            fonte: fonte.0,
+            fonte_ini: fonte.1,
+            fonte_fim: fonte.2,
             linhas: self.linhas,
+            pendente: None,
+            pronto: core::cell::OnceCell::new(),
         }
     }
 }
@@ -678,12 +726,36 @@ impl Compilador {
     // --------------------------------------------------- funcoes
 
     fn funcao_expr(&mut self, f: &Funcao) -> R<()> {
-        let p = self.compilar_funcao(f, None)?;
+        // corpo pulado pelo parser: compila na primeira chamada
+        let p = if f.adiado.is_some() { self.funcao_pendente(f) } else { self.compilar_funcao(f, None)? };
         let fc = self.f();
         fc.filhos.push(p);
         let i = (fc.filhos.len() - 1) as u32;
         self.emitir(Op::Closure(i));
         Ok(())
+    }
+
+    /// Funcao para compilar so quando for chamada: guarda o trecho do texto
+    /// e as variaveis capturadas visiveis daqui.
+    fn funcao_pendente(&mut self, f: &Funcao) -> Rc<Prototipo> {
+        let escopos = self
+            .fs
+            .iter()
+            .map(|fc| {
+                fc.escopos
+                    .iter()
+                    .filter(|e| e.tem_amb)
+                    .map(|e| e.ligacoes.iter().filter_map(|l| if let Onde::Amb(i) = l.onde { Some((l.nome.clone(), i)) } else { None }).collect())
+                    .collect()
+            })
+            .collect();
+        let tipo = if f.seta { 2 } else if f.metodo { 1 } else { 0 };
+        let mut fc = FuncC::nova(false, f.seta, f.geradora, f.assincrona);
+        fc.codigo.clear();
+        let nome = f.nome.clone().unwrap_or_else(|| Rc::from(""));
+        let mut p = fc.prototipo(nome, f.params.len() as u16, 0, f.metodo, f.construtor_derivado, false, f.estrito, false, (self.fonte.clone(), f.fonte.0, f.fonte.1));
+        p.pendente = Some(alloc::boxed::Box::new(Pendente { tipo, escopos }));
+        Rc::new(p)
     }
 
     /// Compila uma funcao (com `campos`: codigo extra no comeco, para
@@ -787,7 +859,7 @@ impl Compilador {
         self.emitir(Op::Retorna);
         let fc = self.fs.pop().unwrap_or_else(|| unreachable!());
         let nome = nome_forcado.or_else(|| f.nome.clone()).unwrap_or_else(|| Rc::from(""));
-        let fonte: Rc<str> = self.fonte.get(f.fonte.0 as usize..f.fonte.1 as usize).map(Rc::from).unwrap_or_else(|| Rc::from(""));
+        let fonte = (self.fonte.clone(), f.fonte.0, f.fonte.1);
         Ok(Rc::new(fc.prototipo(nome, n_params, amb, f.metodo, f.construtor_derivado, false, f.estrito, usa_args, fonte)))
     }
 
@@ -1444,8 +1516,19 @@ impl Compilador {
                     construtor_derivado: c.pai.is_some(),
                     estrito: true,
                     fonte: (0, 0),
+                    adiado: None,
                 })
             }
+        };
+        // construtor de classe aninhada: o parser pulou o corpo; le agora
+        let ctor = match &ctor.adiado {
+            Some(_) => {
+                let mut f = super::parser::analisar_funcao(&self.fonte, ctor.fonte.0, ctor.fonte.1, 1, ctor.assincrona, ctor.geradora, Rc::from("constructor"))
+                    .map_err(|e| ErroCompilacao(alloc::format!("{} (linha {})", e.msg, e.linha)))?;
+                Rc::make_mut(&mut f).construtor_derivado = ctor.construtor_derivado;
+                f
+            }
+            None => ctor,
         };
         let mut p = self.compilar_funcao(&ctor, Some(nome.clone()))?;
         if let Some(pp) = Rc::get_mut(&mut p) {
@@ -1553,6 +1636,7 @@ impl Compilador {
                 construtor_derivado: false,
                 estrito: true,
                 fonte: (0, 0),
+                adiado: None,
             };
             self.funcao_expr(&f)?;
             self.emitir(Op::DefineCampos);
@@ -1571,6 +1655,7 @@ impl Compilador {
                 construtor_derivado: false,
                 estrito: true,
                 fonte: (0, 0),
+                adiado: None,
             };
             self.emitir(Op::Troca); // [proto F]
             self.emitir(Op::Dup);

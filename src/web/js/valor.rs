@@ -297,12 +297,14 @@ impl Objeto {
                     return false;
                 }
                 self.props.remove(i);
-                if self.indice.is_some() {
-                    let mut ind = BTreeMap::new();
-                    for (n, (kk, _)) in self.props.iter().enumerate() {
-                        ind.insert(*kk, n as u32);
+                if let Some(ind) = &mut self.indice {
+                    // sem reconstruir: tira a chave e puxa os indices de depois
+                    ind.remove(&c);
+                    for v in ind.values_mut() {
+                        if *v as usize > i {
+                            *v -= 1;
+                        }
                     }
-                    self.indice = Some(ind);
                 }
                 true
             }

@@ -642,8 +642,8 @@ fn fun_bind(vm: &mut Vm, c: &Ctx) -> R<Valor> {
 fn fun_to_string(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     if let Valor::Obj(r) = c.this {
         if let Classe::Funcao { proto, .. } = &vm.heap.get(*r).classe {
-            if !proto.fonte.is_empty() {
-                return Ok(Valor::Texto(proto.fonte.clone()));
+            if proto.fonte_fim > proto.fonte_ini {
+                return Ok(Valor::texto(proto.texto_fonte()));
             }
             return Ok(Valor::texto(&format!("function {}() {{ [código] }}", proto.nome)));
         }
@@ -781,12 +781,46 @@ fn generico(vm: &mut Vm, c: &Ctx, f: super::vm::FnNativa) -> R<Valor> {
     Ok(if r == tmp { c.this.clone() } else { r })
 }
 
+fn eh_array_this(vm: &Vm, c: &Ctx) -> bool {
+    matches!(c.this, Valor::Obj(r) if matches!(vm.heap.get(*r).classe, Classe::Array(_)))
+}
+
+fn tamanho_generico(vm: &mut Vm, v: &Valor) -> R<usize> {
+    let len = vm.pegar(v, chave("length"))?;
+    let n = vm.para_numero(&len)?;
+    Ok(if n.is_finite() && n > 0.0 { n as usize } else { 0 })
+}
+
+/// push em array-like sem copiar tudo (dataLayer, jQuery...).
 fn arr_push(vm: &mut Vm, c: &Ctx) -> R<Valor> {
-    generico(vm, c, arr_push_)
+    if eh_array_this(vm, c) {
+        return arr_push_(vm, c);
+    }
+    let mut n = tamanho_generico(vm, c.this)?;
+    for a in c.args {
+        vm.por_idx(c.this, &Valor::Num(n as f64), a.clone())?;
+        n += 1;
+    }
+    vm.por(c.this, chave("length"), Valor::Num(n as f64))?;
+    Ok(Valor::Num(n as f64))
 }
 
 fn arr_pop(vm: &mut Vm, c: &Ctx) -> R<Valor> {
-    generico(vm, c, arr_pop_)
+    if eh_array_this(vm, c) {
+        return arr_pop_(vm, c);
+    }
+    let n = tamanho_generico(vm, c.this)?;
+    if n == 0 {
+        vm.por(c.this, chave("length"), Valor::Num(0.0))?;
+        return Ok(Valor::Indef);
+    }
+    let k = Valor::Num((n - 1) as f64);
+    let v = vm.pegar_idx(c.this, &k)?;
+    if let Valor::Obj(o) = c.this {
+        vm.heap.get_mut(*o).remover(chave(&alloc::format!("{}", n - 1)));
+    }
+    vm.por(c.this, chave("length"), Valor::Num((n - 1) as f64))?;
+    Ok(v)
 }
 
 fn arr_shift(vm: &mut Vm, c: &Ctx) -> R<Valor> {

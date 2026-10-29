@@ -47,6 +47,9 @@ pub struct Funcao {
     pub construtor_derivado: bool,
     pub estrito: bool,
     pub fonte: (u32, u32),
+    /// Corpo ainda nao lido (funcao aninhada: o parser so pulou ate o '}'):
+    /// os nomes usados la dentro, para a analise de capturas.
+    pub adiado: Option<Rc<[Rc<str>]>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

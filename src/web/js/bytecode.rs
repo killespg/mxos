@@ -176,7 +176,31 @@ pub struct Prototipo {
     pub eh_classe: bool,
     pub estrito: bool,
     pub usa_argumentos: bool,
+    /// O texto inteiro de onde a funcao veio e o trecho dela (toString e
+    /// compilacao preguicosa).
     pub fonte: Rc<str>,
-    /// Linha de cada op (para mensagens de erro).
+    pub fonte_ini: u32,
+    pub fonte_fim: u32,
+    /// Posicao no texto de cada op (para mensagens de erro).
     pub linhas: Vec<u32>,
+    /// Ainda nao compilada: o corpo e lido de novo do texto na primeira
+    /// chamada (a maioria das funcoes de um bundle nunca roda).
+    pub pendente: Option<alloc::boxed::Box<Pendente>>,
+    pub pronto: core::cell::OnceCell<Rc<Prototipo>>,
+}
+
+/// O que falta para compilar uma funcao preguicosa.
+#[derive(Debug)]
+pub struct Pendente {
+    /// 0 = function, 1 = metodo (comeca no '('), 2 = seta (comeca nos parametros)
+    pub tipo: u8,
+    /// Variaveis capturadas visiveis: por funcao de fora (de fora para
+    /// dentro), por escopo com ambiente, (nome, indice no ambiente).
+    pub escopos: Vec<Vec<Vec<(Rc<str>, u16)>>>,
+}
+
+impl Prototipo {
+    pub fn texto_fonte(&self) -> &str {
+        self.fonte.get(self.fonte_ini as usize..self.fonte_fim as usize).unwrap_or("")
+    }
 }
