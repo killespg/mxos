@@ -236,3 +236,29 @@ A rodada de acentos foi interrompida no meio. Compila limpo (QEMU e mxq), mas:
   sched_yield, kill, getpid/getppid/gettid, getuid... Desconhecida → -ENOSYS e anotada (`syscalls`).
 - Programa de teste embutido (assembly, `global_asm!`): ola, conta, falha, eco. Conferido: falha só mata o
   processo; dois `conta` dividem a CPU (~48% cada, captura da aba Processos); eco lê o teclado.
+
+### Passo 3 (feito): carregador de ELF e `executar`
+
+- `src/processo/elf.rs`: ELF64 AArch64, ET_EXEC estático e ET_DYN sem PT_INTERP (PIE estático, carregado em
+  0x400000). Páginas com a soma das permissões dos segmentos que passam por elas; BSS vem zerado. Pilha
+  inicial do Linux: argc, argv, envp, auxv (PHDR, PHENT, PHNUM, PAGESZ, ENTRY, RANDOM, HWCAP calculado dos
+  registradores ID, PLATFORM, EXECFN...). Programa dinâmico é recusado com mensagem clara.
+- Shell: `executar /caminho args... [&]` (sem "/" procura em /bin; aspas juntam argumentos).
+- `ferramentas/ola/`: programa de Linux em Rust + musl, estático, ligado com o `rust-lld` (sem gcc no PC):
+  `cd ferramentas/ola && cargo build --release`; o binário vai para `ferramentas/binarios/ola` e o
+  `criar_disco.py` põe tudo de `ferramentas/binarios/` em `/bin`.
+- Conferido: `executar /bin/ola um "dois três"` mostra argumentos, ambiente, `Instant` (clock_gettime), lê
+  `/LEIAME.TXT`, grava `/documentos/do_linux.txt`, lê o teclado com acento (`ola ler`) e sai com código 3
+  (`ola erro`). Nenhuma chamada faltando (`syscalls`).
+
+### Passo 4 (em andamento): ABI do Linux
+
+- `chamadas.rs` reescrito com os números do Linux aarch64: arquivos e pastas do FAT32 (`arquivos.rs`: lido
+  inteiro no open, gravado no último close/fsync), /dev/null, /dev/zero, /dev/urandom, /dev/tty, tubos,
+  dup/dup3/fcntl, ioctl de terminal (TCGETS/TCSETS com ICANON/ECHO/ISIG, TIOCGWINSZ, TIOCGPGRP/TIOCSPGRP),
+  ppoll, brk, mmap (anônimo e de arquivo), munmap, mprotect, clone (fork; CLONE_VFORK para o pai),
+  execve (com `#!`), wait4, kill com grupos, uname ("Linux 6.1.0-mxos"), prlimit64, getrandom, sysinfo,
+  statfs, clock_gettime (RTC PL031 para a hora de parede)...
+- Chamada que espera (teclado, tubo, filho) é repetida a cada volta do laço; dormir só acorda na hora.
+- Terminal: termios de verdade (TCGETS devolve o que o programa pôs), ICRNL, modo cru, Ctrl+C para o grupo
+  do terminal (quem tem tratador recebe o ^C como tecla, para o shell do BusyBox).

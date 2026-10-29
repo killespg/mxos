@@ -1,0 +1,11 @@
+[package]
+name = "ola"
+version = "0.1.0"
+edition = "2024"
+description = "Programa de Linux aarch64 (musl, estatico) para testar o MXOS"
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true

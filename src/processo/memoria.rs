@@ -265,6 +265,9 @@ impl Espaco {
             if novo.mapear(endereco, permissao).is_ok() {
                 if let Some(copia) = novo.paginas.get_mut(&numero) {
                     copia.quadro.0.copy_from_slice(&pagina.quadro.0);
+                    if matches!(permissao, Permissao::Codigo | Permissao::Tudo) {
+                        mmu::sincronizar_codigo(copia.quadro.0.as_ptr() as usize, PAGINA);
+                    }
                 }
             }
         }

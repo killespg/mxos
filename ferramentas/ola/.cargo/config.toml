@@ -1,0 +1,10 @@
+# Programa de Linux aarch64 estatico, ligado pelo rust-lld (sem gcc no PC).
+# O config.toml do kernel (dois niveis acima) mandaria compilar para
+# aarch64-unknown-none com o linker.ld dele: aqui tudo isso e trocado.
+[build]
+target = "aarch64-unknown-linux-musl"
+target-dir = "../../target/ola"
+
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-C", "linker-flavor=ld.lld", "-C", "target-feature=+crt-static", "-C", "link-self-contained=yes"]

@@ -15,11 +15,17 @@
 //! Um processo que erra (acesso invalido, instrucao desconhecida) morre
 //! sozinho, com uma mensagem no terminal; o kernel continua.
 //!
-//! Chamada que precisa esperar (ler do teclado, dormir, esperar um filho)
-//! volta o PC para o SVC e marca o processo como esperando: quando a
-//! condicao muda, ele roda de novo e repete a chamada.
+//! Chamada que precisa esperar (ler do teclado ou de um tubo, esperar um
+//! filho) volta o PC para o SVC e marca o processo como esperando: a cada
+//! volta do laco ele roda de novo e repete a chamada, ate ela andar. Quem
+//! dorme (nanosleep) so volta quando passa a hora.
+//!
+//! Os programas sao de Linux aarch64 (chamadas.rs, elf.rs): estaticos,
+//! lidos do disco FAT32 pelo comando "executar".
 
+pub mod arquivos;
 pub mod chamadas;
+pub mod elf;
 pub mod memoria;
 
 use alloc::boxed::Box;
@@ -30,21 +36,23 @@ use alloc::vec::Vec;
 use core::arch::global_asm;
 use core::cell::UnsafeCell;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::{cpu, mmu, timer};
+use crate::{armazenamento, cpu, mmu, timer};
 use memoria::{Espaco, PAGINA, Permissao};
 
 /// Onde o programa de teste embutido e carregado.
 const BASE_TESTE: usize = 0x40_0000;
 /// Pilha dos programas: o topo fica no fim da area do programa.
 pub const TOPO_PILHA: usize = memoria::FIM_USUARIO - PAGINA;
-pub const TAMANHO_PILHA: usize = 256 * 1024;
+pub const TAMANHO_PILHA: usize = 1024 * 1024;
 /// Saida guardada enquanto ninguem le (o terminal fechado, por exemplo).
 const MAX_SAIDA: usize = 64 * 1024;
 const MAX_PROCESSOS: usize = 64;
 /// ASIDs de 8 bits; o 0 e do kernel.
 const MAX_ASID: u16 = 255;
+/// Ambiente dos programas que o shell do MXOS roda.
+const AMBIENTE: [&str; 5] = ["PATH=/bin:/", "HOME=/", "TERM=vt100", "USER=root", "PS1=\\w # "];
 
 // ---------------------------------------------------------------------
 // Contexto (o mesmo layout que o vetores.s usa)
@@ -91,7 +99,7 @@ impl Contexto {
         c
     }
 
-    #[allow(dead_code)] // o fork (clone) do passo 4 usa
+    /// Copia para um filho (fork).
     pub fn copia(&self) -> Box<Contexto> {
         let mut c: Box<Contexto> = unsafe { Box::new_zeroed().assume_init() };
         c.x = self.x;
@@ -114,11 +122,11 @@ pub enum Estado {
     Pronto,
     /// Dorme ate o contador chegar neste valor.
     Dormindo(u64),
-    /// Esperando o terminal mandar uma linha (ou uma tecla).
-    Lendo,
-    /// Esperando um filho terminar (wait4).
-    EsperandoFilho,
-    /// Ja terminou, com este codigo; espera o pai ler (wait4).
+    /// Uma chamada que espera algo: e repetida a cada volta do laco.
+    Esperando(&'static str),
+    /// Parado num vfork ate o filho trocar de programa ou sair.
+    Vfork,
+    /// Ja terminou (status no formato do wait4); espera o pai ler.
     Terminado(i32),
 }
 
@@ -127,11 +135,16 @@ impl Estado {
         match self {
             Estado::Pronto => "rodando",
             Estado::Dormindo(_) => "dormindo",
-            Estado::Lendo => "lendo o teclado",
-            Estado::EsperandoFilho => "esperando filho",
+            Estado::Esperando(motivo) => motivo,
+            Estado::Vfork => "esperando o filho",
             Estado::Terminado(_) => "terminado",
         }
     }
+}
+
+/// Status do wait4 -> codigo que o shell mostra (128 + sinal se morreu).
+pub fn codigo_de_saida(status: i32) -> i32 {
+    if status & 0x7F == 0 { status >> 8 & 0xFF } else { 128 + (status & 0x7F) }
 }
 
 pub struct Processo {
@@ -162,21 +175,85 @@ pub struct Info {
 // ---------------------------------------------------------------------
 // Terminal dos processos (stdin)
 
+// Bits do termios (c_iflag e c_lflag).
+const ICRNL: u32 = 0o400;
+const ISIG: u32 = 0o1;
+const ICANON: u32 = 0o2;
+const ECHO: u32 = 0o10;
+
 /// Disciplina de linha do terminal: no modo canonico (o padrao) junta a
-/// linha com eco e Backspace e so entrega no Enter; no modo cru (um
-/// programa pediu pelo ioctl) cada tecla vai direto.
+/// linha com eco e Backspace e so entrega no Enter; no modo cru (o
+/// programa tirou o ICANON pelo ioctl) cada tecla vai direto.
 pub struct Tty {
     linha: Vec<u8>,
     pub prontos: VecDeque<u8>,
     pub canonico: bool,
     pub eco: bool,
+    pub sinais: bool,
+    pub cr_vira_nl: bool,
     /// Ctrl+D numa linha vazia: o proximo read devolve 0.
     pub fim: bool,
+    /// O struct termios como o programa deixou (TCGETS devolve igual).
+    pub termios: [u8; 36],
+    /// Grupo de processos que recebe o teclado (e o Ctrl+C).
+    pub grupo: u32,
 }
+
+/// termios padrao: ICRNL|IXON, OPOST|ONLCR, B38400|CS8|CREAD,
+/// ISIG|ICANON|ECHO|ECHOE|ECHOK|IEXTEN e os caracteres de controle.
+const TERMIOS_PADRAO: [u8; 36] = {
+    let mut t = [0u8; 36];
+    let campos: [u32; 4] = [0o2400, 0o5, 0o277, 0o105073];
+    let mut k = 0;
+    while k < 4 {
+        let b = campos[k].to_le_bytes();
+        t[k * 4] = b[0];
+        t[k * 4 + 1] = b[1];
+        t[k * 4 + 2] = b[2];
+        t[k * 4 + 3] = b[3];
+        k += 1;
+    }
+    // c_line (16) e c_cc[19] a partir de 17: INTR QUIT ERASE KILL EOF TIME MIN
+    let cc: [u8; 7] = [3, 0x1C, 0x7F, 0x15, 4, 0, 1];
+    let mut j = 0;
+    while j < 7 {
+        t[17 + j] = cc[j];
+        j += 1;
+    }
+    t
+};
 
 impl Tty {
     const fn novo() -> Tty {
-        Tty { linha: Vec::new(), prontos: VecDeque::new(), canonico: true, eco: true, fim: false }
+        Tty {
+            linha: Vec::new(),
+            prontos: VecDeque::new(),
+            canonico: true,
+            eco: true,
+            sinais: true,
+            cr_vira_nl: true,
+            fim: false,
+            termios: TERMIOS_PADRAO,
+            grupo: 0,
+        }
+    }
+
+    /// TCSETS: guarda o termios e liga ou desliga o que o MXOS sabe fazer.
+    pub fn definir_termios(&mut self, novo: &[u8]) {
+        let n = novo.len().min(36);
+        self.termios[..n].copy_from_slice(&novo[..n]);
+        let campo = |k: usize| u32::from_le_bytes([self.termios[k], self.termios[k + 1], self.termios[k + 2], self.termios[k + 3]]);
+        let (iflag, lflag) = (campo(0), campo(12));
+        self.cr_vira_nl = iflag & ICRNL != 0;
+        self.sinais = lflag & ISIG != 0;
+        self.eco = lflag & ECHO != 0;
+        let canonico = lflag & ICANON != 0;
+        if self.canonico && !canonico {
+            // o que estava sendo digitado vai junto
+            let linha: Vec<u8> = self.linha.drain(..).collect();
+            self.prontos.extend(linha);
+        }
+        self.canonico = canonico;
     }
 }
 
@@ -190,9 +267,9 @@ pub struct Tabela {
     vez: usize,
     saida: VecDeque<u8>,
     pub tty: Tty,
-    /// Processo que recebe o teclado do terminal (o shell espera por ele).
+    /// Processo que o shell do MXOS espera (o prompt volta quando ele sai).
     primeiro_plano: Option<u32>,
-    /// Processos do shell que ja terminaram: (pid, codigo).
+    /// Processos do shell que ja terminaram: (pid, status do wait4).
     terminados: Vec<(u32, i32)>,
     /// Chamadas de sistema que ainda nao existem: numero -> vezes.
     pub desconhecidas: BTreeMap<u64, u32>,
@@ -227,6 +304,42 @@ fn com<R>(acao: impl FnOnce(&mut Tabela) -> R) -> R {
     resultado
 }
 
+/// Segundos desde 1970 quando o contador estava em 0 (RTC lido uma vez).
+static RTC_NO_BOOT: AtomicU64 = AtomicU64::new(0);
+
+pub fn rtc_no_boot() -> u64 {
+    if RTC_NO_BOOT.load(Ordering::Relaxed) == 0 {
+        let desde_o_boot = cpu::contador() / cpu::frequencia_timer().max(1);
+        RTC_NO_BOOT.store(chamadas::segundos_do_rtc().saturating_sub(desde_o_boot), Ordering::Relaxed);
+    }
+    RTC_NO_BOOT.load(Ordering::Relaxed)
+}
+
+/// Libera o que o programa precisa ler em EL0: CTR_EL0 (tamanho da linha
+/// de cache), DC ZVA, limpeza de cache para codigo novo (UCT, DZE, UCI no
+/// SCTLR) e o contador virtual (CNTKCTL_EL1.EL0VCTEN). Uma vez so.
+fn liberar_registradores_el0() {
+    static FEITO: AtomicBool = AtomicBool::new(false);
+    if FEITO.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    unsafe {
+        core::arch::asm!(
+            "mrs {t}, sctlr_el1",
+            "orr {t}, {t}, #(1 << 14)",
+            "orr {t}, {t}, #(1 << 15)",
+            "orr {t}, {t}, #(1 << 26)",
+            "msr sctlr_el1, {t}",
+            "mrs {t}, cntkctl_el1",
+            "orr {t}, {t}, #2",
+            "msr cntkctl_el1, {t}",
+            "isb",
+            t = out(reg) _,
+            options(nostack)
+        );
+    }
+}
+
 impl Tabela {
     /// O que os processos escrevem no terminal.
     pub fn escrever(&mut self, dados: &[u8]) {
@@ -240,34 +353,34 @@ impl Tabela {
         self.processos.iter().position(|p| p.pid == pid)
     }
 
-    /// Um ASID que nenhum processo vivo usa.
-    fn asid_livre(&self) -> Option<u16> {
+    /// Um ASID livre para um processo novo (None: processos demais).
+    pub fn asid_para_novo(&self) -> Option<u16> {
+        if self.processos.len() >= MAX_PROCESSOS {
+            return None;
+        }
         (1..=MAX_ASID).find(|&a| self.processos.iter().all(|p| p.espaco.asid != a))
     }
 
-    /// Poe um processo novo na tabela. Devolve o pid.
+    /// Poe um processo novo na tabela, com o terminal em 0, 1 e 2.
+    /// Devolve o pid.
     pub fn acrescentar(&mut self, pai: u32, nome: String, contexto: Box<Contexto>, espaco: Espaco) -> u32 {
         let pid = self.proximo_pid;
         self.proximo_pid += 1;
-        let linux = chamadas::Linux::novo();
+        let mut linux = chamadas::Linux::com_terminal();
+        linux.grupo = pid;
         let p = Processo { pid, pai, nome, estado: Estado::Pronto, contexto, espaco, tempo_cpu: 0, linux };
         self.processos.push(Box::new(p));
         pid
     }
 
-    /// Espaco vazio para um processo novo (None: processos demais).
-    pub fn novo_espaco(&self) -> Option<Espaco> {
-        if self.processos.len() >= MAX_PROCESSOS {
-            return None;
-        }
-        self.asid_livre().map(Espaco::novo)
-    }
-
-    /// O processo `i` terminou com `codigo`: avisa o pai, entrega os filhos
-    /// ao kernel e devolve a memoria.
-    pub fn terminar(&mut self, i: usize, codigo: i32) {
+    /// O processo `i` terminou com `status` (formato do wait4): avisa o
+    /// pai, entrega os filhos ao kernel e devolve a memoria.
+    pub fn terminar(&mut self, i: usize, status: i32) {
         let pid = self.processos[i].pid;
         let pai = self.processos[i].pai;
+        if let Some(pai_vfork) = self.processos[i].linux.pai_vfork.take() {
+            self.acordar_vfork(pai_vfork);
+        }
         for filho in self.processos.iter_mut().filter(|p| p.pai == pid) {
             filho.pai = 0;
         }
@@ -276,42 +389,65 @@ impl Tabela {
             // o terminal volta ao normal para o shell
             self.tty = Tty::novo();
         }
+        // filhos que ja tinham terminado e ninguem vai esperar: somem
+        self.processos.retain(|p| !(p.pai == 0 && matches!(p.estado, Estado::Terminado(_)) && p.pid != pid));
+        let i = self.indice(pid).unwrap_or(i);
         if pai == 0 {
             // ninguem vai fazer wait4: sai da tabela ja
-            self.terminados.push((pid, codigo));
+            self.terminados.push((pid, status));
             self.processos.remove(i);
             return;
         }
         let p = &mut self.processos[i];
-        p.estado = Estado::Terminado(codigo);
-        // a memoria vai embora logo; so fica o registro para o pai
+        p.estado = Estado::Terminado(status);
+        // a memoria e os arquivos vao embora logo; so fica o registro para o pai
         p.espaco = Espaco::novo(p.espaco.asid);
         p.linux = chamadas::Linux::novo();
-        if let Some(j) = self.indice(pai) {
-            if self.processos[j].estado == Estado::EsperandoFilho {
+    }
+
+    pub fn acordar_vfork(&mut self, pid: u32) {
+        if let Some(j) = self.indice(pid) {
+            if self.processos[j].estado == Estado::Vfork {
                 self.processos[j].estado = Estado::Pronto;
             }
         }
     }
 
-    /// Mata um processo por um sinal (codigo 128 + sinal, como no shell).
-    pub fn matar(&mut self, pid: u32, sinal: i32) -> bool {
+    /// Manda um sinal: o padrao da maioria e terminar; os que o programa
+    /// trata ou ignora (e os que so param ou avisam) nao fazem nada aqui.
+    /// false se o processo nao existe.
+    pub fn sinal(&mut self, pid: u32, sinal: usize) -> bool {
         let Some(i) = self.indice(pid) else { return false };
         if matches!(self.processos[i].estado, Estado::Terminado(_)) {
             return false;
         }
-        self.terminar(i, 128 + sinal);
+        let tratador = self.processos[i].linux.sinais.get(sinal).copied().unwrap_or(0);
+        let termina = match sinal {
+            0 => false,
+            9 => true,
+            // SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGWINCH
+            17..=23 | 28 => false,
+            _ => tratador == 0,
+        };
+        if termina {
+            self.terminar(i, sinal as i32);
+        }
         true
     }
 
-    /// Acorda quem dorme e ja passou da hora, e quem le e ja tem entrada.
-    fn acordar(&mut self) {
+    /// Mata um processo pelo pid (SIGKILL).
+    pub fn matar(&mut self, pid: u32) -> bool {
+        self.sinal(pid, 9)
+    }
+
+    /// Acorda quem dorme e ja passou da hora. Com `tentar`, quem espera
+    /// tambem fica pronto para repetir a chamada uma vez.
+    fn acordar(&mut self, tentar: bool) {
         let agora = cpu::contador();
-        let tem_entrada = !self.tty.prontos.is_empty() || self.tty.fim;
         for p in self.processos.iter_mut() {
             match p.estado {
                 Estado::Dormindo(alvo) if agora >= alvo => p.estado = Estado::Pronto,
-                Estado::Lendo if tem_entrada => p.estado = Estado::Pronto,
+                Estado::Esperando(_) if tentar => p.estado = Estado::Pronto,
                 _ => {}
             }
         }
@@ -344,16 +480,16 @@ pub fn rodar() -> bool {
     com(|t| {
         let tique = timer::tiques();
         let mut novidade = false;
-        t.acordar();
+        t.acordar(true);
         while let Some(i) = t.proximo_pronto() {
-            let motivo = executar(&mut t.processos[i]);
+            let motivo = fatia(&mut t.processos[i]);
             if motivo == SINCRONA {
                 novidade |= tratar_excecao(t, i);
             } else if motivo != IRQ {
                 // FIQ ou SError vindos do programa: nao deviam acontecer
                 let pid = t.processos[i].pid;
                 let _ = writeln!(Saida(t), "\n[processo {pid}: erro assíncrono da CPU]");
-                t.terminar(i, 128 + 7);
+                t.terminar(i, 7);
                 novidade = true;
             }
             if timer::tiques() != tique {
@@ -369,13 +505,13 @@ pub fn rodar() -> bool {
 /// Algum processo quer a CPU agora (o laco principal nao deve dormir).
 pub fn tem_prontos() -> bool {
     com(|t| {
-        t.acordar();
+        t.acordar(false);
         t.processos.iter().any(|p| p.estado == Estado::Pronto)
     })
 }
 
 /// Roda o processo ate ele voltar para o kernel. Devolve o motivo.
-fn executar(p: &mut Processo) -> u64 {
+fn fatia(p: &mut Processo) -> u64 {
     let mut kernel = ContextoKernel { x: [0; 12], sp: 0, d: [0; 8], fpcr: 0 };
     cpu::desligar_interrupcoes();
     mmu::usar_espaco(p.espaco.raiz(), p.espaco.asid);
@@ -393,8 +529,14 @@ fn executar(p: &mut Processo) -> u64 {
 fn tratar_excecao(t: &mut Tabela, i: usize) -> bool {
     let esr = t.processos[i].contexto.esr;
     let classe = esr >> 26 & 0x3F;
-    if classe == 0x15 {
-        return chamadas::atender(t, i);
+    match classe {
+        0x15 => return chamadas::atender(t, i),
+        // WFI/WFE em EL0: so um "dar a vez"
+        0x01 => {
+            t.processos[i].contexto.pc += 4;
+            return false;
+        }
+        _ => {}
     }
     let p = &t.processos[i];
     let (pid, nome, pc, far) = (p.pid, p.nome.clone(), p.contexto.pc, p.contexto.far);
@@ -407,13 +549,14 @@ fn tratar_excecao(t: &mut Tabela, i: usize) -> bool {
         0x22 => String::from("PC desalinhado"),
         0x26 => String::from("pilha desalinhada"),
         0x00 => String::from("instrução desconhecida"),
+        0x18 => String::from("acesso a registrador do sistema proibido"),
         0x3C => String::from("ponto de parada (brk)"),
         _ => format!("exceção da classe 0x{classe:02x}"),
     };
     let _ = writeln!(Saida(t), "\n[processo {pid} ({nome}) morreu: {motivo}, no PC 0x{pc:x}]");
     // SIGSEGV (11) ou SIGILL (4), como o shell do Linux mostraria
     let sinal = if matches!(classe, 0x24 | 0x20) { 11 } else { 4 };
-    t.terminar(i, 128 + sinal);
+    t.terminar(i, sinal);
     true
 }
 
@@ -439,56 +582,76 @@ pub fn tirar_saida() -> Vec<u8> {
 pub fn terminou(pid: u32) -> Option<i32> {
     com(|t| {
         let i = t.terminados.iter().position(|&(p, _)| p == pid)?;
-        Some(t.terminados.remove(i).1)
+        Some(codigo_de_saida(t.terminados.remove(i).1))
     })
 }
 
-/// Uma tecla do terminal para o processo em primeiro plano.
+/// Uma tecla do terminal para os processos (o shell do MXOS so manda
+/// enquanto espera um processo em primeiro plano).
 pub fn tecla(byte: u8) {
     com(|t| {
-        let Some(pid) = t.primeiro_plano else { return };
-        match byte {
-            // Ctrl+C: SIGINT
-            3 => {
+        let tty = &mut t.tty;
+        let byte = if byte == b'\r' && tty.cr_vira_nl { b'\n' } else { byte };
+        if byte == 3 && tty.sinais {
+            // Ctrl+C: SIGINT para o grupo do terminal. Quem tem tratador
+            // (um shell) nao morre; ele recebe o ^C como tecla.
+            tty.linha.clear();
+            let grupo = tty.grupo;
+            let alvos: Vec<u32> = t.processos.iter().filter(|p| p.linux.grupo == grupo).map(|p| p.pid).collect();
+            let mut alguem_morreu = false;
+            for pid in alvos {
+                let antes = t.indice(pid).map(|i| t.processos[i].estado);
+                t.sinal(pid, 2);
+                alguem_morreu |= t.indice(pid).map(|i| t.processos[i].estado) != antes;
+            }
+            if alguem_morreu {
                 t.escrever(b"^C\n");
-                t.matar(pid, 2);
+            } else {
+                t.tty.prontos.push_back(3);
             }
-            _ if !t.tty.canonico => {
-                t.tty.prontos.push_back(byte);
+            return;
+        }
+        if !tty.canonico {
+            tty.prontos.push_back(byte);
+            if tty.eco {
+                t.escrever(&[byte]);
             }
+            return;
+        }
+        match byte {
             // Ctrl+D: fim de arquivo (ou entrega a linha sem o Enter)
             4 => {
-                if t.tty.linha.is_empty() {
-                    t.tty.fim = true;
+                if tty.linha.is_empty() {
+                    tty.fim = true;
                 } else {
-                    let linha: Vec<u8> = t.tty.linha.drain(..).collect();
-                    t.tty.prontos.extend(linha);
+                    let linha: Vec<u8> = tty.linha.drain(..).collect();
+                    tty.prontos.extend(linha);
                 }
             }
-            b'\r' | b'\n' => {
-                let mut linha: Vec<u8> = t.tty.linha.drain(..).collect();
+            b'\n' | b'\r' => {
+                let mut linha: Vec<u8> = tty.linha.drain(..).collect();
                 linha.push(b'\n');
-                t.tty.prontos.extend(linha);
-                if t.tty.eco {
+                tty.prontos.extend(linha);
+                if tty.eco {
                     t.escrever(b"\n");
                 }
             }
             8 | 127 => {
                 // apaga o caractere inteiro (UTF-8)
                 let mut apagou = false;
-                while let Some(b) = t.tty.linha.pop() {
+                while let Some(b) = tty.linha.pop() {
                     apagou = true;
                     if b & 0xC0 != 0x80 {
                         break;
                     }
                 }
-                if apagou && t.tty.eco {
+                if apagou && tty.eco {
                     t.escrever(b"\x08 \x08");
                 }
             }
             _ => {
-                t.tty.linha.push(byte);
-                if t.tty.eco {
+                tty.linha.push(byte);
+                if tty.eco {
                     t.escrever(&[byte]);
                 }
             }
@@ -497,7 +660,7 @@ pub fn tecla(byte: u8) {
 }
 
 // ---------------------------------------------------------------------
-// Lista, matar, programa de teste
+// Lista, matar, executar
 
 pub fn lista() -> Vec<Info> {
     com(|t| {
@@ -517,7 +680,59 @@ pub fn lista() -> Vec<Info> {
 
 /// Mata o processo `pid` (SIGKILL). false se ele nao existe.
 pub fn matar(pid: u32) -> bool {
-    com(|t| t.matar(pid, 9))
+    com(|t| t.matar(pid))
+}
+
+/// Roda um programa do disco (ELF de Linux aarch64 estatico). O nome
+/// sem "/" e procurado em /bin. `primeiro_plano`: fica com o teclado do
+/// terminal ate terminar.
+pub fn executar(comando: &str, argumentos: &[&str], primeiro_plano: bool) -> Result<u32, String> {
+    let caminho = if comando.contains('/') { arquivos::absoluto("/", comando) } else { format!("/bin/{comando}") };
+    let mut args: Vec<Vec<u8>> = Vec::with_capacity(argumentos.len() + 1);
+    args.push(comando.as_bytes().to_vec());
+    args.extend(argumentos.iter().map(|a| a.as_bytes().to_vec()));
+    let ambiente: Vec<Vec<u8>> = AMBIENTE.iter().map(|e| e.as_bytes().to_vec()).collect();
+    liberar_registradores_el0();
+    rtc_no_boot();
+    com(|t| {
+        let asid = t.asid_para_novo().ok_or_else(|| String::from("processos demais"))?;
+        // um programa vazio que o trocar_programa (execve) enche
+        let pid = t.acrescentar(0, String::from(comando), Contexto::novo(0, 0), Espaco::novo(asid));
+        let i = t.processos.len() - 1;
+        if let Err(e) = chamadas::trocar_programa(t, i, &caminho, args, ambiente) {
+            t.processos.remove(i);
+            return Err(motivo_de_erro(e, &caminho));
+        }
+        if primeiro_plano {
+            t.primeiro_plano = Some(pid);
+            t.tty = Tty::novo();
+            t.tty.grupo = pid;
+        }
+        Ok(pid)
+    })
+}
+
+/// Explica um errno do executar.
+fn motivo_de_erro(errno: i64, caminho: &str) -> String {
+    match errno {
+        arquivos::ENOENT => format!("{caminho}: arquivo não encontrado"),
+        arquivos::ENOEXEC => match armazenamento::ler(caminho) {
+            Ok(dados) => match elf::conferir(&dados) {
+                Err(motivo) => format!("{caminho}: {motivo}"),
+                Ok(()) => {
+                    let mut e = Espaco::novo(0);
+                    match elf::carregar(&dados, &mut e) {
+                        Err(motivo) => format!("{caminho}: {motivo}"),
+                        Ok(_) => format!("{caminho}: não deu para carregar"),
+                    }
+                }
+            },
+            Err(e) => format!("{caminho}: {}", e.descricao()),
+        },
+        arquivos::EISDIR => format!("{caminho}: é uma pasta"),
+        arquivos::ENOMEM => format!("{caminho}: sem memória"),
+        e => format!("{caminho}: erro {e}"),
+    }
 }
 
 // O programa de teste: codigo de maquina AArch64 escrito aqui mesmo,
@@ -643,7 +858,8 @@ pub fn criar_teste(modo: &str, primeiro_plano: bool) -> Result<u32, &'static str
     let fim = &raw const programa_teste_fim as usize;
     let codigo = unsafe { core::slice::from_raw_parts(inicio as *const u8, fim - inicio) };
     com(|t| {
-        let mut espaco = t.novo_espaco().ok_or("processos demais")?;
+        let asid = t.asid_para_novo().ok_or("processos demais")?;
+        let mut espaco = Espaco::novo(asid);
         espaco.mapear_faixa(BASE_TESTE, BASE_TESTE + codigo.len(), Permissao::Codigo).map_err(|_| "sem memória")?;
         espaco.escrever_forcado(BASE_TESTE, codigo).map_err(|_| "sem memória")?;
         espaco.mapear_faixa(TOPO_PILHA - TAMANHO_PILHA, TOPO_PILHA, Permissao::Dados).map_err(|_| "sem memória")?;
@@ -652,6 +868,8 @@ pub fn criar_teste(modo: &str, primeiro_plano: bool) -> Result<u32, &'static str
         let pid = t.acrescentar(0, format!("teste-{modo}"), contexto, espaco);
         if primeiro_plano {
             t.primeiro_plano = Some(pid);
+            t.tty = Tty::novo();
+            t.tty.grupo = pid;
         }
         Ok(pid)
     })
@@ -678,7 +896,7 @@ pub fn comando(nome: &str, args: &str, saida: &mut dyn Write) -> bool {
                 let _ = writeln!(saida, "nenhum programa pediu uma chamada de sistema que o MXOS não tem");
             }
             for (numero, vezes) in desconhecidas {
-                let _ = writeln!(saida, "  chamada {numero:>4} ({}): {vezes} vez(es), devolveu -ENOSYS", chamadas::nome(numero));
+                let _ = writeln!(saida, "  chamada {numero:>4} ({}): {vezes} vez(es), devolveu -ENOSYS", nome_da_chamada(numero));
             }
         }
         _ => return false,
@@ -693,9 +911,55 @@ fn listar(saida: &mut dyn Write) {
         return;
     }
     let freq = cpu::frequencia_timer().max(1);
-    let _ = writeln!(saida, "  PID  PAI  ESTADO            CPU (ms)  MEMÓRIA  NOME");
+    let _ = writeln!(saida, "  PID  PAI  ESTADO              CPU (ms)  MEMÓRIA  NOME");
     for p in lista {
         let ms = p.tempo_cpu * 1000 / freq;
-        let _ = writeln!(saida, "{:>5} {:>4}  {:<16} {:>9}  {:>5} KB  {}", p.pid, p.pai, p.estado, ms, p.memoria / 1024, p.nome);
+        let _ = writeln!(saida, "{:>5} {:>4}  {:<18} {:>9}  {:>5} KB  {}", p.pid, p.pai, p.estado, ms, p.memoria / 1024, p.nome);
+    }
+}
+
+/// Nome de algumas chamadas do Linux aarch64 (para o comando "syscalls").
+fn nome_da_chamada(numero: u64) -> &'static str {
+    match numero {
+        19 => "eventfd2",
+        20 => "epoll_create1",
+        21 => "epoll_ctl",
+        22 => "epoll_pwait",
+        26 => "inotify_init1",
+        32 => "flock",
+        33 => "mknodat",
+        36 => "symlinkat",
+        37 => "linkat",
+        40 => "mount",
+        47 => "fallocate",
+        51 => "chroot",
+        71 => "sendfile",
+        72 => "pselect6",
+        74 => "signalfd4",
+        76 => "splice",
+        117 => "ptrace",
+        118 => "sched_setparam",
+        122 => "sched_setaffinity",
+        123 => "sched_getaffinity",
+        165 => "getrusage",
+        198 => "socket",
+        203 => "connect",
+        216 => "mremap",
+        220 => "clone (thread)",
+        242 => "accept4",
+        262 => "fanotify_init",
+        267 => "syncfs",
+        271 => "process_vm_readv",
+        277 => "seccomp",
+        279 => "memfd_create",
+        281 => "execveat",
+        285 => "copy_file_range",
+        291 => "statx",
+        293 => "rseq",
+        424 => "pidfd_send_signal",
+        434 => "pidfd_open",
+        435 => "clone3",
+        437 => "openat2",
+        _ => "?",
     }
 }

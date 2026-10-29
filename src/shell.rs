@@ -286,6 +286,7 @@ impl Shell {
             "clear" | "limpar" => self.console.limpar(),
             "erro" => self.erro(argumentos),
             "processo" => self.processo(argumentos),
+            "executar" | "exec" => self.executar_programa(argumentos),
             "reboot" | "reiniciar" => {
                 diga!(self, "Reiniciando…");
                 psci::chamar(self.psci, psci::REINICIAR);
@@ -351,6 +352,7 @@ impl Shell {
         diga!(self, "  navegar U     abre a página U em modo texto (http:// ou disco:/)");
         diga!(self, "  drivers       dispositivos achados e o driver de cada um");
         diga!(self, "  tarefas       janelas abertas, com o tempo de CPU e a memória de cada uma");
+        diga!(self, "  executar P [A] roda o programa P do disco (Linux aarch64 estático); & no fim = no fundo");
         diga!(self, "  processo M [&] programa de teste em EL0: ola, conta, falha, eco (& = no fundo)");
         diga!(self, "  processos     lista os processos (pid, estado, CPU, memória)");
         diga!(self, "  matar PID     finaliza um processo");
@@ -559,6 +561,26 @@ impl Shell {
         }
     }
 
+    /// "executar /bin/ola um dois" (primeiro plano) ou "... &" (fundo).
+    /// Aspas juntam um argumento com espacos.
+    fn executar_programa(&mut self, argumentos: &str) {
+        let (linha, fundo) = match argumentos.trim_end().strip_suffix('&') {
+            Some(resto) => (resto, true),
+            None => (argumentos, false),
+        };
+        let partes = separar_argumentos(linha);
+        let Some((programa, resto)) = partes.split_first() else {
+            diga!(self, "uso: executar <programa> [argumentos] [&]   ex.: executar /bin/ola um dois");
+            return;
+        };
+        let resto: Vec<&str> = resto.iter().map(String::as_str).collect();
+        match processos::executar(programa, &resto, !fundo) {
+            Ok(pid) if fundo => diga!(self, "[{pid}] rodando no fundo"),
+            Ok(pid) => self.esperando = Some(pid),
+            Err(motivo) => diga!(self, "executar: {motivo}"),
+        }
+    }
+
     fn erro(&mut self, tipo: &str) {
         match tipo {
             "" | "brk" => {
@@ -612,7 +634,7 @@ fn comando_de_modulo(_saida: &mut Terminal, _nome: &str, _argumentos: &str) -> b
 /// estas funcoes nao fazem nada.
 #[cfg(not(feature = "mxq"))]
 mod processos {
-    pub use crate::processo::{criar_teste, rodar, tecla, tem_prontos, terminou, tirar_saida};
+    pub use crate::processo::{criar_teste, executar, rodar, tecla, tem_prontos, terminou, tirar_saida};
 }
 
 #[cfg(feature = "mxq")]
@@ -635,6 +657,39 @@ mod processos {
     pub fn criar_teste(_modo: &str, _primeiro_plano: bool) -> Result<u32, &'static str> {
         Err("processos ainda não existem na TV box")
     }
+    pub fn executar(_programa: &str, _args: &[&str], _primeiro_plano: bool) -> Result<u32, alloc::string::String> {
+        Err(alloc::string::String::from("processos ainda não existem na TV box"))
+    }
+}
+
+/// Separa os argumentos por espacos; "entre aspas" fica junto.
+fn separar_argumentos(linha: &str) -> Vec<String> {
+    let mut partes = Vec::new();
+    let mut atual = String::new();
+    let mut aspas = false;
+    let mut tem = false;
+    for c in linha.chars() {
+        match c {
+            '"' => {
+                aspas = !aspas;
+                tem = true;
+            }
+            ' ' if !aspas => {
+                if tem {
+                    partes.push(core::mem::take(&mut atual));
+                    tem = false;
+                }
+            }
+            c => {
+                atual.push(c);
+                tem = true;
+            }
+        }
+    }
+    if tem {
+        partes.push(atual);
+    }
+    partes
 }
 
 /// O painel de drivers (so no QEMU) mostra o video que o terminal ligou.
