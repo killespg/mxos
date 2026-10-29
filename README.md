@@ -242,6 +242,8 @@ Pensado para a TV box (1 GB, Cortex-A53, tela de 1920x1080 em RGB565 que o víde
 - **Clique direito na área de trabalho**: "Alterar plano de fundo…" (abre o Personalizar) e "Próximo plano de
   fundo" (troca na hora; o Salvar das Configurações guarda).
 - `rodar.py --acoes` ganhou `apertar` e `soltar` (captura no meio de um arrasto).
+- **Copy-on-write no `fork`**: pai e filho dividem as páginas; só a que alguém escreve é copiada, na hora. Com 6
+  subshells do `sh` vivos são uns 15 MB a menos (uns 2,5 MB por fork), e o fork fica mais rápido.
 
 ## Fontes e acentos (0.8)
 

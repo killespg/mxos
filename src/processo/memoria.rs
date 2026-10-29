@@ -10,9 +10,17 @@
 //! Os quadros vem do heap (mapa identidade: o endereco do quadro no
 //! kernel e o fisico). O kernel le e escreve a memoria do programa pelos
 //! quadros, entao nao precisa estar com as tabelas do processo ligadas.
+//!
+//! Copy-on-write: no fork o filho divide os quadros com o pai (Rc). As
+//! paginas que so se le (o codigo) ficam divididas para sempre; as que se
+//! escreve ficam so de leitura nas tabelas dos dois, e a primeira escrita
+//! de um deles (falha de permissao, `resolver_cow`) ganha uma copia so
+//! dele. Um `sh` que faz fork para rodar um comando nao copia mais os
+//! megabytes do programa.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 
 use crate::mmu;
 
@@ -30,10 +38,22 @@ struct Tabela([u64; mmu::ENTRADAS_TABELA]);
 #[repr(C, align(4096))]
 pub struct Quadro(pub [u8; PAGINA]);
 
-/// Uma pagina do programa: o quadro e as permissoes dela.
+/// Uma pagina do programa: o quadro (talvez dividido com outro processo,
+/// depois de um fork) e os atributos que estao na tabela agora.
 struct Pagina {
-    quadro: Box<Quadro>,
+    /// Rc de Box: o Rc fica pequeno e o quadro continua alinhado em 4 KB.
+    quadro: Rc<Box<Quadro>>,
     atributos: u64,
+}
+
+impl Pagina {
+    fn fisico(&self) -> u64 {
+        &**self.quadro as *const Quadro as u64
+    }
+
+    fn dividida(&self) -> bool {
+        Rc::strong_count(&self.quadro) > 1
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +80,16 @@ impl Permissao {
 
     fn escreve(self) -> bool {
         matches!(self, Permissao::Dados | Permissao::Tudo)
+    }
+
+    /// Os atributos de quando a pagina esta dividida (copy-on-write): a
+    /// mesma coisa, sem escrita.
+    fn atributos_divididos(self) -> u64 {
+        match self {
+            Permissao::Dados => mmu::USUARIO_LEITURA,
+            Permissao::Tudo => mmu::USUARIO_CODIGO,
+            p => p.atributos(),
+        }
     }
 
     /// Bits de protecao do Linux (PROT_READ 1, PROT_WRITE 2, PROT_EXEC 4).
@@ -126,10 +156,9 @@ impl Espaco {
             return Ok(());
         }
         let quadro: Box<Quadro> = unsafe { Box::new_zeroed().assume_init() };
-        let fisico = &*quadro as *const Quadro as u64;
-        let atributos = permissao.atributos();
-        *self.entrada(endereco) = fisico | atributos | mmu::DESCRITOR_PAGINA;
-        self.paginas.insert(numero, Pagina { quadro, atributos });
+        let pagina = Pagina { quadro: Rc::new(quadro), atributos: permissao.atributos() };
+        *self.entrada(endereco) = pagina.fisico() | pagina.atributos | mmu::DESCRITOR_PAGINA;
+        self.paginas.insert(numero, pagina);
         self.permissoes.insert(numero, permissao);
         Ok(())
     }
@@ -158,15 +187,54 @@ impl Espaco {
     pub fn proteger(&mut self, endereco: usize, permissao: Permissao) {
         let numero = endereco / PAGINA;
         let Some(pagina) = self.paginas.get_mut(&numero) else { return };
-        let atributos = permissao.atributos();
+        self.permissoes.insert(numero, permissao);
+        // dividida com outro processo: a escrita espera a falha e a copia
+        let atributos = if pagina.dividida() { permissao.atributos_divididos() } else { permissao.atributos() };
         if pagina.atributos == atributos {
             return;
         }
         pagina.atributos = atributos;
-        let fisico = &*pagina.quadro as *const Quadro as u64;
-        self.permissoes.insert(numero, permissao);
+        let fisico = pagina.fisico();
         *self.entrada(endereco & !(PAGINA - 1)) = fisico | atributos | mmu::DESCRITOR_PAGINA;
         mmu::esquecer_asid(self.asid);
+    }
+
+    /// A pagina `numero` passa a ter um quadro so dela (copia se estava
+    /// dividida) e os atributos da permissao de verdade.
+    fn privatizar(&mut self, numero: usize) {
+        let Some(&permissao) = self.permissoes.get(&numero) else { return };
+        let Some(pagina) = self.paginas.get_mut(&numero) else { return };
+        let mut mudou = false;
+        if pagina.dividida() {
+            let mut copia: Box<Quadro> = unsafe { Box::new_zeroed().assume_init() };
+            copia.0.copy_from_slice(&pagina.quadro.0);
+            if matches!(permissao, Permissao::Codigo | Permissao::Tudo) {
+                mmu::sincronizar_codigo(copia.0.as_ptr() as usize, PAGINA);
+            }
+            pagina.quadro = Rc::new(copia);
+            mudou = true;
+        }
+        let atributos = permissao.atributos();
+        if mudou || pagina.atributos != atributos {
+            pagina.atributos = atributos;
+            let valor = pagina.fisico() | atributos | mmu::DESCRITOR_PAGINA;
+            *self.entrada(numero * PAGINA) = valor;
+            mmu::esquecer_asid(self.asid);
+        }
+    }
+
+    /// Falha de escrita em `endereco`: se a pagina e de escrita e so esta
+    /// protegida pelo copy-on-write, ganha a copia propria e o programa
+    /// repete a instrucao (true). false = a falha e de verdade.
+    pub fn resolver_cow(&mut self, endereco: usize) -> bool {
+        let numero = endereco / PAGINA;
+        let Some(&permissao) = self.permissoes.get(&numero) else { return false };
+        let Some(pagina) = self.paginas.get(&numero) else { return false };
+        if !permissao.escreve() || (!pagina.dividida() && pagina.atributos == permissao.atributos()) {
+            return false;
+        }
+        self.privatizar(numero);
+        true
     }
 
     /// A entrada L3 de `endereco` (cria a tabela L3 se precisar).
@@ -217,10 +285,15 @@ impl Espaco {
         while feito < dados.len() {
             let atual = endereco + feito;
             let numero = atual / PAGINA;
+            // o kernel escreve pelo quadro: ele nao pode ser o do outro processo
+            if self.paginas.get(&numero).ok_or(Fora)?.dividida() {
+                self.privatizar(numero);
+            }
             let pagina = self.paginas.get_mut(&numero).ok_or(Fora)?;
+            let quadro = Rc::get_mut(&mut pagina.quadro).ok_or(Fora)?;
             let dentro = atual % PAGINA;
             let n = (PAGINA - dentro).min(dados.len() - feito);
-            pagina.quadro.0[dentro..dentro + n].copy_from_slice(&dados[feito..feito + n]);
+            quadro.0[dentro..dentro + n].copy_from_slice(&dados[feito..feito + n]);
             if forcado && matches!(self.permissoes.get(&numero), Some(Permissao::Codigo | Permissao::Tudo)) {
                 let quadro = &pagina.quadro.0[dentro] as *const u8 as usize;
                 mmu::sincronizar_codigo(quadro, n);
@@ -258,23 +331,35 @@ impl Espaco {
         None
     }
 
-    /// Copia o espaco inteiro (fork): paginas e permissoes iguais, outros
-    /// quadros.
-    pub fn duplicar(&self, asid: u16) -> Espaco {
+    /// O espaco do filho num fork: os mesmos quadros (copy-on-write). As
+    /// paginas de escrita ficam so de leitura no pai e no filho ate um deles
+    /// escrever.
+    pub fn duplicar(&mut self, asid: u16) -> Espaco {
         let mut novo = Espaco::novo(asid);
         novo.brk_inicio = self.brk_inicio;
         novo.brk = self.brk;
-        for (&numero, pagina) in &self.paginas {
+        let numeros: alloc::vec::Vec<usize> = self.paginas.keys().copied().collect();
+        let mut pai_mudou = false;
+        for numero in numeros {
             let permissao = self.permissoes[&numero];
             let endereco = numero * PAGINA;
-            if novo.mapear(endereco, permissao).is_ok() {
-                if let Some(copia) = novo.paginas.get_mut(&numero) {
-                    copia.quadro.0.copy_from_slice(&pagina.quadro.0);
-                    if matches!(permissao, Permissao::Codigo | Permissao::Tudo) {
-                        mmu::sincronizar_codigo(copia.quadro.0.as_ptr() as usize, PAGINA);
-                    }
-                }
+            let atributos = permissao.atributos_divididos();
+            let pagina = self.paginas.get_mut(&numero).expect("pagina sem quadro");
+            let quadro = pagina.quadro.clone();
+            if pagina.atributos != atributos {
+                pagina.atributos = atributos;
+                let valor = pagina.fisico() | atributos | mmu::DESCRITOR_PAGINA;
+                *self.entrada(endereco) = valor;
+                pai_mudou = true;
             }
+            let copia = Pagina { quadro, atributos };
+            *novo.entrada(endereco) = copia.fisico() | atributos | mmu::DESCRITOR_PAGINA;
+            novo.paginas.insert(numero, copia);
+            novo.permissoes.insert(numero, permissao);
+        }
+        if pai_mudou {
+            // o TLB do pai ainda pode achar que as paginas sao de escrita
+            mmu::esquecer_asid(self.asid);
         }
         novo
     }

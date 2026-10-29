@@ -312,11 +312,20 @@ A rodada de acentos foi interrompida no meio. Compila limpo (QEMU e mxq), mas:
   na área de trabalho para o plano de fundo, seleção em área na área de trabalho e no Arquivos (vários itens em
   copiar/recortar/colar/apagar).
 
+### Passo 8 (feito, 0.10): copy-on-write no fork
+
+- `memoria.rs`: quadros em `Rc<Box<Quadro>>` (o Rc pequeno, o quadro alinhado em 4 KB). No fork o filho divide os
+  quadros; páginas de escrita ficam só de leitura nos dois até a primeira escrita, que cai em `resolver_cow`
+  (falha de permissão com WnR em EL0) e ganha cópia própria. O kernel, ao escrever na memória do programa,
+  também separa a página antes. O código nunca é copiado.
+- Medido: 6 subshells `(sleep 4 && true) &` vivos: 997 MB livres sem, 1012 MB com (uns 2,5 MB por fork).
+  Subshell que muda variável não afeta o pai; `ola sinais` (fork + waitpid) e `ola threads` continuam certos.
+
 ### Pendências para depois
 
 - `AF_UNIX`, IPv6, links simbólicos (o FAT32 não guarda), job control (Ctrl+Z/SIGSTOP), tratador de `SIGSEGV`.
-- Memória dos processos: `fork` copia tudo (falta copy-on-write) e cada programa dinâmico tem a própria cópia da
-  libc (falta dividir as páginas só de leitura); o `open` lê o arquivo inteiro.
+- Memória dos processos: cada programa dinâmico tem a própria cópia da libc (falta dividir as páginas só de
+  leitura entre programas diferentes) e o `open` lê o arquivo inteiro.
 - Na box: desenhar com os 4 núcleos; montar a cena já em RGB565.
 - Na TV box os processos ainda não são compilados (o módulo `processo` depende do disco do QEMU).
 - O `--teste` do `rodar.py` separa comandos por `;`: para mandar `;` para o sh use `&&` ou um script.

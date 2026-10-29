@@ -1578,8 +1578,8 @@ fn clone(t: &mut Tabela, i: usize, flags: u64, pilha: usize, tid_pai: usize, tls
         let Some(asid) = t.asid_para_novo() else { return Fim::Valor(-EAGAIN) };
         asid
     };
+    let espaco = if thread { Espaco::novo(asid) } else { t.processos[i].espaco.duplicar(asid) };
     let p = &t.processos[i];
-    let espaco = if thread { Espaco::novo(asid) } else { p.espaco.duplicar(asid) };
     let mut contexto = p.contexto.copia();
     contexto.x[0] = 0; // o filho ve 0
     if pilha != 0 {

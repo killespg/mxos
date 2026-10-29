@@ -652,6 +652,15 @@ fn tratar_excecao(t: &mut Tabela, i: usize) -> bool {
             t.processos[i].contexto.pc += 4;
             return false;
         }
+        // escrita numa pagina dividida pelo fork (copy-on-write): copia e
+        // o programa repete a instrucao. ISS: WnR (bit 6) e falha de
+        // permissao (DFSC 0b0011xx).
+        0x24 if esr & 0x40 != 0 && esr & 0x3C == 0x0C => {
+            let far = t.processos[i].contexto.far as usize;
+            if t.processos[i].espaco.resolver_cow(far) {
+                return false;
+            }
+        }
         _ => {}
     }
     let p = &t.processos[i];
