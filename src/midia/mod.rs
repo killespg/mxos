@@ -7,6 +7,7 @@
 
 pub mod avi;
 pub mod mp3;
+pub mod mp3_tabelas;
 pub mod tracker;
 pub mod wav;
 
