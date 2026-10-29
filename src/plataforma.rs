@@ -1,7 +1,7 @@
 //! O que muda de uma maquina para outra: nome e mapa de memoria fisica.
 //! Os enderecos sao alinhados em 2 MB (tamanho de um bloco da MMU).
 
-#[cfg(not(feature = "mxq"))]
+#[cfg(not(any(feature = "mxq", feature = "rk322x")))]
 mod atual {
     pub const NOME: &str = "QEMU virt";
     /// RAM de 1 GB (o rodar.py passa -m 1G).
@@ -46,6 +46,25 @@ mod atual {
     pub const IRQ_SERIAL_BORDA: bool = true;
 }
 
+/// TV box com Rockchip RK3228/RK3229 (Cortex-A7, 32 bits): os enderecos
+/// do device tree rk322x.dtsi do Linux. Nunca testado no hardware.
+#[cfg(feature = "rk322x")]
+mod atual {
+    pub const NOME: &str = "TV box Rockchip RK322x (Cortex-A7)";
+    /// RAM a partir de 0x60000000 (1 GB). O kernel fica em 0x60200000; o
+    /// heap comeca depois dele.
+    pub const RAM_INICIO: usize = 0x6000_0000;
+    pub const RAM_FIM: usize = 0x9FE0_0000;
+    /// GRF, UART, CRU, USB, GMAC, VOP, GIC...
+    pub const DISPOSITIVOS: &[(usize, usize)] = &[(0x1000_0000, 0x4000_0000)];
+    pub const RAM_EXTRA: &[(usize, usize)] = &[];
+    pub const GIC_DISTRIBUIDOR: usize = 0x3201_1000;
+    pub const GIC_CPU: usize = 0x3201_2000;
+    /// UART2 (a do console) = SPI 57.
+    pub const IRQ_SERIAL: u32 = 32 + 57;
+    pub const IRQ_SERIAL_BORDA: bool = false;
+}
+
 pub use atual::*;
 
 /// Segundos desde 1970 (UTC). QEMU: o RTC PL031. TV box: ela nao tem
@@ -56,7 +75,7 @@ pub fn segundos_rtc() -> u64 {
     if ajuste != 0 {
         return ajuste.wrapping_add(crate::cpu::contador() / crate::cpu::frequencia_timer().max(1));
     }
-    if cfg!(feature = "mxq") {
+    if cfg!(any(feature = "mxq", feature = "rk322x")) {
         return 1_793_000_000 + crate::cpu::contador() / crate::cpu::frequencia_timer().max(1);
     }
     unsafe { core::ptr::read_volatile(0x0901_0000 as *const u32) as u64 }

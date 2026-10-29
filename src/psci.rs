@@ -47,18 +47,11 @@ impl Via {
 static VIA: AtomicU8 = AtomicU8::new(0);
 
 pub fn chamar(via: Via, funcao: u32) -> u64 {
-    let mut x0 = funcao as u64;
-    unsafe {
-        match via {
-            Via::Hvc => asm!("hvc #0", inout("x0") x0, clobber_abi("C"), options(nostack)),
-            Via::Smc => asm!("smc #0", inout("x0") x0, clobber_abi("C"), options(nostack)),
-        }
-    }
-    x0
+    chamar3(via, funcao, 0, 0, 0)
 }
 
 /// Chamada com 3 argumentos (CPU_ON: nucleo, endereco, contexto).
-#[cfg_attr(feature = "mxq", allow(dead_code))]
+#[cfg(target_arch = "aarch64")]
 pub fn chamar3(via: Via, funcao: u32, a1: u64, a2: u64, a3: u64) -> u64 {
     let mut x0 = funcao as u64;
     unsafe {
@@ -68,6 +61,20 @@ pub fn chamar3(via: Via, funcao: u32, a1: u64, a2: u64, a3: u64) -> u64 {
         }
     }
     x0
+}
+
+/// No ARMv7 a mesma chamada, com r0-r3 de 32 bits (funcoes SMC32).
+#[cfg(target_arch = "arm")]
+pub fn chamar3(via: Via, funcao: u32, a1: u64, a2: u64, a3: u64) -> u64 {
+    // as funcoes de 64 bits (0xC4...) viram as de 32 (0x84...)
+    let mut r0 = funcao & !0x4000_0000;
+    unsafe {
+        match via {
+            Via::Hvc => asm!(".arch_extension virt", "hvc #0", inout("r0") r0, in("r1") a1 as u32, in("r2") a2 as u32, in("r3") a3 as u32, clobber_abi("C"), options(nostack)),
+            Via::Smc => asm!(".arch_extension sec", "smc #0", inout("r0") r0, in("r1") a1 as u32, in("r2") a2 as u32, in("r3") a3 as u32, clobber_abi("C"), options(nostack)),
+        }
+    }
+    r0 as i32 as i64 as u64
 }
 
 /// Guarda a via que o firmware atende (chamado pelo Shell::nova).

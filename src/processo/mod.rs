@@ -388,6 +388,7 @@ fn liberar_registradores_el0() {
 
 /// O mesmo em cada nucleo (os registradores sao de cada um; smp.rs).
 pub fn configurar_el0() {
+    #[cfg(target_arch = "aarch64")]
     unsafe {
         core::arch::asm!(
             "mrs {t}, sctlr_el1",
@@ -948,6 +949,11 @@ fn motivo_de_erro(errno: i64, caminho: &str) -> String {
 //   1 "conta": gasta CPU contando (mostra a preempcao) e escreve pontos
 //   2 "falha": escreve no endereco 0x10 (o processo morre, o kernel nao)
 //   3 "eco": le linhas do teclado e devolve em maiusculas ate "fim"
+// ARMv7: ainda sem processos; o programa de teste fica vazio
+#[cfg(target_arch = "arm")]
+global_asm!(".section .rodata.programa_teste, \"a\"", ".global programa_teste_inicio, programa_teste_fim", "programa_teste_inicio:", "programa_teste_fim:");
+
+#[cfg(target_arch = "aarch64")]
 global_asm!(
     r#"
 .section .rodata.programa_teste, "a"

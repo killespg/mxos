@@ -15,7 +15,6 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
-use core::arch::asm;
 
 use crate::fonte::{self, Fonte};
 use crate::video::tela::{Formato, Tela};
@@ -448,7 +447,7 @@ fn apresentar_deslocado(origem: &Superficie, framebuffer: &Tela, area: Retangulo
     }
     framebuffer.limpar_cache_area(x as usize, y as usize, largura, area.altura as usize);
     // Garante que as escritas sairam antes de qualquer outra coisa
-    unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
+    crate::cpu::barreira();
 }
 
 impl fonte::Alvo for Superficie {

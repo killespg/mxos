@@ -11,7 +11,6 @@
 
 #![allow(dead_code)]
 
-use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
 
 /// Endereco no QEMU virt (hw/arm/virt.c, VIRT_FW_CFG).
@@ -243,5 +242,5 @@ fn nome_igual(lido: &[u8; TAMANHO_NOME], nome: &[u8]) -> bool {
 /// "dsb sy": termina todos os acessos a memoria antes de seguir. Sem
 /// "nomem", tambem impede o compilador de mudar acessos de lugar.
 fn barreira() {
-    unsafe { asm!("dsb sy", options(nostack, preserves_flags)) }
+    crate::cpu::barreira()
 }

@@ -21,6 +21,7 @@ mod gui;
 mod heap;
 mod irq;
 mod mapa;
+#[cfg_attr(target_arch = "arm", path = "mmu_arm.rs")]
 mod mmu;
 mod navegador;
 mod plataforma;
@@ -46,8 +47,14 @@ use core::panic::PanicInfo;
 use shell::Shell;
 use terminal::Terminal;
 
+#[cfg(target_arch = "aarch64")]
 global_asm!(include_str!("boot.s"));
+#[cfg(target_arch = "aarch64")]
 global_asm!(include_str!("vetores.s"));
+#[cfg(target_arch = "arm")]
+global_asm!(include_str!("boot_arm.s"), options(raw));
+#[cfg(target_arch = "arm")]
+global_asm!(include_str!("vetores_arm.s"), options(raw));
 
 /// Chamado pelo boot.s, ja em EL1, com pilhas e BSS prontos.
 #[unsafe(no_mangle)]

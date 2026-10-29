@@ -111,6 +111,10 @@ unsafe extern "C" {
 /// antes (e so solta para rodar programas e dormir). Devolve quantos ligaram.
 pub fn ligar_nucleos() -> usize {
     pegar();
+    // ARMv7 (RK322x): por enquanto so o nucleo 0
+    if cfg!(target_arch = "arm") {
+        return ligados();
+    }
     let (mair, tcr, ttbr0) = mmu::registradores();
     for numero in 1..MAXIMO {
         // pilhas que nunca sao devolvidas (o nucleo roda para sempre)

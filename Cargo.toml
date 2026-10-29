@@ -12,6 +12,9 @@ bench = false
 [features]
 # Compila para a TV box (Amlogic S905W) em vez do QEMU virt.
 mxq = []
+# TV box com Rockchip RK3228/RK3229 (Cortex-A7, ARMv7 32 bits):
+# --target armv7a-none-eabihf (rodar.py --rk322x)
+rk322x = []
 
 [profile.dev]
 panic = "abort"

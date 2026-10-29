@@ -7,7 +7,6 @@
 //! principal tira de la. Se a interrupcao nao vier (registrador errado na
 //! TV box, por exemplo), o tique de 100 Hz acorda a CPU e lemos direto.
 
-use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::fmt;
 use core::hint::spin_loop;
@@ -16,8 +15,9 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::irq;
 
-#[cfg(not(feature = "mxq"))]
+#[cfg(not(any(feature = "mxq", feature = "rk322x")))]
 mod regs {
+    pub const INVERTER: u32 = 0;
     pub const NOME: &str = "PL011 em 0x09000000 (QEMU virt)";
     pub const BASE: usize = 0x0900_0000;
     pub const TX: usize = 0x00; // UARTDR
@@ -33,8 +33,26 @@ mod regs {
 
 // Registradores do driver meson_uart do Linux (familia GXL).
 // Ainda nao testado no hardware.
+/// UART2 do RK322x (16550 DesignWare, registradores de 4 em 4 bytes), a
+/// do console do U-Boot da Rockchip (115200 baud, ja configurada).
+#[cfg(feature = "rk322x")]
+mod regs {
+    pub const NOME: &str = "UART2 em 0x11030000 (Rockchip RK322x)";
+    pub const BASE: usize = 0x1103_0000;
+    pub const TX: usize = 0x00; // THR
+    pub const RX: usize = 0x00; // RBR
+    pub const IER: usize = 0x04;
+    pub const STATUS: usize = 0x14; // LSR
+    /// LSR: THRE (bit 5) = 1 quando cabe mais; DR (bit 0) = 1 quando chegou.
+    /// Ao contrario dos outros: o INVERTER vira os dois.
+    pub const TX_CHEIO: u32 = 1 << 5;
+    pub const RX_VAZIO: u32 = 1 << 0;
+    pub const INVERTER: u32 = (1 << 5) | (1 << 0);
+}
+
 #[cfg(feature = "mxq")]
 mod regs {
+    pub const INVERTER: u32 = 0;
     pub const NOME: &str = "UART_AO_A em 0xC81004C0 (Amlogic S905W)";
     pub const BASE: usize = 0xC810_04C0;
     pub const TX: usize = 0x00; // AML_UART_WFIFO
@@ -126,14 +144,14 @@ impl Uart {
     }
 
     pub fn enviar(&mut self, byte: u8) {
-        while self.ler(regs::STATUS) & regs::TX_CHEIO != 0 {
+        while (self.ler(regs::STATUS) ^ regs::INVERTER) & regs::TX_CHEIO != 0 {
             spin_loop();
         }
         self.escrever(regs::TX, byte as u32);
     }
 
     pub fn receber(&mut self) -> Option<u8> {
-        if self.ler(regs::STATUS) & regs::RX_VAZIO != 0 {
+        if (self.ler(regs::STATUS) ^ regs::INVERTER) & regs::RX_VAZIO != 0 {
             None
         } else {
             Some(self.ler(regs::RX) as u8)
@@ -173,7 +191,7 @@ impl Uart {
     }
 }
 
-#[cfg(not(feature = "mxq"))]
+#[cfg(not(any(feature = "mxq", feature = "rk322x")))]
 impl Uart {
     pub fn ligar_interrupcao_rx(&mut self) {
         let mascara = self.ler(regs::MASCARA_IRQ);
@@ -200,14 +218,24 @@ impl Uart {
     fn limpar_interrupcao(&mut self) {}
 }
 
+// 16550 (DesignWare): IER bit 0 liga a interrupcao de dado recebido; ler
+// o RBR ja limpa.
+#[cfg(feature = "rk322x")]
+impl Uart {
+    pub fn ligar_interrupcao_rx(&mut self) {
+        self.escrever(regs::IER, 1);
+    }
+
+    fn limpar_interrupcao(&mut self) {}
+}
+
 /// Roda `f` com IRQ bloqueada e depois volta o DAIF como estava (quem ja
 /// estava com elas desligadas, como o irq::esperar, continua assim).
 /// Sem `nomem`: o asm e barreira do compilador para os acessos de `f`.
 fn sem_interrupcoes<T>(f: impl FnOnce() -> T) -> T {
-    let daif: u64;
-    unsafe { asm!("mrs {0}, daif", "msr daifset, #2", out(reg) daif, options(nostack, preserves_flags)) };
+    let estado = crate::cpu::guardar_e_desligar_irq();
     let valor = f();
-    unsafe { asm!("msr daif, {0}", in(reg) daif, options(nostack, preserves_flags)) };
+    crate::cpu::restaurar_irq(estado);
     valor
 }
 

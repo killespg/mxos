@@ -237,6 +237,12 @@ pub fn carregar_de(d: &[u8], arquivo: Option<&cache::Arquivo>, espaco: &mut Espa
 
 /// O que a CPU tem, no formato do AT_HWCAP do Linux (so o que da para
 /// usar em EL0 sem o kernel emular nada).
+#[cfg(target_arch = "arm")]
+fn hwcap() -> u64 {
+    0
+}
+
+#[cfg(target_arch = "aarch64")]
 fn hwcap() -> u64 {
     let (isar0, pfr0): (u64, u64);
     unsafe {

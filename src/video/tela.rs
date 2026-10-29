@@ -11,7 +11,6 @@
 
 #![allow(dead_code)]
 
-use core::arch::asm;
 use core::fmt;
 use core::ptr::{read_volatile, write_volatile};
 
@@ -372,17 +371,15 @@ pub fn limpar_cache(inicio: usize, tamanho: usize) {
     let linha = tamanho_linha_cache();
     let mut endereco = inicio & !(linha - 1);
     while endereco < inicio + tamanho {
-        unsafe { asm!("dc cvac, {0}", in(reg) endereco, options(nostack, preserves_flags)) };
+        crate::cpu::limpar_linha(endereco);
         endereco += linha;
     }
-    unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
+    crate::cpu::barreira();
 }
 
 /// Menor linha de cache de dados: CTR_EL0.DminLine = log2 de palavras de 4 bytes.
 fn tamanho_linha_cache() -> usize {
-    let ctr: u64;
-    unsafe { asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags)) };
-    4 << (ctr >> 16 & 0xF)
+    crate::cpu::tamanho_linha_cache()
 }
 
 /// Maior sublinhado de cursor que conseguimos guardar e restaurar.

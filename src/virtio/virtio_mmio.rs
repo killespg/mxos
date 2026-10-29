@@ -11,7 +11,6 @@
 //!
 //! Todos os registradores sao de 32 bits, acesso alinhado e volatil.
 
-use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
 
 /// Slots do virtio-mmio no QEMU virt.
@@ -106,7 +105,7 @@ impl Erro {
 /// Barreira completa: tudo que escrevemos na RAM fica visivel ao dispositivo
 /// antes do proximo acesso. Tambem impede o compilador de reordenar.
 pub fn barreira() {
-    unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
+    crate::cpu::barreira();
 }
 
 /// Um dispositivo virtio-mmio (um slot).

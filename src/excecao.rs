@@ -59,6 +59,23 @@ fn falha_mmu(codigo: u64) -> &'static str {
     }
 }
 
+/// ARMv7 (vetores_arm.s): tipo 1 instrucao invalida, 2 SVC, 3 busca de
+/// instrucao, 4 dados, 7 FIQ; `status` e o IFSR/DFSR. Vira o ESR do AArch64
+/// para a mesma explicacao.
+#[cfg(target_arch = "arm")]
+#[unsafe(no_mangle)]
+extern "C" fn tratar_excecao_arm(tipo: u32, status: u32, pc: u32, far: u32) -> ! {
+    let classe: u64 = match tipo {
+        1 => 0x00,
+        2 => 0x15,
+        3 => 0x20,
+        4 => 0x24,
+        _ => 0x3F,
+    };
+    let escrita = (status >> 11 & 1) as u64;
+    tratar_excecao(tipo as u64, classe << 26 | escrita << 6, pc as u64, far as u64)
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn tratar_excecao(tipo: u64, esr: u64, elr: u64, far: u64) -> ! {
     let mut console = Uart::new();
