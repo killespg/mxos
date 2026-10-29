@@ -17,6 +17,7 @@
 //! tema, papel de parede e layout do teclado voltam como estavam.
 
 pub mod apps;
+pub mod realce;
 pub mod area;
 pub mod cursor;
 pub mod grafico;

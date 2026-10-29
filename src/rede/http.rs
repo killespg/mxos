@@ -266,12 +266,12 @@ fn receber_resposta(mut chegar: impl FnMut(&mut Vec<u8>) -> Result<bool, ErroRed
     }
 }
 
-/// GET por https://: TLS 1.3 sobre a conexao ja aberta.
-fn buscar_seguro(url: &Url, limite_ms: u64) -> Result<Resposta, ErroRede> {
+/// Pedido por https://: TLS 1.3 sobre a conexao ja aberta.
+fn buscar_seguro(url: &Url, envio: &[u8], limite_ms: u64) -> Result<Resposta, ErroRede> {
     let mut t = Tcp { limite_ms };
     let agora = crate::plataforma::segundos_rtc() as i64;
     let mut sessao = tls::conectar(&mut t, &url.host, agora).map_err(erro_tls)?;
-    sessao.enviar(&mut t, pedido(url).as_bytes()).map_err(erro_tls)?;
+    sessao.enviar(&mut t, envio).map_err(erro_tls)?;
     let resposta = receber_resposta(|bruto| Ok(!sessao.receber(&mut t, bruto).map_err(erro_tls)?))?;
     sessao.fechar(&mut t);
     let _ = com(|p| p.tcp_fechar());
@@ -280,6 +280,11 @@ fn buscar_seguro(url: &Url, limite_ms: u64) -> Result<Resposta, ErroRede> {
 
 /// Um GET sem seguir redirecionamento.
 fn buscar(url: &Url, limite_ms: u64) -> Result<Resposta, ErroRede> {
+    enviar_pedido(url, pedido(url).as_bytes(), limite_ms)
+}
+
+/// Manda `envio` (o pedido HTTP inteiro) e le a resposta.
+fn enviar_pedido(url: &Url, envio: &[u8], limite_ms: u64) -> Result<Resposta, ErroRede> {
     let ip = super::resolver(&url.host)?;
     com(|p| p.tcp_conectar(ip, url.porta))?;
     let conectou = esperar(limite_ms, |p| match p.tcp.estado {
@@ -293,9 +298,9 @@ fn buscar(url: &Url, limite_ms: u64) -> Result<Resposta, ErroRede> {
         Ok(Ok(())) => {}
     }
     if url.seguro {
-        return buscar_seguro(url, limite_ms).or_else(abortar);
+        return buscar_seguro(url, envio, limite_ms).or_else(abortar);
     }
-    if !com(|p| p.tcp_enviar(pedido(url).as_bytes()))? {
+    if !com(|p| p.tcp_enviar(envio))? {
         return abortar(ErroRede::Protocolo("conexão fechou antes do pedido"));
     }
     let mut bruto = Vec::new();
@@ -322,6 +327,26 @@ fn buscar(url: &Url, limite_ms: u64) -> Result<Resposta, ErroRede> {
             Err(e) => return abortar(erro.unwrap_or(e)),
         }
     }
+}
+
+/// POST com corpo e cabecalhos extras (APIs JSON), sem redirecionamento.
+pub fn post(url: &str, cabecalhos: &[(&str, &str)], corpo: &[u8], limite_ms: u64) -> Result<Resposta, ErroRede> {
+    let u = ler_url(url)?;
+    let mut envio = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: MXOS/0.12\r\nAccept: */*\r\nContent-Length: {}\r\nConnection: close\r\n",
+        u.caminho,
+        u.autoridade(),
+        corpo.len()
+    );
+    for (k, v) in cabecalhos {
+        envio.push_str(&format!("{k}: {v}\r\n"));
+    }
+    envio.push_str("\r\n");
+    let mut bytes = envio.into_bytes();
+    bytes.extend_from_slice(corpo);
+    let mut r = enviar_pedido(&u, &bytes, limite_ms)?;
+    r.url_final = u.completa();
+    Ok(r)
 }
 
 /// GET seguindo redirecionamentos. A resposta diz em `url_final` quem

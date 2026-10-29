@@ -95,6 +95,11 @@ impl Config {
         armazenamento::escrever(ARQUIVO, texto.as_bytes()).map_err(|e| e.descricao())
     }
 
+    /// Todos os pares (chave, valor).
+    pub fn pares(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.pares.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
     pub fn obter(&self, chave: &str) -> Option<&str> {
         let chave = chave.trim();
         self.pares.iter().find(|(k, _)| k.eq_ignore_ascii_case(chave)).map(|(_, v)| v.as_str())

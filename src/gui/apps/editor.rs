@@ -19,6 +19,13 @@
 //! um arquivo que nao existe comeca um documento novo com aquele caminho.
 //! Ler e gravar o disco rodam no Tique seguinte, depois de um quadro com
 //! "Carregando ..." ou "Salvando ..." (a area de trabalho para enquanto isso).
+//!
+//! Realce de sintaxe pela extensao (gui::realce): C, JS, Rust, Python,
+//! shell, CSS e HTML, com o estado de cada linha guardado e recalculado
+//! so a partir da linha alterada. Os botoes "Explicar" e "Refatorar"
+//! mandam o arquivo para o Claude (crate::ia) e abrem a resposta numa
+//! janela nova do editor (a refatoracao como documento sem titulo, para
+//! conferir e salvar se quiser).
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -39,7 +46,8 @@ use crate::entrada::teclado::{
 };
 use crate::fonte::{self, INTER, MONO, MONO_LARGURA};
 use crate::gui::grafico::{self, Retangulo, Superficie};
-use crate::gui::janelas::{App, EventoApp};
+use crate::gui::janelas::{App, EventoApp, Pedido};
+use crate::gui::realce::{self, Linguagem};
 use crate::gui::tema::{self, Tema};
 use crate::gui::widgets::{ALTURA_BOTAO, AcaoCampo, CampoTexto, cor_campo, cor_linha, cor_texto_fraco};
 
@@ -94,6 +102,8 @@ enum Depois {
 enum Tarefa {
     Carregar(String),
     Salvar(String),
+    /// Pergunta ao Claude (true = refatorar, false = explicar).
+    Ia(bool),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -102,12 +112,20 @@ enum Acao {
     Abrir,
     Salvar,
     SalvarComo,
+    Explicar,
+    Refatorar,
     Confirmar,
     Cancelar,
 }
 
-const BOTOES: [(Acao, &str); 4] =
-    [(Acao::Novo, "Novo"), (Acao::Abrir, "Abrir"), (Acao::Salvar, "Salvar"), (Acao::SalvarComo, "Salvar como")];
+const BOTOES: [(Acao, &str); 6] = [
+    (Acao::Novo, "Novo"),
+    (Acao::Abrir, "Abrir"),
+    (Acao::Salvar, "Salvar"),
+    (Acao::SalvarComo, "Salvar como"),
+    (Acao::Explicar, "Explicar (IA)"),
+    (Acao::Refatorar, "Refatorar (IA)"),
+];
 
 pub struct Editor {
     linhas: Vec<String>,
@@ -136,6 +154,11 @@ pub struct Editor {
     ctrl: bool,
     /// Arrastando a barra de rolagem: distancia do clique ao topo do cursor dela.
     arrasto: Option<i32>,
+    linguagem: Linguagem,
+    /// Estado do realce no comeco de cada linha; validos ate `estados_ok`.
+    estados: Vec<realce::Estado>,
+    estados_ok: usize,
+    pedidos: Vec<Pedido>,
 }
 
 impl Editor {
@@ -160,8 +183,22 @@ impl Editor {
             quadro_mostrado: false,
             ctrl: false,
             arrasto: None,
+            linguagem: Linguagem::Nenhuma,
+            estados: vec![realce::NORMAL],
+            estados_ok: 1,
+            pedidos: Vec::new(),
         };
         editor.atualizar_titulo();
+        editor
+    }
+
+    /// Janela com um texto pronto (resposta da IA), sem arquivo.
+    pub fn com_texto(titulo: &str, texto: &str, linguagem: Linguagem) -> Editor {
+        let mut editor = Editor::novo();
+        let (linhas, _, _) = linhas_do_arquivo(texto.as_bytes());
+        editor.linhas = linhas;
+        editor.linguagem = linguagem;
+        editor.titulo = String::from(titulo);
         editor
     }
 
@@ -257,6 +294,7 @@ impl Editor {
 
     /// Depois de cada mudanca no texto: o titulo ganha o '*'.
     fn alterou(&mut self) {
+        self.estados_ok = self.estados_ok.min(self.linha.saturating_sub(1) + 1);
         self.coluna_alvo = self.coluna;
         self.mensagem = None;
         if !self.modificado {
@@ -281,6 +319,7 @@ impl Editor {
 
     /// Documento novo e vazio.
     fn limpar(&mut self) {
+        self.estados_ok = 1;
         self.linhas = vec![String::new()];
         self.colocar_cursor(0, 0);
         self.topo = 0;
@@ -467,6 +506,8 @@ impl Editor {
                 None => self.pedir_caminho(Modo::SalvarComo),
             },
             Acao::SalvarComo => self.pedir_caminho(Modo::SalvarComo),
+            Acao::Explicar => self.agendar(Tarefa::Ia(false)),
+            Acao::Refatorar => self.agendar(Tarefa::Ia(true)),
             Acao::Confirmar => self.confirmar(),
             Acao::Cancelar => self.cancelar(),
         }
@@ -549,6 +590,7 @@ impl Editor {
         match self.tarefa.take() {
             Some(Tarefa::Carregar(caminho)) => self.carregar(caminho),
             Some(Tarefa::Salvar(caminho)) => self.salvar(caminho),
+            Some(Tarefa::Ia(refatorar)) => self.perguntar_ia(refatorar),
             None => return false,
         }
         true
@@ -568,6 +610,8 @@ impl Editor {
             Ok(dados) => {
                 let (linhas, crlf, trocados) = linhas_do_arquivo(&dados);
                 self.linhas = linhas;
+                self.linguagem = realce::linguagem_do_caminho(&caminho);
+                self.estados_ok = 1;
                 self.crlf = crlf;
                 self.colocar_cursor(0, 0);
                 self.topo = 0;
@@ -594,11 +638,56 @@ impl Editor {
         }
     }
 
+    /// Manda o documento para o Claude e abre a resposta numa janela nova.
+    fn perguntar_ia(&mut self, refatorar: bool) {
+        let codigo = String::from_utf8_lossy(&self.conteudo()).into_owned();
+        if codigo.trim().is_empty() {
+            self.erro(String::from("O documento está vazio"));
+            return;
+        }
+        let nome = self.caminho.as_deref().map_or("sem título", nome_do_caminho);
+        let lingua = realce::nome(self.linguagem);
+        let sistema = "Você é um assistente de programação dentro do editor do MXOS. Responda em português do Brasil,                        em texto simples (sem Markdown), com linhas de no máximo 100 colunas.";
+        let pergunta = if refatorar {
+            format!(
+                "Refatore este arquivo ({lingua}) para ficar mais claro e eficiente, sem mudar o comportamento.                  Responda somente com o arquivo completo refatorado, sem explicações e sem cercas de código.
+
+                 Arquivo: {nome}
+
+{codigo}"
+            )
+        } else {
+            format!(
+                "Explique o que este arquivo ({lingua}) faz, parte por parte, e aponte possíveis bugs ou melhorias.                  O cursor está na linha {}.
+
+Arquivo: {nome}
+
+{codigo}",
+                self.linha + 1
+            )
+        };
+        match crate::ia::perguntar(sistema, &pergunta) {
+            Ok(resposta) => {
+                let (titulo, texto, lingua) = if refatorar {
+                    (format!("Refatorado — {nome}"), sem_cercas(&resposta), self.linguagem)
+                } else {
+                    (format!("Explicação — {nome}"), resposta, Linguagem::Nenhuma)
+                };
+                let app = Editor::com_texto(&titulo, &texto, lingua);
+                self.pedidos.push(Pedido::Abrir { app: Box::new(app), x: -1, y: -1 });
+                self.info(String::from("Resposta da IA aberta numa janela nova"));
+            }
+            Err(e) => self.erro(e),
+        }
+    }
+
     fn salvar(&mut self, caminho: String) {
         let dados = self.conteudo();
         match armazenamento::escrever(&caminho, &dados) {
             Ok(()) => {
                 self.info(format!("Salvo: {} ({})", nome_do_caminho(&caminho), tamanho_texto(dados.len() as u64)));
+                self.linguagem = realce::linguagem_do_caminho(&caminho);
+                self.estados_ok = 1;
                 self.caminho = Some(caminho);
                 self.modificado = false;
                 self.atualizar_titulo();
@@ -792,6 +881,7 @@ impl Editor {
         s.retangulo(Retangulo::novo(numeros.direita() - 1, area.y, 1, area.altura), cor_linha(t));
         let (x, colunas, visiveis) = (self.x_texto(), self.colunas_visiveis(), self.linhas_visiveis());
         let apagada = cor_texto_fraco(t);
+        let escuro = ((papel >> 16 & 0xFF) * 3 + (papel >> 8 & 0xFF) * 6 + (papel & 0xFF)) / 10 < 128;
         for (fila, i) in (self.topo..self.linhas.len()).take(visiveis).enumerate() {
             let y = area.y + PREENCHIMENTO + fila as i32 * ALTURA_LINHA;
             let atual = i == self.linha;
@@ -805,7 +895,30 @@ impl Editor {
             let linha = &self.linhas[i];
             let inicio = byte_de(linha, self.esquerda);
             let fim = inicio + byte_de(&linha[inicio..], colunas);
-            s.texto_com(x, y + BASE_LINHA, &linha[inicio..fim], t.texto, &MONO);
+            if self.linguagem == Linguagem::Nenhuma {
+                s.texto_com(x, y + BASE_LINHA, &linha[inicio..fim], t.texto, &MONO);
+                continue;
+            }
+            // trechos coloridos; o que sobra entre eles sai na cor normal
+            let estado = self.estados.get(i).copied().unwrap_or(realce::NORMAL);
+            let mut ultimo = inicio;
+            let mut pintar = |a: usize, b: usize, cor: u32, s: &mut Superficie| {
+                let (a, b) = (a.max(inicio), b.min(fim));
+                if a < b {
+                    let col = linha[inicio..a].chars().count() as i32;
+                    s.texto_com(x + col * LARGURA_CARACTERE, y + BASE_LINHA, &linha[a..b], cor, &MONO);
+                }
+            };
+            realce::linha(self.linguagem, linha, estado, &mut |a, b, classe| {
+                if a > ultimo {
+                    pintar(ultimo, a, t.texto, s);
+                }
+                pintar(a, b, realce::cor(classe, escuro, t.texto), s);
+                ultimo = ultimo.max(b);
+            });
+            if ultimo < fim {
+                pintar(ultimo, fim, t.texto, s);
+            }
         }
         let na_vista = (self.topo..self.topo + visiveis).contains(&self.linha)
             && (self.esquerda..=self.esquerda + colunas).contains(&self.coluna);
@@ -848,8 +961,37 @@ impl Editor {
         Some(match self.tarefa.as_ref()? {
             Tarefa::Carregar(caminho) => format!("Carregando {caminho}…"),
             Tarefa::Salvar(caminho) => format!("Salvando {caminho}…"),
+            Tarefa::Ia(_) => String::from("Perguntando ao Claude… (pode levar um minuto)"),
         })
     }
+}
+
+impl Editor {
+    /// Calcula os estados do realce ate a ultima linha visivel.
+    fn preparar_realce(&mut self) {
+        if self.linguagem == Linguagem::Nenhuma {
+            return;
+        }
+        let ate = (self.topo + self.linhas_visiveis() + 1).min(self.linhas.len());
+        self.estados.truncate(self.estados_ok.max(1));
+        while self.estados.len() < ate {
+            let i = self.estados.len() - 1;
+            let e = realce::linha(self.linguagem, &self.linhas[i], self.estados[i], &mut |_, _, _| {});
+            self.estados.push(e);
+        }
+        self.estados_ok = self.estados.len();
+    }
+}
+
+/// Tira as cercas ``` que o modelo as vezes poe em volta do codigo.
+fn sem_cercas(texto: &str) -> String {
+    let t = texto.trim();
+    if let Some(resto) = t.strip_prefix("```") {
+        let corpo = resto.split_once('\n').map_or("", |x| x.1);
+        let corpo = corpo.trim_end().strip_suffix("```").unwrap_or(corpo);
+        return String::from(corpo.trim_end());
+    }
+    String::from(t)
 }
 
 impl App for Editor {
@@ -862,6 +1004,7 @@ impl App for Editor {
     }
 
     fn desenhar(&mut self, s: &mut Superficie) {
+        self.preparar_realce();
         let t = tema::atual();
         s.limpar(t.fundo_janela);
         self.desenhar_barra(s, &t);
@@ -872,6 +1015,10 @@ impl App for Editor {
         }
         self.desenhar_estado(s, &t);
         self.quadro_mostrado = true;
+    }
+
+    fn pedidos(&mut self) -> Vec<Pedido> {
+        core::mem::take(&mut self.pedidos)
     }
 
     fn evento(&mut self, e: EventoApp) -> bool {

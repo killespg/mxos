@@ -20,7 +20,9 @@ mod fonte;
 mod gic;
 mod gui;
 mod heap;
+mod ia;
 mod irq;
+mod json;
 mod mapa;
 #[cfg_attr(target_arch = "arm", path = "mmu_arm.rs")]
 mod mmu;

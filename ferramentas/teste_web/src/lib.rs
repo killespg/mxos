@@ -12,6 +12,12 @@ pub mod cripto;
 #[path = "../../../src/rede/tls.rs"]
 pub mod tls;
 
+#[path = "../../../src/json.rs"]
+pub mod json;
+
+#[path = "../../../src/gui/realce.rs"]
+pub mod realce;
+
 pub mod rede;
 pub mod png;
 

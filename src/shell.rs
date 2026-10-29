@@ -292,6 +292,7 @@ impl Shell {
             "echo" => diga!(self, "{argumentos}"),
             "info" => self.info(),
             "uptime" => self.uptime(),
+            "config" => self.config(argumentos),
             "mem" => self.memoria(),
             "mmu" => self.mmu(),
             "traduzir" => self.traduzir(argumentos),
@@ -416,6 +417,37 @@ impl Shell {
         }
     }
 
+
+    /// config            -> lista tudo
+    /// config chave       -> mostra um valor
+    /// config chave valor -> grava em /config/mxos.cfg
+    fn config(&mut self, argumentos: &str) {
+        let mut cfg = crate::config::Config::carregar();
+        let (chave, valor) = match argumentos.trim().split_once(char::is_whitespace) {
+            Some((c, v)) => (c, Some(v.trim())),
+            None => (argumentos.trim(), None),
+        };
+        match (chave, valor) {
+            ("", _) => {
+                for (k, v) in cfg.pares() {
+                    // chaves de API nao aparecem inteiras
+                    let mostrado = if k.contains("chave") && v.len() > 8 { alloc::format!("{}…", &v[..8]) } else { String::from(v) };
+                    diga!(self, "{k} = {mostrado}");
+                }
+            }
+            (k, None) => match cfg.obter(k) {
+                Some(v) => diga!(self, "{k} = {v}"),
+                None => diga!(self, "{k}: não definido"),
+            },
+            (k, Some(v)) => {
+                cfg.definir(k, v);
+                match cfg.salvar() {
+                    Ok(()) => diga!(self, "{k} gravado"),
+                    Err(e) => diga!(self, "config: não gravou ({e})"),
+                }
+            }
+        }
+    }
 
     fn uptime(&mut self) {
         let freq = cpu::frequencia_timer();

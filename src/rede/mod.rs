@@ -354,6 +354,11 @@ pub fn http_get(url: &str, tempo_limite_ms: u64) -> Result<Resposta, ErroRede> {
     http::get(url, tempo_limite_ms)
 }
 
+/// POST com cabecalhos extras (APIs JSON).
+pub fn http_post(url: &str, cabecalhos: &[(&str, &str)], corpo: &[u8], tempo_limite_ms: u64) -> Result<Resposta, ErroRede> {
+    http::post(url, cabecalhos, corpo, tempo_limite_ms)
+}
+
 // ---------------- utilitarios das camadas ----------------
 
 fn ler16(b: &[u8], i: usize) -> u16 {
