@@ -38,8 +38,8 @@ mod tcp;
 mod udp;
 mod ntp;
 pub mod tls;
-#[cfg(feature = "mxq")]
-mod meson_eth;
+#[cfg(any(feature = "mxq", feature = "rk322x"))]
+mod dwmac;
 mod virtio_net;
 
 /// Uma placa de rede: virtio-net (QEMU) ou o Ethernet da Amlogic (box).
@@ -70,9 +70,9 @@ impl Placa for virtio_net::VirtioNet {
 fn achar_placa() -> Result<alloc::boxed::Box<dyn Placa>, ErroRede> {
     match virtio_net::VirtioNet::iniciar() {
         Ok(nic) => Ok(alloc::boxed::Box::new(nic)),
-        #[cfg(feature = "mxq")]
-        Err(_) => Ok(alloc::boxed::Box::new(meson_eth::MesonEth::iniciar()?)),
-        #[cfg(not(feature = "mxq"))]
+        #[cfg(any(feature = "mxq", feature = "rk322x"))]
+        Err(_) => Ok(alloc::boxed::Box::new(dwmac::Dwmac::iniciar()?)),
+        #[cfg(not(any(feature = "mxq", feature = "rk322x")))]
         Err(e) => Err(e),
     }
 }
