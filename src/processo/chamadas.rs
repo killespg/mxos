@@ -569,6 +569,7 @@ fn ler(t: &mut Tabela, i: usize, fd: u64, endereco: usize, tamanho: usize) -> Fi
             nova_posicao = fim;
             dados[inicio..fim].to_vec()
         }
+        Tipo::Som => return Fim::Valor(-EINVAL),
         Tipo::Bloco(nome, setores) => match arquivos::ler_bloco(nome, *setores, posicao, tamanho) {
             Ok(v) => {
                 nova_posicao = posicao + v.len();
@@ -636,6 +637,13 @@ fn escrever_dados(t: &mut Tabela, i: usize, fd: u64, dados: &[u8]) -> Fim {
             }
             let n = dados.len().min(TAMANHO_TUBO - tb.buffer.len());
             tb.buffer.extend(&dados[..n]);
+            return Fim::Valor(n as i64);
+        }
+        Tipo::Som => {
+            let n = crate::audio::dsp::escrever(dados);
+            if n == 0 && !dados.is_empty() {
+                return Fim::Esperar("tocando som");
+            }
             return Fim::Valor(n as i64);
         }
         Tipo::Bloco(nome, setores) => {
@@ -1013,6 +1021,36 @@ const TIOCGWINSZ: u64 = 0x5413;
 const FIONREAD: u64 = 0x541B;
 const FIONBIO: u64 = 0x5421;
 
+/// ioctl do /dev/dsp (OSS): so S16, a taxa e os canais que a placa aceita.
+fn ioctl_som(t: &mut Tabela, i: usize, pedido: u64, endereco: usize) -> R {
+    use crate::audio::dsp;
+    const AFMT_S16_LE: u32 = 0x10;
+    let ler = |t: &Tabela| ler_mem(t, i, endereco, 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let resposta = match pedido & 0xFFFF {
+        0x5000 | 0x5001 => return Ok(0),          // RESET, SYNC
+        0x5002 => dsp::taxa(ler(t)?),              // SPEED
+        0x5003 => dsp::canais(ler(t)? + 1) - 1,    // STEREO (0/1)
+        0x5006 => dsp::canais(ler(t)?),            // CHANNELS
+        0x5005 | 0x500B => AFMT_S16_LE,            // SETFMT, GETFMTS
+        0x5004 => 4096,                            // GETBLKSIZE
+        0x500A => return Ok(0),                    // SETFRAGMENT
+        0x500C => {
+            // GETOSPACE: fragmentos, total, tamanho, bytes livres
+            let livre = dsp::espaco() as u32;
+            let mut b = [0u8; 16];
+            b[0..4].copy_from_slice(&(livre / 4096).to_le_bytes());
+            b[4..8].copy_from_slice(&64u32.to_le_bytes());
+            b[8..12].copy_from_slice(&4096u32.to_le_bytes());
+            b[12..16].copy_from_slice(&livre.to_le_bytes());
+            escrever_mem(t, i, endereco, &b)?;
+            return Ok(0);
+        }
+        _ => return Err(EINVAL),
+    };
+    escrever_mem(t, i, endereco, &resposta.to_le_bytes())?;
+    Ok(0)
+}
+
 /// ioctl de disco cru: tamanhos (o mke2fs pergunta assim).
 fn ioctl_bloco(t: &mut Tabela, i: usize, setores: u64, pedido: u64, endereco: usize) -> R {
     match pedido {
@@ -1038,6 +1076,9 @@ fn ioctl(t: &mut Tabela, i: usize, fd: u64, pedido: u64, endereco: usize) -> Fim
         }
         if let Tipo::Bloco(_, setores) = aberto.borrow().tipo {
             return ioctl_bloco(t, i, setores, pedido, endereco);
+        }
+        if let Tipo::Som = aberto.borrow().tipo {
+            return ioctl_som(t, i, pedido, endereco);
         }
         if !matches!(aberto.borrow().tipo, Tipo::Terminal) {
             return Err(ENOTTY);

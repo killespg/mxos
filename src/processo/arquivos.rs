@@ -11,6 +11,7 @@
 //!   Soquete           socket de rede (soquetes.rs)
 //!   Evento, Epoll     eventfd e epoll (espera.rs)
 //!   Bloco             disco cru (/dev/vdb): le e escreve setores direto
+//!   Som               /dev/dsp (OSS): amostras para o virtio-sound
 //!
 //! Um open cria uma Descricao (com a posicao); dup, fork e herancas so
 //! copiam o Rc, como no Linux (a posicao e dividida).
@@ -153,6 +154,8 @@ pub enum Tipo {
     Evento(Rc<RefCell<super::espera::Contador>>),
     /// Disco cru: nome e tamanho em setores de 512 bytes.
     Bloco(String, u64),
+    /// /dev/dsp
+    Som,
     Epoll(super::espera::Lista),
 }
 
@@ -206,6 +209,9 @@ impl Descricao {
 impl Drop for Descricao {
     fn drop(&mut self) {
         let _ = self.sincronizar();
+        if let Tipo::Som = self.tipo {
+            crate::audio::dsp::fechar();
+        }
         if let Tipo::Tubo(tubo, escrita) = &self.tipo {
             let mut t = tubo.borrow_mut();
             if *escrita {
@@ -258,6 +264,7 @@ pub fn dispositivo(caminho: &str) -> Option<Tipo> {
         "/dev/zero" => Tipo::Zero,
         "/dev/urandom" | "/dev/random" => Tipo::Aleatorio,
         "/dev/tty" | "/dev/console" | "/dev/tty0" | "/dev/ttyS0" => Tipo::Terminal,
+        "/dev/dsp" | "/dev/audio" if crate::audio::dsp::abrir() => Tipo::Som,
         _ => {
             let nome = caminho.strip_prefix("/dev/")?;
             let (_, setores) = armazenamento::crus().into_iter().find(|(n, _)| n == nome)?;
@@ -369,7 +376,7 @@ fn listar(caminho: &str) -> Result<Vec<ItemDePasta>, i64> {
         ItemDePasta { nome: "..".into(), pasta: true },
     ];
     if caminho == "/dev" {
-        for nome in ["null", "zero", "urandom", "random", "tty", "console"] {
+        for nome in ["null", "zero", "urandom", "random", "tty", "console", "dsp"] {
             itens.push(ItemDePasta { nome: nome.into(), pasta: false });
         }
         for (nome, _) in armazenamento::crus() {

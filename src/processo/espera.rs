@@ -69,6 +69,7 @@ pub fn prontidao(t: &Tabela, i: usize, fd: i32) -> u16 {
             (if ler { POLLIN } else { 0 }) | (if escrever { POLLOUT } else { 0 }) | (if erro { POLLERR } else { 0 }) | (if fechou { POLLHUP } else { 0 })
         }
         Tipo::Evento(c) => (if c.borrow().valor > 0 { POLLIN } else { 0 }) | POLLOUT,
+        Tipo::Som => if crate::audio::dsp::espaco() > 0 { POLLOUT } else { 0 },
         Tipo::Epoll(lista) => {
             // um epoll dentro de outro: pronto se algum vigiado esta
             let vigiados = lista.borrow().clone();

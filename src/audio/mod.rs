@@ -5,5 +5,6 @@
 // Nem todo item publico e usado por quem inclui o modulo.
 #![allow(dead_code)]
 
+pub mod dsp;
 pub mod gerador;
 pub mod virtio_som;

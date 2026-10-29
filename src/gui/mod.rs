@@ -93,6 +93,7 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
         // os processos rodam ate o proximo tique; o shell da janela mostra a saida
         gerenciador.enviar(id_terminal, EventoApp::Processos);
         atender_x11(&mut gerenciador, &mut janelas_x, (largura as i32, altura as i32));
+        crate::audio::dsp::bombear();
         gerenciador.compor(&framebuffer);
         // o tique de 100 Hz acorda; teclado e mouse sao lidos na volta.
         // Com processo pronto a CPU nao dorme: ele usa o tempo ate o tique.
