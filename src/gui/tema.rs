@@ -91,6 +91,9 @@ pub struct Aparencia {
     pub relogio_segundos: bool,
     /// Icones (atalhos) na coluna da esquerda da area de trabalho.
     pub icones: bool,
+    /// Arrastar uma janela mostra so o contorno; ela vai para o lugar ao
+    /// soltar (bem mais leve que redesenhar tudo a cada movimento).
+    pub arrastar_contorno: bool,
 }
 
 /// A aparencia de fabrica (a mesma do config::Config::padrao).
@@ -99,6 +102,7 @@ pub const APARENCIA_PADRAO: Aparencia = Aparencia {
     cor_papel: 0x0020_4060,
     relogio_segundos: true,
     icones: true,
+    arrastar_contorno: true,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

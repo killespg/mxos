@@ -20,6 +20,8 @@ Uso:
                                     mover X Y                 ponteiro em (X, Y) da tela
                                     clicar [esquerdo|direito|meio]
                                     arrastar X1 Y1 X2 Y2      aperta em 1, solta em 2
+                                    apertar [botao] / soltar [botao]   segura o botao
+                                                              (captura no meio de um arrasto)
                                     tecla QCODE               ex.: ret, esc, tab, f1, up, ctrl+c
                                     digitar TEXTO             teclado americano, sem ';'; letras
                                                               acentuadas e o c cedilha saem pelas
@@ -370,6 +372,8 @@ class Acoes:
             self.clicar(*argumentos)
         elif nome == "arrastar" and len(argumentos) == 4:
             self.arrastar(*map(int, argumentos))
+        elif nome in ("apertar", "soltar") and len(argumentos) <= 1:
+            self.botao(BOTOES[argumentos[0] if argumentos else "esquerdo"], nome == "apertar")
         elif nome == "tecla" and len(argumentos) == 1:
             self.tecla(argumentos[0])
         elif nome == "digitar" and resto:
@@ -385,7 +389,7 @@ def validar_acoes(acoes: list[str]) -> None:
     for acao in acoes:
         nome, _, resto = acao.partition(" ")
         argumentos = resto.split()
-        quantos = {"mover": [2], "clicar": [0, 1], "arrastar": [4], "tecla": [1], "esperar": [1]}
+        quantos = {"mover": [2], "clicar": [0, 1], "apertar": [0, 1], "soltar": [0, 1], "arrastar": [4], "tecla": [1], "esperar": [1]}
         if nome == "digitar":
             for c in resto:
                 teclas_do_caractere(c)
@@ -395,7 +399,7 @@ def validar_acoes(acoes: list[str]) -> None:
             raise ValueError(f"acao invalida: {acao!r}")
         elif nome in ("mover", "arrastar", "esperar"):
             [int(a) for a in argumentos]
-        elif nome == "clicar" and argumentos and argumentos[0] not in BOTOES:
+        elif nome in ("clicar", "apertar", "soltar") and argumentos and argumentos[0] not in BOTOES:
             raise ValueError(f"botao {argumentos[0]!r}: use esquerdo, direito ou meio")
 
 

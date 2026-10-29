@@ -16,7 +16,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::asm;
-use core::ptr;
 
 use crate::fonte::{self, Fonte};
 use crate::video::tela::{Formato, Tela};
@@ -373,34 +372,34 @@ pub fn apresentar(origem: &Superficie, framebuffer: &Tela, area: Retangulo) {
     if area.vazio() {
         return;
     }
-    if framebuffer.formato() == Formato::Xrgb8888 {
-        copiar_linhas(origem, framebuffer, area);
-    } else {
-        converter_pixels(origem, framebuffer, area);
+    apresentar_deslocado(origem, framebuffer, area, area.x, area.y);
+}
+
+/// Poe a superficie inteira na tela com o canto em (x, y). O que sai da
+/// tela e cortado. Serve para os pedacos pequenos (o cursor).
+pub fn apresentar_em(origem: &Superficie, framebuffer: &Tela, x: i32, y: i32) {
+    let limite = Retangulo::novo(0, 0, framebuffer.largura() as i32, framebuffer.altura() as i32);
+    let alvo = Retangulo::novo(x, y, origem.largura as i32, origem.altura as i32).intersecao(&limite);
+    if alvo.vazio() {
+        return;
     }
+    let de = alvo.deslocado(-x, -y);
+    apresentar_deslocado(origem, framebuffer, de, alvo.x, alvo.y);
+}
+
+/// A parte `area` de `origem` vai para (x, y) da tela: uma fileira por vez,
+/// convertida para o formato da tela, e o cache limpo uma vez so no fim
+/// (na TV box o VPU le a RAM direto; limpar a cada pixel custava uma
+/// linha inteira de cache por pixel).
+fn apresentar_deslocado(origem: &Superficie, framebuffer: &Tela, area: Retangulo, x: i32, y: i32) {
+    let (ox, largura) = (area.x as usize, area.largura as usize);
+    for k in 0..area.altura as usize {
+        let linha = (area.y as usize + k) * origem.largura + ox;
+        framebuffer.escrever_cores(x as usize, y as usize + k, &origem.pixels[linha..linha + largura]);
+    }
+    framebuffer.limpar_cache_area(x as usize, y as usize, largura, area.altura as usize);
     // Garante que as escritas sairam antes de qualquer outra coisa
     unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
-}
-
-/// Caminho rapido: uma copia de memoria por linha direto na base da Tela.
-fn copiar_linhas(origem: &Superficie, framebuffer: &Tela, area: Retangulo) {
-    let (x, largura) = (area.x as usize, area.largura as usize);
-    for y in area.y as usize..area.baixo() as usize {
-        let de = &origem.pixels[y * origem.largura + x..y * origem.largura + x + largura];
-        let para = (framebuffer.base() + y * framebuffer.passo() + x * 4) as *mut u32;
-        // Seguranca: area foi recortada no tamanho do framebuffer, e a
-        // Tela garante que [base, base + passo * altura) e memoria valida
-        unsafe { ptr::copy_nonoverlapping(de.as_ptr(), para, largura) };
-    }
-}
-
-/// Caminho lento para RGB565 / RGB888: a Tela codifica cada pixel.
-fn converter_pixels(origem: &Superficie, framebuffer: &Tela, area: Retangulo) {
-    for y in area.y as usize..area.baixo() as usize {
-        for x in area.x as usize..area.direita() as usize {
-            framebuffer.pixel(x, y, origem.pixels[y * origem.largura + x]);
-        }
-    }
 }
 
 impl fonte::Alvo for Superficie {

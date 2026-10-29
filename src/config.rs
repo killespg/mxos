@@ -9,6 +9,7 @@
 //!   cor_papel=204060
 //!   relogio_segundos=sim
 //!   icones=sim
+//!   arrastar_contorno=sim
 //!   layout=abnt2
 //!   pagina_inicial=disco:/paginas/index.html
 //!
@@ -35,12 +36,13 @@ const CABECALHO: &str = "# MXOS: configuracoes (chave=valor)\n";
 const TAMANHO_MAXIMO: usize = 16 * 1024;
 
 /// Chaves conhecidas e os valores de fabrica, na ordem em que sao gravadas.
-const PADROES: [(&str, &str); 7] = [
+const PADROES: [(&str, &str); 8] = [
     ("tema", "Azul"),
     ("papel", "gradiente"),
     ("cor_papel", "204060"),
     ("relogio_segundos", "sim"),
     ("icones", "sim"),
+    ("arrastar_contorno", "sim"),
     ("layout", "abnt2"),
     ("pagina_inicial", "disco:/paginas/index.html"),
 ];
@@ -142,7 +144,7 @@ fn valor_valido(chave: &str, valor: &str) -> bool {
         "tema" => tema::por_nome(valor).is_some(),
         "papel" => PapelDeParede::por_nome(valor).is_some(),
         "cor_papel" => ler_cor(valor).is_some(),
-        "relogio_segundos" | "icones" => ler_sim_nao(valor).is_some(),
+        "relogio_segundos" | "icones" | "arrastar_contorno" => ler_sim_nao(valor).is_some(),
         "layout" => ler_layout(valor).is_some(),
         _ => !valor.is_empty(),
     }
@@ -208,6 +210,7 @@ pub fn aparencia_de(cfg: &Config) -> Aparencia {
         cor_papel: cfg.obter("cor_papel").and_then(ler_cor).unwrap_or(padrao.cor_papel),
         relogio_segundos: sim_nao("relogio_segundos", padrao.relogio_segundos),
         icones: sim_nao("icones", padrao.icones),
+        arrastar_contorno: sim_nao("arrastar_contorno", padrao.arrastar_contorno),
     }
 }
 
@@ -230,6 +233,7 @@ pub fn guardar_aparencia(cfg: &mut Config) {
     cfg.definir("cor_papel", &texto_cor(a.cor_papel));
     cfg.definir("relogio_segundos", texto_sim_nao(a.relogio_segundos));
     cfg.definir("icones", texto_sim_nao(a.icones));
+    cfg.definir("arrastar_contorno", texto_sim_nao(a.arrastar_contorno));
 }
 
 /// Layout do teclado de `cfg`: "us" ou "abnt2" (padrao).

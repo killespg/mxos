@@ -232,6 +232,46 @@ impl Tela {
         self.depois_de_desenhar(y, fim_y - y);
     }
 
+    /// Escreve uma fileira de cores a partir de (x, y), ja no formato da
+    /// tela (o que passa da borda e cortado). Nao limpa o cache: quem
+    /// escreve varias fileiras chama `limpar_cache_area` uma vez no fim.
+    pub fn escrever_cores(&self, x: usize, y: usize, cores: &[Cor]) {
+        if y >= self.altura || x >= self.largura {
+            return;
+        }
+        let n = cores.len().min(self.largura - x);
+        let endereco = self.endereco(x, y);
+        // Seguranca: (x, y) e os n pixels cabem na tela (conferido acima)
+        unsafe {
+            match self.formato {
+                Formato::Xrgb8888 => core::ptr::copy_nonoverlapping(cores.as_ptr(), endereco as *mut u32, n),
+                Formato::Rgb565 => {
+                    let destino = endereco as *mut u16;
+                    for (k, &cor) in cores[..n].iter().enumerate() {
+                        destino.add(k).write(Formato::Rgb565.codificar(cor) as u16);
+                    }
+                }
+                Formato::Rgb888 => {
+                    for (k, &cor) in cores[..n].iter().enumerate() {
+                        self.gravar(endereco + k * 3, cor & 0x00FF_FFFF);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Manda para a RAM (dc cvac) a parte da tela que mudou, para o
+    /// dispositivo que le sem passar pelo cache. Sem isso ligado, nada.
+    pub fn limpar_cache_area(&self, x: usize, y: usize, largura: usize, altura: usize) {
+        if !self.limpar_cache || x >= self.largura || y >= self.altura {
+            return;
+        }
+        let largura = largura.min(self.largura - x);
+        for linha in y..(y + altura).min(self.altura) {
+            limpar_cache(self.endereco(x, linha), largura * self.formato.bytes_por_pixel());
+        }
+    }
+
     /// Pinta as colunas [x, fim_x) de uma linha com um valor codificado.
     fn pintar_trecho(&self, y: usize, x: usize, fim_x: usize, valor: u32) {
         let bytes = self.formato.bytes_por_pixel();

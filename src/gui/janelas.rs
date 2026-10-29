@@ -31,6 +31,7 @@ use super::grafico::{self, Cor, Retangulo, Superficie};
 use super::tema::{self, ALTURA_BARRA_TAREFAS, ALTURA_TITULO, Aparencia, BORDA, Tema};
 use super::widgets::Icone;
 use crate::cpu;
+use crate::video::tela::Tela;
 use crate::entrada::{Botao, Evento, Layout};
 use crate::fonte::{self, INTER_NEGRITO};
 
@@ -129,8 +130,31 @@ const PASSO_CASCATA: i32 = 28;
 const DEGRAUS_CASCATA: i32 = 8;
 /// Areas sujas guardadas separadas antes de juntar tudo numa so.
 const MAX_SUJAS: usize = 4;
-/// Pedacos que um compor pode mudar: as areas sujas e os dois do cursor.
-pub const MAX_PARTES: usize = MAX_SUJAS + 2;
+/// Espessura do contorno da janela arrastada.
+const LINHA_CONTORNO: i32 = 2;
+
+/// As quatro faixas da borda de `r` (cima, baixo, esquerda, direita).
+fn faixas_contorno(r: Retangulo) -> [Retangulo; 4] {
+    faixas(r, LINHA_CONTORNO)
+}
+
+/// O contorno e uma linha dupla: escura por fora e clara por dentro, para
+/// aparecer em cima de qualquer fundo. (faixa, cor) recortadas em `dentro`.
+fn pedacos_contorno(r: Retangulo, dentro: Retangulo) -> impl Iterator<Item = (Retangulo, Cor)> {
+    let fora = faixas(r, 1).map(|f| (f, 0x0010_1010));
+    let miolo = faixas(Retangulo::novo(r.x + 1, r.y + 1, r.largura - 2, r.altura - 2), 1).map(|f| (f, 0x00F0_F0F0));
+    fora.into_iter().chain(miolo).map(move |(f, cor)| (f.intersecao(&dentro), cor)).filter(|(f, _)| !f.vazio())
+}
+
+/// As quatro faixas de espessura `e` na borda de `r`.
+fn faixas(r: Retangulo, e: i32) -> [Retangulo; 4] {
+    [
+        Retangulo::novo(r.x, r.y, r.largura, e),
+        Retangulo::novo(r.x, r.baixo() - e, r.largura, e),
+        Retangulo::novo(r.x, r.y + e, e, r.altura - 2 * e),
+        Retangulo::novo(r.direita() - e, r.y + e, e, r.altura - 2 * e),
+    ]
+}
 
 /// Enter (Caractere) na area de trabalho: abre o atalho escolhido.
 const ENTER: u8 = 13;
@@ -372,8 +396,12 @@ pub struct Gerenciador {
     barra: BarraTarefas,
     menu: MenuIniciar,
     cursor: (i32, i32),
-    /// Onde o cursor esta desenhado no destino (None = destino ainda vazio).
+    /// Onde o cursor esta desenhado na tela (None = ainda nao foi).
     cursor_desenhado: Option<(i32, i32)>,
+    /// Contorno da janela sendo arrastada (com arrastar_contorno) e onde
+    /// ele esta desenhado na tela.
+    contorno: Option<Retangulo>,
+    contorno_desenhado: Option<Retangulo>,
     botoes: u8,
     arrasto: Option<Arrasto>,
     /// Janela que recebeu o clique no conteudo: fica com o mouse ate soltar.
@@ -408,6 +436,8 @@ impl Gerenciador {
             menu: MenuIniciar::novo(altura - ALTURA_BARRA_TAREFAS),
             cursor: (largura / 2, altura / 2),
             cursor_desenhado: None,
+            contorno: None,
+            contorno_desenhado: None,
             botoes: 0,
             arrasto: None,
             captura: None,
@@ -548,13 +578,20 @@ impl Gerenciador {
         self.barra.sujar();
     }
 
+    /// (x, y) ajustado para a moldura da janela `i` nao sair da tela nem
+    /// entrar na barra de tarefas.
+    fn posicao_valida(&self, i: usize, x: i32, y: i32) -> (i32, i32) {
+        let janela = &self.janelas[i];
+        let x = x.clamp(0, (self.largura - janela.largura()).max(0));
+        let y = y.clamp(0, (self.altura_area() - janela.altura()).max(0));
+        (x, y)
+    }
+
     /// Poe a moldura em (x, y), sem sair da tela nem entrar na barra.
     fn mover_janela(&mut self, id: usize, x: i32, y: i32) {
-        let (largura, altura_area) = (self.largura, self.altura_area());
         let Some(i) = self.indice(id) else { return };
+        let (x, y) = self.posicao_valida(i, x, y);
         let janela = &mut self.janelas[i];
-        let x = x.clamp(0, (largura - janela.largura()).max(0));
-        let y = y.clamp(0, (altura_area - janela.altura()).max(0));
         if (x, y) == (janela.x, janela.y) {
             return;
         }
@@ -623,7 +660,15 @@ impl Gerenciador {
         let (x, y) = (x.clamp(0, self.largura - 1), y.clamp(0, self.altura - 1));
         self.cursor = (x, y);
         if let Some(a) = self.arrasto {
-            self.mover_janela(a.id, x - a.dx, y - a.dy);
+            let Some(i) = self.indice(a.id) else { return };
+            if tema::aparencia().arrastar_contorno {
+                // so o contorno anda; a janela vai para o lugar ao soltar
+                let (cx, cy) = self.posicao_valida(i, x - a.dx, y - a.dy);
+                let m = self.janelas[i].moldura();
+                self.contorno = Some(Retangulo::novo(cx, cy, m.largura, m.altura));
+            } else {
+                self.mover_janela(a.id, x - a.dx, y - a.dy);
+            }
             return;
         }
         self.passar_atalhos(x, y);
@@ -795,6 +840,9 @@ impl Gerenciador {
     fn soltar(&mut self, botao: Botao) {
         self.botoes &= !bit_do_botao(botao);
         if botao == Botao::Esquerdo {
+            if let (Some(a), Some(c)) = (self.arrasto, self.contorno.take()) {
+                self.mover_janela(a.id, c.x, c.y);
+            }
             self.arrasto = None;
         }
         if let Some(id) = self.captura {
@@ -914,51 +962,81 @@ impl Gerenciador {
         }
     }
 
-    /// Monta na cena o que mudou e passa para `destino` (o buffer de tras,
-    /// sempre o mesmo, do tamanho da tela), com o cursor por cima.
-    /// Devolve a area de `destino` que mudou.
-    pub fn compor(&mut self, destino: &mut Superficie) -> Option<Retangulo> {
-        let partes = self.compor_partes(destino);
-        let uniao = partes.iter().fold(Retangulo::default(), |u, p| u.uniao(p));
-        (!uniao.vazio()).then_some(uniao)
-    }
-
-    /// Igual a compor, mas devolve cada pedaco que mudou separado (os
-    /// vazios sobram no fim). Bom para apresentar so os pedacos quando o
-    /// cursor e uma janela mudam longe um do outro.
-    pub fn compor_partes(&mut self, destino: &mut Superficie) -> [Retangulo; MAX_PARTES] {
+    /// Monta na cena o que mudou e manda cada pedaco sujo para a tela (um
+    /// por vez: o relogio e o mouse longe um do outro nao viram um
+    /// retangulo enorme). O contorno do arrasto e o cursor vao direto na
+    /// tela, por cima, e saem copiando de volta o que a cena tem embaixo.
+    pub fn compor(&mut self, tela: &Tela) {
         let (t, ap) = (tema::atual(), tema::aparencia());
         self.atualizar_caches(&t, &ap);
-        let mut partes = [Retangulo::default(); MAX_PARTES];
-        let mut n = 0;
         let sujas = core::mem::take(&mut self.sujas);
         for &area in &sujas {
             self.pintar_cena(area, &t, &ap);
-            self.cena.copiar_regiao_para(area, destino, area.x, area.y);
-            partes[n] = area;
-            n += 1;
+            grafico::apresentar(&self.cena, tela, area);
         }
-        // o cursor parado so precisa voltar se uma area suja passou por cima
-        // dele (o relogio mudando nao arrasta o cursor para a conta)
+        let tocou = |r: Retangulo| sujas.iter().any(|a| !a.intersecao(&r).vazio());
+
+        // contorno: refeito se andou ou se uma area suja passou por ele
+        let mut refeito = Retangulo::default();
+        if self.contorno != self.contorno_desenhado || self.contorno_desenhado.is_some_and(tocou) {
+            if let Some(velho) = self.contorno_desenhado.take() {
+                for faixa in faixas_contorno(velho) {
+                    grafico::apresentar(&self.cena, tela, faixa);
+                }
+                refeito = velho;
+            }
+            if let Some(novo) = self.contorno {
+                for (f, cor) in pedacos_contorno(novo, self.tela()) {
+                    tela.retangulo(f.x as usize, f.y as usize, f.largura as usize, f.altura as usize, cor);
+                }
+                refeito = refeito.uniao(&novo);
+            }
+            self.contorno_desenhado = self.contorno;
+        }
+
+        // o cursor parado so volta se algo foi desenhado por cima dele (o
+        // relogio mudando nao arrasta o cursor para a conta)
         let apagado = self.cursor_desenhado.is_none_or(|c| {
             let r = retangulo_cursor(c);
-            sujas.iter().any(|a| !a.intersecao(&r).vazio())
+            tocou(r) || !refeito.intersecao(&r).vazio()
         });
         self.sujas = sujas;
         self.sujas.clear(); // devolve o Vec (sem realocar a cada quadro)
-
         if apagado || self.cursor_desenhado != Some(self.cursor) {
             if let Some(velho) = self.cursor_desenhado {
-                let velho = retangulo_cursor(velho).intersecao(&self.tela());
-                self.cena.copiar_regiao_para(velho, destino, velho.x, velho.y);
-                partes[n] = velho;
-                n += 1;
+                grafico::apresentar(&self.cena, tela, retangulo_cursor(velho));
+                if let Some(c) = self.contorno_desenhado {
+                    // apagar o cursor velho pode ter levado um pedaco do contorno
+                    let embaixo = retangulo_cursor(velho).intersecao(&self.tela());
+                    for (f, cor) in pedacos_contorno(c, embaixo) {
+                        tela.retangulo(f.x as usize, f.y as usize, f.largura as usize, f.altura as usize, cor);
+                    }
+                }
             }
-            cursor::desenhar(destino, self.cursor.0, self.cursor.1);
+            // o fundo da seta vem da cena; se o contorno passa ali, vai junto
+            let r = retangulo_cursor(self.cursor);
+            match self.contorno_desenhado {
+                Some(c) if faixas_contorno(c).iter().any(|f| !f.intersecao(&r).vazio()) => {
+                    self.desenhar_cursor_sobre_contorno(tela, c);
+                }
+                _ => cursor::desenhar_na_tela(&self.cena, tela, self.cursor.0, self.cursor.1),
+            }
             self.cursor_desenhado = Some(self.cursor);
-            partes[n] = retangulo_cursor(self.cursor).intersecao(&self.tela());
         }
-        partes
+    }
+
+    /// O cursor em cima de um pedaco do contorno: monta o pedaco com o
+    /// contorno e a seta e manda junto.
+    fn desenhar_cursor_sobre_contorno(&self, tela: &Tela, contorno: Retangulo) {
+        let (x, y) = self.cursor;
+        let r = retangulo_cursor(self.cursor);
+        let mut pedaco = Superficie::nova(cursor::LARGURA as usize, cursor::ALTURA as usize, 0);
+        self.cena.copiar_regiao_para(r, &mut pedaco, 0, 0);
+        for (f, cor) in pedacos_contorno(contorno, r) {
+            pedaco.retangulo(f.deslocado(-x, -y), cor);
+        }
+        cursor::desenhar(&mut pedaco, 0, 0);
+        grafico::apresentar_em(&pedaco, tela, x, y);
     }
 
     /// Redesenha o que o app pediu, barras de titulo, barra de tarefas,

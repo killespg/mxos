@@ -8,8 +8,10 @@
 //!   - widgets: botoes, campos, listas, abas, icones e graficos dos apps
 //!   - apps:    os programas que moram nas janelas (arquivos, navegador...)
 //!
-//! Tudo e desenhado num buffer de tras no heap; so a parte que mudou vai
-//! para o framebuffer. Entre um quadro e outro a CPU dorme no WFI.
+//! Tudo e montado numa cena no heap (a tela sem o cursor); so os pedacos
+//! que mudaram vao para o framebuffer, cada um separado, e o cursor e o
+//! contorno do arrasto sao desenhados direto nele. Entre um quadro e outro
+//! a CPU dorme no WFI.
 //!
 //! Antes do primeiro quadro o laco le as configuracoes (/config/mxos.cfg):
 //! tema, papel de parede e layout do teclado voltam como estavam.
@@ -32,7 +34,6 @@ use crate::uart::Uart;
 use crate::video::tela::Tela;
 use crate::{drivers, excecao, irq, processo, rede, timer};
 use apps::terminal::{self, AppTerminal};
-use grafico::Superficie;
 use janelas::{EventoApp, Gerenciador, Pedido};
 use widgets::Icone;
 
@@ -53,7 +54,6 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
     anunciar_config(&mut shell, &cfg, entrada.layout());
 
     let (largura, altura) = (framebuffer.largura(), framebuffer.altura());
-    let mut fundo = Superficie::nova(largura, altura, tema::atual().area_cima);
     let mut gerenciador = Gerenciador::novo(largura as i32, altura as i32);
     apps::registrar_apps_basicos(&mut gerenciador);
     gerenciador.registrar_app(terminal::TITULO, Icone::Terminal, terminal::criar);
@@ -64,7 +64,7 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
     let mut id_terminal = gerenciador.abrir(Box::new(AppTerminal::nova(shell)), x, y);
     // o primeiro quadro sai antes de ler a serial: um comando que chegue
     // junto com o prompt nao deixa a tela parada no console do boot
-    mostrar(&mut gerenciador, &mut fundo, &framebuffer);
+    gerenciador.compor(&framebuffer);
     let mut proximo_tique = timer::tiques() + TIQUES_POR_TIQUE_APP;
     let mut utf8 = Utf8::default();
 
@@ -82,7 +82,7 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
         }
         // os processos rodam ate o proximo tique; o shell da janela mostra a saida
         gerenciador.enviar(id_terminal, EventoApp::Processos);
-        mostrar(&mut gerenciador, &mut fundo, &framebuffer);
+        gerenciador.compor(&framebuffer);
         // o tique de 100 Hz acorda; teclado e mouse sao lidos na volta.
         // Com processo pronto a CPU nao dorme: ele usa o tempo ate o tique.
         if !processo::tem_prontos() {
@@ -110,13 +110,6 @@ fn atender_externos(gerenciador: &mut Gerenciador, entrada: &mut Entrada) {
         if let Pedido::DefinirLayout(layout) = pedido {
             entrada.definir_layout(layout);
         }
-    }
-}
-
-/// Monta o que mudou no buffer de tras e passa so essa area para a tela.
-fn mostrar(gerenciador: &mut Gerenciador, fundo: &mut Superficie, framebuffer: &Tela) {
-    if let Some(area) = gerenciador.compor(fundo) {
-        grafico::apresentar(fundo, framebuffer, area);
     }
 }
 

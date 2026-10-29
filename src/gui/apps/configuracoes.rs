@@ -486,7 +486,10 @@ impl Configuracoes {
         if chave(0).contem(x, y) {
             return self.mudar_aparencia(|a| a.relogio_segundos = !a.relogio_segundos);
         }
-        chave(1).contem(x, y) && self.mudar_aparencia(|a| a.icones = !a.icones)
+        if chave(1).contem(x, y) {
+            return self.mudar_aparencia(|a| a.icones = !a.icones);
+        }
+        chave(2).contem(x, y) && self.mudar_aparencia(|a| a.arrastar_contorno = !a.arrastar_contorno)
     }
 
     fn clicar_teclado(&mut self, x: i32, y: i32) -> bool {
@@ -599,6 +602,7 @@ impl Configuracoes {
         titulo_secao(s, MARGEM, Y_CHAVES, "Área de trabalho", t);
         desenhar_chave(s, chave(0), "Relógio com segundos", "12:34:56 em vez de 12:34", a.relogio_segundos, t);
         desenhar_chave(s, chave(1), "Ícones na área de trabalho", "Atalhos na coluna da esquerda", a.icones, t);
+        desenhar_chave(s, chave(2), "Arrastar só o contorno", "Mais leve: a janela vai ao soltar", a.arrastar_contorno, t);
     }
 
     fn desenhar_teclado(&self, s: &mut Superficie, t: &Tema) {
@@ -869,9 +873,11 @@ fn quadrado_cor(i: usize) -> Retangulo {
 }
 
 /// Chave `i` da secao Area de trabalho (0 relogio, 1 icones), a linha toda.
+/// As chaves liga/desliga, duas por fileira.
 fn chave(i: usize) -> Retangulo {
     let coluna = LARGURA_UTIL / 2;
-    Retangulo::novo(MARGEM + i as i32 * coluna, Y_CHAVES + ABAIXO_TITULO, coluna - 8, 22)
+    let (fileira, lado) = ((i / 2) as i32, (i % 2) as i32);
+    Retangulo::novo(MARGEM + lado * coluna, Y_CHAVES + ABAIXO_TITULO + fileira * 34, coluna - 8, 22)
 }
 
 fn cartao_layout(i: usize) -> Retangulo {

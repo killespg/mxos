@@ -35,6 +35,15 @@ const SETA: [&[u8; LARGURA as usize]; ALTURA as usize] = [
     b"       PP   ",
 ];
 
+/// Desenha a seta na tela com a ponta em (x, y): o que estava embaixo vem
+/// de `cena`, a seta vai por cima num pedaco pequeno e so ele sai.
+pub fn desenhar_na_tela(cena: &Superficie, tela: &crate::video::tela::Tela, x: i32, y: i32) {
+    let mut pedaco = Superficie::nova(LARGURA as usize, ALTURA as usize, 0);
+    cena.copiar_regiao_para(super::grafico::Retangulo::novo(x, y, LARGURA, ALTURA), &mut pedaco, 0, 0);
+    desenhar(&mut pedaco, 0, 0);
+    super::grafico::apresentar_em(&pedaco, tela, x, y);
+}
+
 /// Desenha a seta com a ponta em (x, y). O que sai da superficie e cortado.
 pub fn desenhar(s: &mut Superficie, x: i32, y: i32) {
     for (dy, linha) in SETA.iter().enumerate() {
