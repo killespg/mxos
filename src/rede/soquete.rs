@@ -125,6 +125,11 @@ pub fn tcp_legivel(id: usize) -> bool {
     .unwrap_or(true)
 }
 
+/// Bytes na fila de envio (ainda sem ACK): quem manda muito espera baixar.
+pub fn tcp_por_enviar(id: usize) -> usize {
+    com(|p| p.tcp_com(id, |p| p.tcp.por_enviar())).unwrap_or(0)
+}
+
 /// Fechamento educado (FIN depois do que falta enviar).
 pub fn tcp_fechar_envio(id: usize) {
     let _ = com(|p| p.tcp_com(id, |p| p.tcp_fechar()));

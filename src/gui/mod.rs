@@ -74,6 +74,10 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
     let tela = (largura as i32, altura as i32);
     let (x, y) = posicao_do_terminal(tela);
     let mut id_terminal = gerenciador.abrir(Box::new(AppTerminal::nova(shell)), x, y);
+    // modo quiosque: o painel em tela cheia por cima de tudo
+    if Config::carregar().obter("quiosque").is_some_and(|v| v.trim() == "sim") {
+        gerenciador.abrir(apps::quiosque::criar(), 0, 0);
+    }
     // o primeiro quadro sai antes de ler a serial: um comando que chegue
     // junto com o prompt nao deixa a tela parada no console do boot
     gerenciador.compor(&framebuffer);
@@ -87,6 +91,7 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
         }
         atender_externos(&mut gerenciador, &mut entrada);
         rede::processar();
+        crate::nas::atender();
         if timer::tiques() >= proximo_tique {
             proximo_tique = timer::tiques() + TIQUES_POR_TIQUE_APP;
             gerenciador.tique();

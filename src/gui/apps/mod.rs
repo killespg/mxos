@@ -28,6 +28,7 @@ pub mod linux;
 pub mod multiterminal;
 pub mod navegador;
 pub mod pintura;
+pub mod quiosque;
 pub mod sobre;
 pub mod tarefas;
 pub mod visualizador;
@@ -56,6 +57,7 @@ pub fn registrar_apps_basicos(g: &mut Gerenciador) {
     g.registrar_app("Calculadora", Icone::Calculadora, criar_calculadora);
     g.registrar_app("Pintura", Icone::Pincel, criar_pintura);
     g.registrar_app("CHIP-8", Icone::Monitor, chip8::criar);
+    g.registrar_app("Quiosque", Icone::Monitor, quiosque::criar);
     g.registrar_app("Atualizar o sistema", Icone::Engrenagem, atualizar::criar);
     g.registrar_app("Sobre o MXOS", Icone::Info, criar_sobre);
 }

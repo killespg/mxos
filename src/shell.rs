@@ -351,6 +351,15 @@ impl Shell {
             "info" => self.info(),
             "uptime" => self.uptime(),
             "config" => self.config(argumentos),
+            "nas" => match argumentos.trim() {
+                "parar" => {
+                    crate::nas::parar();
+                    diga!(self, "NAS parado");
+                }
+                "ligar" => diga!(self, "{}", crate::nas::iniciar()),
+                _ if crate::nas::ligado() => diga!(self, "NAS ligado na porta {}, {} cliente(s)  (nas parar | nas ligar)", crate::nas::PORTA, crate::nas::clientes()),
+                _ => diga!(self, "NAS desligado  (config nas_senha <senha>, depois nas ligar)"),
+            },
             "mem" => self.memoria(),
             "mmu" => self.mmu(),
             "traduzir" => self.traduzir(argumentos),
@@ -721,6 +730,7 @@ impl Shell {
 /// O que roda cada vez que a CPU acorda esperando tecla no modo serial.
 fn processar_fundo() {
     crate::rede::processar();
+    crate::nas::atender();
 }
 
 

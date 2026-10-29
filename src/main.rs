@@ -28,6 +28,7 @@ mod mapa;
 mod midia;
 #[cfg_attr(target_arch = "arm", path = "mmu_arm.rs")]
 mod mmu;
+mod nas;
 mod navegador;
 mod plataforma;
 mod psci;

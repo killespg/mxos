@@ -201,6 +201,11 @@ impl Conexao {
     }
 
     /// O outro lado fechou e ja lemos tudo.
+    /// Bytes ainda nao confirmados pelo outro lado.
+    pub fn por_enviar(&self) -> usize {
+        self.envio.len()
+    }
+
     pub fn terminou(&self) -> bool {
         (self.fin_recebido || self.estado == Estado::Fechada) && self.recebido.is_empty()
     }
