@@ -113,7 +113,7 @@ fn geral(t: &Tabela, nome: &str) -> Option<String> {
             cpu::midr() & 0xF,
             cpu::nome_cpu(cpu::midr())
         ),
-        "version" => String::from("Linux version 6.1.0-mxos (MXOS 0.10, kernel ARM64 escrito do zero em Rust)\n"),
+        "version" => String::from("Linux version 6.1.0-mxos (MXOS 0.11, kernel ARM64 escrito do zero em Rust)\n"),
         "loadavg" => format!("0.00 0.00 0.00 1/{} {}\n", t.processos.len(), t.processos.last().map_or(0, |p| p.pid)),
         "stat" => {
             let c = crate::irq::contadores();

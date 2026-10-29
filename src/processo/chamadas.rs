@@ -1508,7 +1508,7 @@ fn getrandom(t: &mut Tabela, i: usize, endereco: usize, tamanho: usize) -> R {
 // Processos
 
 fn uname(t: &mut Tabela, i: usize, endereco: usize) -> R {
-    let campos = ["Linux", "mxos", "6.1.0-mxos", "MXOS 0.10", "aarch64", "(none)"];
+    let campos = ["Linux", "mxos", "6.1.0-mxos", "MXOS 0.11", "aarch64", "(none)"];
     let mut u = [0u8; 65 * 6];
     for (k, campo) in campos.iter().enumerate() {
         u[k * 65..k * 65 + campo.len()].copy_from_slice(campo.as_bytes());

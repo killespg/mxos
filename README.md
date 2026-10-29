@@ -398,14 +398,37 @@ A página `disco:/paginas/css.html` (com `estilo.css` por `<link>`) mostra tudo 
 
 ## Na TV box (ainda não testado no hardware)
 
-1. Solde ou encoste um adaptador **USB-TTL de 3,3 V** nos pinos TX/RX/GND da placa (115200 baud).
-2. Copie `saida/mxos-mxq.img` para um cartão SD FAT32.
-3. Ligue a box e aperte uma tecla na serial para parar no prompt do U-Boot.
-4. Digite:
-   ```
-   fatload mmc 0 0x1080000 mxos-mxq.img
-   booti 0x1080000 - ${dtb_mem_addr}
-   ```
+A imagem da box (`--features mxq`) tem o sistema inteiro: área de trabalho no HDMI (no framebuffer que o U-Boot
+deixa ligado), processos, NetSurf, X11, os 4 núcleos, a rede cabeada (Ethernet da Amlogic), o cartão SD e a eMMC
+(esta só de leitura, para não estragar o Android) e o USB (pendrive, teclado e mouse). Nada disso foi testado no
+hardware ainda.
+
+### Ligar só com um pendrive (sem cabo serial)
+
+1. `python rodar.py --mxq` cria `saida/pendrive/` com tudo: `mxos-mxq.img`, os programas (`bin`, `lib`, `usr`...),
+   e os arquivos de boot `aml_autoscript`, `s905_autoscript` e `mxos.dtb` (`ferramentas/boot_box.py`).
+2. Formate um pendrive em **FAT32** e copie **o conteúdo** de `saida/pendrive/` para a raiz dele.
+3. Plugue o pendrive (e o teclado/mouse USB e o cabo de rede) com a box desligada.
+4. Aperte o **botão de reset** escondido dentro do buraco do AV (com um palito) e, segurando, ligue a box.
+   Solte depois de uns 5 a 10 segundos. O U-Boot roda o `aml_autoscript`, grava a ordem de boot nova e reinicia.
+5. Daí em diante, toda vez que liga, a box procura o MXOS no pendrive (e no cartão SD); sem pendrive, liga o
+   Android como sempre.
+
+O pendrive é o disco `/` do MXOS (FAT32, igual ao `saida/disco.img` do QEMU). Sem relógio com bateria, a data
+começa em 2026 até a rede ser usada.
+
+### Com cabo serial (para ver os erros)
+
+Adaptador USB-TTL de 3,3 V nos pinos TX/RX/GND (115200 baud). Parado no prompt do U-Boot:
+```
+usb start
+fatload usb 0 0x1080000 mxos-mxq.img
+fatload usb 0 0x1000000 mxos.dtb
+booti 0x1080000 - 0x1000000
+```
+
+Ainda não existe: Wi-Fi (o chip muda de box para box: SV6051P, RTL8189FTV ou AP6212, cada um com driver SDIO e
+firmware próprios), som pelo HDMI, hubs USB.
 
 ## Próximos passos
 

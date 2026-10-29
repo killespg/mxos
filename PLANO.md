@@ -321,11 +321,24 @@ A rodada de acentos foi interrompida no meio. Compila limpo (QEMU e mxq), mas:
 - Medido: 6 subshells `(sleep 4 && true) &` vivos: 997 MB livres sem, 1012 MB com (uns 2,5 MB por fork).
   Subshell que muda variável não afeta o pai; `ola sinais` (fork + waitpid) e `ola threads` continuam certos.
 
+### Passo 9 (0.11): PC de verdade
+
+- AF_UNIX (com SCM_RIGHTS), servidor X11 no kernel (x11/), MIT-SHM (shm.rs), pselect6/epoll/eventfd: o NetSurf
+  do Debian (com HTTPS) roda numa janela do MXOS. Testado no QEMU.
+- ferramentas/pacotes.py (DT_NEEDED + Contents do Debian; biblioteca_vazia.py para o SDL 1.2) e o `pacote`
+  que roda dentro do MXOS (sem teste).
+- Cache de paginas dos arquivos (cache.rs): bibliotecas divididas entre processos. Testado.
+- 4 nucleos (smp.rs) com trava unica do kernel. Testado no QEMU (-smp 4).
+- ext4 so leitura em /mnt, discos crus em /dev, /dev/dsp (OSS), area de transferencia (Ctrl+C/V e
+  CLIPBOARD do X11): compilados, sem teste (o dono pediu para parar de testar).
+- TV box: sistema inteiro na imagem mxq, video no framebuffer do U-Boot, RAM de ~900 MB, SD/eMMC, Ethernet
+  (DWMAC), USB xHCI (pendrive, teclado, mouse), boot so com pendrive (boot_box.py). Nada testado no hardware.
+
 ### Pendências para depois
 
 - `AF_UNIX`, IPv6, links simbólicos (o FAT32 não guarda), job control (Ctrl+Z/SIGSTOP), tratador de `SIGSEGV`.
 - Memória dos processos: cada programa dinâmico tem a própria cópia da libc (falta dividir as páginas só de
   leitura entre programas diferentes) e o `open` lê o arquivo inteiro.
 - Na box: desenhar com os 4 núcleos; montar a cena já em RGB565.
-- Na TV box os processos ainda não são compilados (o módulo `processo` depende do disco do QEMU).
+- Na TV box: Wi-Fi, som HDMI, hubs USB; testar tudo no hardware.
 - O `--teste` do `rodar.py` separa comandos por `;`: para mandar `;` para o sh use `&&` ou um script.

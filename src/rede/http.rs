@@ -95,7 +95,7 @@ fn juntar(base: &Url, local: &str) -> String {
 
 fn pedido(url: &Url) -> String {
     format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: MXOS/0.10\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: MXOS/0.11\r\nAccept: */*\r\nConnection: close\r\n\r\n",
         url.caminho,
         url.autoridade()
     )
