@@ -1,0 +1,5 @@
+# O config.toml do kernel (dois niveis acima) manda compilar para
+# aarch64-unknown-none; aqui os testes rodam no proprio PC.
+[build]
+target = "host-tuple"
+target-dir = "../../target/teste_web"

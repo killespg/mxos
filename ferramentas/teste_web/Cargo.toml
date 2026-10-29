@@ -1,0 +1,13 @@
+# Testes do motor web (src/web) no PC: arvores do HTML5, CSS, layout e
+# paginas inteiras desenhadas em PNG.
+#
+#   cd ferramentas/teste_web
+#   cargo +stable-x86_64-pc-windows-gnu test --release
+[package]
+name = "teste_web"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# pacote independente: nao faz parte do kernel
+[workspace]

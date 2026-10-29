@@ -39,6 +39,7 @@ mod uart;
 mod usb;
 mod virtio;
 mod video;
+mod web;
 mod x11;
 
 use core::arch::global_asm;
