@@ -28,15 +28,18 @@ pub mod chamadas;
 pub mod elf;
 pub mod memoria;
 pub mod proc;
+pub mod sinais;
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use core::cell::UnsafeCell;
 use core::fmt::Write;
+use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::{armazenamento, cpu, mmu, timer};
@@ -118,6 +121,39 @@ impl Contexto {
 // ---------------------------------------------------------------------
 // Processos
 
+/// O que as threads de um processo dividem (a memoria, os descritores).
+/// So o laco principal mexe na tabela, uma chamada por vez, entao um Rc
+/// com UnsafeCell basta.
+pub struct Dividido<T>(Rc<UnsafeCell<T>>);
+
+impl<T> Dividido<T> {
+    pub fn novo(valor: T) -> Dividido<T> {
+        Dividido(Rc::new(UnsafeCell::new(valor)))
+    }
+
+    /// Mais um dono do mesmo valor (uma thread nova).
+    pub fn dividir(&self) -> Dividido<T> {
+        Dividido(self.0.clone())
+    }
+
+    pub fn mesmo(&self, outro: &Dividido<T>) -> bool {
+        Rc::ptr_eq(&self.0, &outro.0)
+    }
+}
+
+impl<T> Deref for Dividido<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        unsafe { &*self.0.get() }
+    }
+}
+
+impl<T> DerefMut for Dividido<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe { &mut *self.0.get() }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Estado {
     Pronto,
@@ -149,13 +185,20 @@ pub fn codigo_de_saida(status: i32) -> i32 {
 }
 
 pub struct Processo {
+    /// O id da thread (o "tid"); na primeira thread e igual ao tgid.
     pub pid: u32,
+    /// O processo (grupo de threads) a que esta thread pertence: o que
+    /// o getpid devolve.
+    pub tgid: u32,
+    /// Onde escrever 0 (e acordar o futex) quando a thread sai
+    /// (set_tid_address, CLONE_CHILD_CLEARTID).
+    pub limpar_tid: usize,
     /// 0 = criado pelo kernel (shell).
     pub pai: u32,
     pub nome: String,
     pub estado: Estado,
     pub contexto: Box<Contexto>,
-    pub espaco: Espaco,
+    pub espaco: Dividido<Espaco>,
     /// Ticks do contador rodando em EL0.
     pub tempo_cpu: u64,
     /// Estado das chamadas de sistema do Linux (arquivos, brk...).
@@ -377,11 +420,13 @@ impl Tabela {
         linux.grupo = pid;
         let p = Processo {
             pid,
+            tgid: pid,
+            limpar_tid: 0,
             pai,
             nome,
             estado: Estado::Pronto,
             contexto,
-            espaco,
+            espaco: Dividido::novo(espaco),
             tempo_cpu: 0,
             linux,
             exe: String::new(),
@@ -395,7 +440,18 @@ impl Tabela {
     /// O processo `i` terminou com `status` (formato do wait4): avisa o
     /// pai, entrega os filhos ao kernel e devolve a memoria.
     pub fn terminar(&mut self, i: usize, status: i32) {
-        let pid = self.processos[i].pid;
+        let (pid, tgid) = (self.processos[i].pid, self.processos[i].tgid);
+        if pid != tgid {
+            // uma thread morreu por sinal: o processo inteiro vai junto
+            if let Some(lider) = self.indice(tgid) {
+                return self.terminar(lider, status);
+            }
+            self.processos.remove(i);
+            return;
+        }
+        // as outras threads do processo somem junto
+        self.processos.retain(|q| !(q.tgid == tgid && q.pid != tgid));
+        let i = self.indice(pid).unwrap_or(i);
         let pai = self.processos[i].pai;
         if let Some(pai_vfork) = self.processos[i].linux.pai_vfork.take() {
             self.acordar_vfork(pai_vfork);
@@ -420,8 +476,19 @@ impl Tabela {
         let p = &mut self.processos[i];
         p.estado = Estado::Terminado(status);
         // a memoria e os arquivos vao embora logo; so fica o registro para o pai
-        p.espaco = Espaco::novo(p.espaco.asid);
+        p.espaco = Dividido::novo(Espaco::novo(p.espaco.asid));
         p.linux = chamadas::Linux::novo();
+        self.sinal(pai, 17); // SIGCHLD
+    }
+
+    /// Uma thread (nao a primeira) saiu com exit: limpa o tid dela,
+    /// acorda quem espera no futex (pthread_join) e sai da tabela.
+    pub fn sair_thread(&mut self, i: usize) {
+        let endereco = self.processos[i].limpar_tid;
+        if endereco != 0 && self.processos[i].espaco.escrever(endereco, &0u32.to_le_bytes()).is_ok() {
+            chamadas::acordar_futex(self, i, endereco, usize::MAX);
+        }
+        self.processos.remove(i);
     }
 
     pub fn acordar_vfork(&mut self, pid: u32) {
@@ -432,24 +499,29 @@ impl Tabela {
         }
     }
 
-    /// Manda um sinal: o padrao da maioria e terminar; os que o programa
-    /// trata ou ignora (e os que so param ou avisam) nao fazem nada aqui.
-    /// false se o processo nao existe.
+    /// Manda um sinal. Sem tratador vale o padrao (a maioria termina; os
+    /// que so param ou avisam nao fazem nada); com tratador o sinal fica
+    /// pendente e `sinais::entregar` desvia o programa para ele antes de
+    /// rodar de novo. false se o processo nao existe.
     pub fn sinal(&mut self, pid: u32, sinal: usize) -> bool {
         let Some(i) = self.indice(pid) else { return false };
         if matches!(self.processos[i].estado, Estado::Terminado(_)) {
             return false;
         }
-        let tratador = self.processos[i].linux.sinais.get(sinal).copied().unwrap_or(0);
-        let termina = match sinal {
-            0 => false,
-            9 => true,
-            // SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGWINCH
-            17..=23 | 28 => false,
-            _ => tratador == 0,
-        };
-        if termina {
+        if sinal == 0 || sinal >= chamadas::SINAIS {
+            return sinal == 0;
+        }
+        let acao = self.processos[i].linux.acoes[sinal];
+        let bloqueado = self.processos[i].linux.mascara & sinais::bit(sinal) != 0;
+        if sinal == 9 || (!bloqueado && acao.tratador == sinais::SIG_DFL && sinais::padrao_termina(sinal)) {
             self.terminar(i, sinal as i32);
+        } else if acao.tem_tratador() || (bloqueado && acao.tratador == sinais::SIG_DFL) {
+            let p = &mut self.processos[i];
+            p.linux.pendentes |= sinais::bit(sinal);
+            // quem espera ou dorme acorda: a chamada volta com EINTR
+            if !bloqueado && matches!(p.estado, Estado::Dormindo(_) | Estado::Esperando(_)) {
+                p.estado = Estado::Pronto;
+            }
         }
         true
     }
@@ -463,6 +535,19 @@ impl Tabela {
     /// tambem fica pronto para repetir a chamada uma vez.
     fn acordar(&mut self, tentar: bool) {
         let agora = cpu::contador();
+        // alarmes (setitimer) que venceram: SIGALRM
+        let mut disparados = Vec::new();
+        for p in self.processos.iter_mut() {
+            if let Some((alvo, intervalo)) = p.linux.alarme {
+                if agora >= alvo {
+                    p.linux.alarme = (intervalo != 0).then(|| (agora + intervalo, intervalo));
+                    disparados.push(p.pid);
+                }
+            }
+        }
+        for pid in disparados {
+            self.sinal(pid, 14);
+        }
         for p in self.processos.iter_mut() {
             match p.estado {
                 Estado::Dormindo(alvo) if agora >= alvo => p.estado = Estado::Pronto,
@@ -501,6 +586,10 @@ pub fn rodar() -> bool {
         let mut novidade = false;
         t.acordar(true);
         while let Some(i) = t.proximo_pronto() {
+            if sinais::entregar(t, i) {
+                novidade = true;
+                continue;
+            }
             let motivo = fatia(&mut t.processos[i]);
             if motivo == SINCRONA {
                 novidade |= tratar_excecao(t, i);
@@ -613,21 +702,18 @@ pub fn tecla(byte: u8) {
         let byte = if byte == b'\r' && tty.cr_vira_nl { b'\n' } else { byte };
         if byte == 3 && tty.sinais {
             // Ctrl+C: SIGINT para o grupo do terminal. Quem tem tratador
-            // (um shell) nao morre; ele recebe o ^C como tecla.
+            // (um shell) nao morre: o tratador dele roda.
             tty.linha.clear();
             let grupo = tty.grupo;
-            let alvos: Vec<u32> = t.processos.iter().filter(|p| p.linux.grupo == grupo).map(|p| p.pid).collect();
+            let alvos: Vec<u32> =
+                t.processos.iter().filter(|p| p.linux.grupo == grupo && p.pid == p.tgid).map(|p| p.pid).collect();
             let mut alguem_morreu = false;
             for pid in alvos {
                 let antes = t.indice(pid).map(|i| t.processos[i].estado);
                 t.sinal(pid, 2);
                 alguem_morreu |= t.indice(pid).map(|i| t.processos[i].estado) != antes;
             }
-            if alguem_morreu {
-                t.escrever(b"^C\n");
-            } else {
-                t.tty.prontos.push_back(3);
-            }
+            t.escrever(if alguem_morreu { b"^C\n" } else { b"^C" });
             return;
         }
         if !tty.canonico {

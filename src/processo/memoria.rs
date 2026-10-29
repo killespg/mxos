@@ -82,6 +82,9 @@ pub struct Espaco {
     paginas: BTreeMap<usize, Pagina>,
     permissoes: BTreeMap<usize, Permissao>,
     pub asid: u16,
+    /// Comeco e fim do heap do brk (as threads dividem com a memoria).
+    pub brk_inicio: usize,
+    pub brk: usize,
 }
 
 /// Endereco fora da area do programa ou sem pagina.
@@ -93,7 +96,7 @@ impl Espaco {
         let mut raiz = Box::new(Tabela(mmu::raiz_kernel()));
         let l2 = Box::new(Tabela(mmu::l2_kernel(0)));
         raiz.0[0] = &*l2 as *const Tabela as u64 | mmu::DESCRITOR_TABELA;
-        Espaco { raiz, l2, l3: BTreeMap::new(), paginas: BTreeMap::new(), permissoes: BTreeMap::new(), asid }
+        Espaco { raiz, l2, l3: BTreeMap::new(), paginas: BTreeMap::new(), permissoes: BTreeMap::new(), asid, brk_inicio: 0, brk: 0 }
     }
 
     /// Endereco da raiz (vai no TTBR0).
@@ -259,6 +262,8 @@ impl Espaco {
     /// quadros.
     pub fn duplicar(&self, asid: u16) -> Espaco {
         let mut novo = Espaco::novo(asid);
+        novo.brk_inicio = self.brk_inicio;
+        novo.brk = self.brk;
         for (&numero, pagina) in &self.paginas {
             let permissao = self.permissoes[&numero];
             let endereco = numero * PAGINA;

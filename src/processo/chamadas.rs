@@ -12,9 +12,9 @@
 //! set_tid_address, prlimit64, getrandom, rt_sigaction...).
 //!
 //! Chamada que o MXOS ainda nao tem devolve -ENOSYS e fica anotada (o
-//! comando "syscalls" mostra quais faltam). Sinais com tratador do
-//! programa nao sao entregues (nao ha quadro de sinal ainda): o padrao
-//! (terminar) vale, e o que tem tratador e ignorado.
+//! comando "syscalls" mostra quais faltam). Sinais com tratador e
+//! rt_sigreturn ficam em sinais.rs; threads (clone com CLONE_THREAD)
+//! dividem a memoria e os descritores, e o futex espera de verdade.
 
 use alloc::borrow::ToOwned;
 use alloc::string::String;
@@ -23,7 +23,8 @@ use alloc::vec::Vec;
 
 use super::arquivos::{self, *};
 use super::memoria::{Espaco, PAGINA, Permissao};
-use super::{elf, Contexto, Estado, Tabela, TAMANHO_PILHA, TOPO_PILHA};
+use super::sinais::{self, Acao};
+use super::{elf, Contexto, Dividido, Estado, Tabela, TAMANHO_PILHA, TOPO_PILHA};
 use crate::{armazenamento, cpu, psci};
 
 /// Descritores por processo.
@@ -36,8 +37,7 @@ const AT_FDCWD: i64 = -100;
 const AT_REMOVEDIR: u64 = 0x200;
 /// Numero de sinais (o 0 nao e usado).
 pub const SINAIS: usize = 65;
-const SIG_DFL: u64 = 0;
-const SIG_IGN: u64 = 1;
+const ETIMEDOUT: i64 = 110;
 
 /// Um descritor: o arquivo aberto e o FD_CLOEXEC.
 #[derive(Clone)]
@@ -50,13 +50,26 @@ pub struct Fd {
 pub struct Linux {
     /// Hora de acordar de um nanosleep ou de um ppoll com prazo em
     /// andamento (a chamada e repetida quando o processo acorda).
-    acordar_em: Option<u64>,
-    pub fds: Vec<Option<Fd>>,
+    pub acordar_em: Option<u64>,
+    /// A tabela de descritores (as threads dividem).
+    pub fds: Dividido<Vec<Option<Fd>>>,
     pub pasta: String,
-    pub brk_inicio: usize,
-    pub brk: usize,
-    /// Tratador de cada sinal (SIG_DFL, SIG_IGN ou um endereco).
-    pub sinais: [u64; SINAIS],
+    /// O sigaction de cada sinal.
+    pub acoes: [Acao; SINAIS],
+    /// Sinais que chegaram e esperam a entrega (bit sinal-1).
+    pub pendentes: u64,
+    /// Sinais bloqueados (rt_sigprocmask).
+    pub mascara: u64,
+    /// A mascara de antes do rt_sigsuspend, enquanto ele espera.
+    pub mascara_suspensa: Option<u64>,
+    /// A chamada em que o processo esta parado esperando (um sinal a
+    /// interrompe com EINTR ou a repete, com SA_RESTART).
+    pub na_chamada: Option<u64>,
+    /// Esperando no futex deste endereco; true quando um FUTEX_WAKE chegou.
+    pub futex: Option<usize>,
+    pub futex_acordado: bool,
+    /// setitimer/alarm: (quando dispara o SIGALRM, intervalo), em ticks.
+    pub alarme: Option<(u64, u64)>,
     /// Grupo de processos (job control do shell).
     pub grupo: u32,
     pub umask: u32,
@@ -68,11 +81,16 @@ impl Linux {
     pub fn novo() -> Linux {
         Linux {
             acordar_em: None,
-            fds: Vec::new(),
+            fds: Dividido::novo(Vec::new()),
             pasta: String::from("/"),
-            brk_inicio: 0,
-            brk: 0,
-            sinais: [SIG_DFL; SINAIS],
+            acoes: [Acao::PADRAO; SINAIS],
+            pendentes: 0,
+            mascara: 0,
+            mascara_suspensa: None,
+            na_chamada: None,
+            futex: None,
+            futex_acordado: false,
+            alarme: None,
             grupo: 0,
             umask: 0o022,
             pai_vfork: None,
@@ -93,11 +111,16 @@ impl Linux {
     pub fn duplicar(&self) -> Linux {
         Linux {
             acordar_em: None,
-            fds: self.fds.clone(),
+            fds: Dividido::novo((*self.fds).clone()),
             pasta: self.pasta.clone(),
-            brk_inicio: self.brk_inicio,
-            brk: self.brk,
-            sinais: self.sinais,
+            acoes: self.acoes,
+            pendentes: 0,
+            mascara: self.mascara,
+            mascara_suspensa: None,
+            na_chamada: None,
+            futex: None,
+            futex_acordado: false,
+            alarme: None,
             grupo: self.grupo,
             umask: self.umask,
             pai_vfork: None,
@@ -144,6 +167,7 @@ pub fn atender(t: &mut Tabela, i: usize) -> bool {
     let c = &t.processos[i].contexto;
     let numero = c.x[8];
     let a = [c.x[0], c.x[1], c.x[2], c.x[3], c.x[4], c.x[5]];
+    t.processos[i].linux.na_chamada = None;
     let fim = despachar(t, i, numero, a);
     let Some(p) = t.processos.get_mut(i) else { return true };
     match fim {
@@ -154,6 +178,7 @@ pub fn atender(t: &mut Tabela, i: usize) -> bool {
         Fim::Esperar(motivo) => {
             // volta para o SVC: quando acordar, repete a chamada
             p.contexto.pc -= 4;
+            p.linux.na_chamada = Some(numero);
             if p.estado == Estado::Pronto {
                 p.estado = Estado::Esperando(motivo);
             }
@@ -200,25 +225,49 @@ fn despachar(t: &mut Tabela, i: usize, numero: u64, a: [u64; 6]) -> Fim {
         81 => Ok(0),
         82 | 83 => fsync(t, i, a[0]),
         // processos
+        // exit de uma thread que nao e a primeira: so ela sai
+        93 if t.processos[i].pid != t.processos[i].tgid => {
+            t.sair_thread(i);
+            return Fim::Nada;
+        }
         93 | 94 => {
             t.terminar(i, (a[0] as i32 & 0xFF) << 8);
             return Fim::Nada;
         }
-        96 => Ok(t.processos[i].pid as i64),
-        98 => futex(t, i, a[0] as usize, a[1], a[2] as u32),
+        96 => {
+            t.processos[i].limpar_tid = a[0] as usize;
+            Ok(t.processos[i].pid as i64)
+        }
+        98 => return futex(t, i, a[0] as usize, a[1], a[2] as u32, a[3] as usize, a[4] as usize, a[5] as u32),
         99 => Ok(0),
         101 => return dormir(t, i, a[0] as usize),
         115 => return dormir(t, i, a[2] as usize),
-        102 | 103 => Ok(0),
+        102 => itimer(t, i, a[0], 0, a[1] as usize),
+        103 => itimer(t, i, a[0], a[1] as usize, a[2] as usize),
         113 => relogio(t, i, a[0], a[1] as usize),
         114 => relogio_resolucao(t, i, a[1] as usize),
         123 => Err(ENOSYS),
         124 => Ok(0),
         129 => kill(t, i, a[0] as i64, a[1] as usize),
-        130 | 131 => kill(t, i, a[1] as i64, a[2] as usize),
+        130 => kill(t, i, a[0] as i64, a[1] as usize),
+        131 => kill(t, i, a[1] as i64, a[2] as usize),
         132 => Ok(0),
+        133 => return sigsuspend(t, i, a[0] as usize),
         134 => rt_sigaction(t, i, a[0] as usize, a[1] as usize, a[2] as usize),
-        135 => rt_sigprocmask(t, i, a[2] as usize),
+        135 => sinais::procmask(t, i, a[0], a[1] as usize, a[2] as usize),
+        136 => {
+            let pendentes = t.processos[i].linux.pendentes;
+            escrever_mem(t, i, a[0] as usize, &pendentes.to_le_bytes()).map(|_| 0)
+        }
+        139 => {
+            return match sinais::sigreturn(t, i) {
+                Ok(()) => Fim::Nada,
+                Err(_) => {
+                    t.terminar(i, 11);
+                    Fim::Nada
+                }
+            };
+        }
         142 => {
             // reboot do BusyBox: desliga ou reinicia de verdade
             let comando = if a[2] == 0x4321_FEDC { psci::DESLIGAR } else { psci::REINICIAR };
@@ -243,7 +292,7 @@ fn despachar(t: &mut Tabela, i: usize, numero: u64, a: [u64; 6]) -> Fim {
         }
         167 => Ok(0), // prctl
         169 => gettimeofday(t, i, a[0] as usize),
-        172 => Ok(t.processos[i].pid as i64),
+        172 => Ok(t.processos[i].tgid as i64),
         173 => Ok(t.processos[i].pai as i64),
         174..=177 => Ok(0),
         178 => Ok(t.processos[i].pid as i64),
@@ -252,7 +301,7 @@ fn despachar(t: &mut Tabela, i: usize, numero: u64, a: [u64; 6]) -> Fim {
         214 => brk(t, i, a[0] as usize),
         215 => munmap(t, i, a[0] as usize, a[1] as usize),
         216 => Err(ENOMEM), // mremap: a libc copia sozinha
-        220 => return clone(t, i, a[0], a[1] as usize, a[3]),
+        220 => return clone(t, i, a[0], a[1] as usize, a[2] as usize, a[3], a[4] as usize),
         221 => return execve(t, i, a[0] as usize, a[1] as usize, a[2] as usize),
         222 => mmap(t, i, a[0] as usize, a[1] as usize, a[2], a[3], a[4] as i64, a[5] as usize),
         226 => mprotect(t, i, a[0] as usize, a[1] as usize, a[2]),
@@ -493,8 +542,9 @@ fn escrever_dados(t: &mut Tabela, i: usize, fd: u64, dados: &[u8]) -> Fim {
                 // SIGPIPE: termina, a nao ser que o programa ignore
                 drop(tb);
                 drop(d);
-                if t.processos[i].linux.sinais[13] == SIG_DFL {
-                    t.terminar(i, 13);
+                let pid = t.processos[i].pid;
+                t.sinal(pid, 13);
+                if t.indice(pid) != Some(i) || matches!(t.processos[i].estado, Estado::Terminado(_)) {
                     return Fim::Nada;
                 }
                 return Fim::Valor(-EPIPE);
@@ -1048,6 +1098,41 @@ fn gettimeofday(t: &mut Tabela, i: usize, endereco: usize) -> R {
     Ok(0)
 }
 
+/// getitimer/setitimer: so o ITIMER_REAL (o do alarm), que manda SIGALRM.
+/// struct itimerval { intervalo, valor } com timevals.
+fn itimer(t: &mut Tabela, i: usize, qual: u64, novo: usize, velho: usize) -> R {
+    if qual != 0 {
+        return Ok(0);
+    }
+    let freq = cpu::frequencia_timer().max(1);
+    let para_timeval = |ticks: u64| -> [u8; 16] {
+        let mut b = [0u8; 16];
+        b[..8].copy_from_slice(&(ticks / freq).to_le_bytes());
+        b[8..].copy_from_slice(&(ticks % freq * 1_000_000 / freq).to_le_bytes());
+        b
+    };
+    if velho != 0 {
+        let agora = cpu::contador();
+        let (resta, intervalo) = match t.processos[i].linux.alarme {
+            Some((alvo, intervalo)) => (alvo.saturating_sub(agora).max(1), intervalo),
+            None => (0, 0),
+        };
+        let mut b = [0u8; 32];
+        b[..16].copy_from_slice(&para_timeval(intervalo));
+        b[16..].copy_from_slice(&para_timeval(resta));
+        escrever_mem(t, i, velho, &b)?;
+    }
+    if novo != 0 {
+        let b = ler_mem(t, i, novo, 32)?;
+        let campo = |k: usize| u64::from_le_bytes(b[k..k + 8].try_into().unwrap());
+        let ticks = |s: u64, us: u64| s.saturating_mul(freq).saturating_add(us.min(999_999) * freq / 1_000_000);
+        let intervalo = ticks(campo(0), campo(8));
+        let valor = ticks(campo(16), campo(24));
+        t.processos[i].linux.alarme = (valor != 0).then(|| (cpu::contador().saturating_add(valor), intervalo));
+    }
+    Ok(0)
+}
+
 fn times(t: &mut Tabela, i: usize, endereco: usize) -> R {
     let freq = cpu::frequencia_timer().max(1);
     let usuario = t.processos[i].tempo_cpu * 100 / freq;
@@ -1076,25 +1161,24 @@ fn sysinfo(t: &mut Tabela, i: usize, endereco: usize) -> R {
 // Memoria
 
 fn brk(t: &mut Tabela, i: usize, pedido: usize) -> R {
-    let p = &mut t.processos[i];
-    let l = &mut p.linux;
-    if pedido == 0 || pedido < l.brk_inicio || pedido > LIMITE_BRK {
-        return Ok(l.brk as i64);
+    let e = &mut t.processos[i].espaco;
+    if pedido == 0 || pedido < e.brk_inicio || pedido > LIMITE_BRK {
+        return Ok(e.brk as i64);
     }
-    let atual = l.brk.next_multiple_of(PAGINA);
+    let atual = e.brk.next_multiple_of(PAGINA);
     let novo = pedido.next_multiple_of(PAGINA);
     if novo > atual {
-        if p.espaco.mapear_faixa(atual, novo, Permissao::Dados).is_err() {
-            return Ok(l.brk as i64);
+        if e.mapear_faixa(atual, novo, Permissao::Dados).is_err() {
+            return Ok(e.brk as i64);
         }
     } else {
         let mut pagina = novo;
         while pagina < atual {
-            p.espaco.desmapear(pagina);
+            e.desmapear(pagina);
             pagina += PAGINA;
         }
     }
-    l.brk = pedido;
+    e.brk = pedido;
     Ok(pedido as i64)
 }
 
@@ -1178,16 +1262,115 @@ fn mprotect(t: &mut Tabela, i: usize, endereco: usize, tamanho: usize, prot: u64
     Ok(0)
 }
 
-fn futex(t: &mut Tabela, i: usize, endereco: usize, operacao: u64, valor: u32) -> R {
+/// futex(endereco, operacao, valor, prazo ou valor2, endereco2, valor3).
+/// WAIT dorme ate um WAKE de outra thread no mesmo endereco (ou o prazo);
+/// REQUEUE passa quem espera para outro endereco.
+#[allow(clippy::too_many_arguments)]
+fn futex(t: &mut Tabela, i: usize, endereco: usize, operacao: u64, valor: u32, prazo: usize, endereco2: usize, valor3: u32) -> Fim {
+    const FUTEX_CLOCK_REALTIME: u64 = 256;
+    let ler = |t: &Tabela, endereco: usize| -> Result<u32, i64> {
+        let mut b = [0u8; 4];
+        t.processos[i].espaco.ler(endereco, &mut b).map_err(|_| EFAULT)?;
+        Ok(u32::from_le_bytes(b))
+    };
     match operacao & 0x7F {
-        // FUTEX_WAIT: com um processo de uma thread so, ninguem vai acordar
-        0 | 9 => {
-            let mut b = [0u8; 4];
-            t.processos[i].espaco.ler(endereco, &mut b).map_err(|_| EFAULT)?;
-            if u32::from_le_bytes(b) != valor { Err(EAGAIN) } else { Ok(0) }
+        // WAIT e WAIT_BITSET (o bitset e tratado como "todos")
+        op @ (0 | 9) => {
+            let agora = cpu::contador();
+            let l = &mut t.processos[i].linux;
+            if l.futex == Some(endereco) {
+                // a chamada repetida: ja estava esperando
+                if l.futex_acordado {
+                    l.futex = None;
+                    l.futex_acordado = false;
+                    l.acordar_em = None;
+                    return Fim::Valor(0);
+                }
+                if l.acordar_em.is_some_and(|alvo| agora >= alvo) {
+                    l.futex = None;
+                    l.acordar_em = None;
+                    return Fim::Valor(-ETIMEDOUT);
+                }
+                return Fim::Esperar("futex");
+            }
+            match ler(t, endereco) {
+                Ok(v) if v != valor => return Fim::Valor(-EAGAIN),
+                Err(e) => return Fim::Valor(-e),
+                Ok(_) => {}
+            }
+            let mut alvo = None;
+            if prazo != 0 {
+                let ticks = match tempo_em_ticks(t, i, prazo) {
+                    Ok(ticks) => ticks,
+                    Err(e) => return Fim::Valor(-e),
+                };
+                alvo = Some(if op == 0 {
+                    agora.saturating_add(ticks)
+                } else if operacao & FUTEX_CLOCK_REALTIME != 0 {
+                    ticks.saturating_sub(super::rtc_no_boot() * cpu::frequencia_timer())
+                } else {
+                    ticks
+                });
+            }
+            let l = &mut t.processos[i].linux;
+            l.futex = Some(endereco);
+            l.futex_acordado = false;
+            l.acordar_em = alvo;
+            Fim::Esperar("futex")
         }
-        _ => Ok(0),
+        // WAKE e WAKE_BITSET
+        1 | 10 => Fim::Valor(acordar_futex(t, i, endereco, valor as usize) as i64),
+        // REQUEUE e CMP_REQUEUE: acorda `valor`, muda ate `prazo` para endereco2
+        op @ (3 | 4) => {
+            if op == 4 {
+                match ler(t, endereco) {
+                    Ok(v) if v != valor3 => return Fim::Valor(-EAGAIN),
+                    Err(e) => return Fim::Valor(-e),
+                    Ok(_) => {}
+                }
+            }
+            let acordados = acordar_futex(t, i, endereco, valor as usize);
+            let mut mudados = 0;
+            for j in 0..t.processos.len() {
+                if mudados >= prazo {
+                    break;
+                }
+                if j != i && esperando_futex(t, i, j, endereco) {
+                    t.processos[j].linux.futex = Some(endereco2);
+                    mudados += 1;
+                }
+            }
+            Fim::Valor((acordados + mudados) as i64)
+        }
+        _ => {
+            *t.desconhecidas.entry(98).or_insert(0) += 1;
+            Fim::Valor(-ENOSYS)
+        }
     }
+}
+
+/// A thread `j` dorme no futex `endereco` da memoria da thread `i`.
+fn esperando_futex(t: &Tabela, i: usize, j: usize, endereco: usize) -> bool {
+    let q = &t.processos[j];
+    q.linux.futex == Some(endereco) && !q.linux.futex_acordado && q.espaco.mesmo(&t.processos[i].espaco)
+}
+
+/// Acorda ate `quantos` threads esperando no futex `endereco` (o mesmo
+/// endereco na mesma memoria). Devolve quantas acordaram.
+pub fn acordar_futex(t: &mut Tabela, i: usize, endereco: usize, quantos: usize) -> usize {
+    let mut acordados = 0;
+    for j in 0..t.processos.len() {
+        if acordados >= quantos {
+            break;
+        }
+        if j != i && esperando_futex(t, i, j, endereco) {
+            let q = &mut t.processos[j];
+            q.linux.futex_acordado = true;
+            q.estado = Estado::Pronto;
+            acordados += 1;
+        }
+    }
+    acordados
 }
 
 fn getrandom(t: &mut Tabela, i: usize, endereco: usize, tamanho: usize) -> R {
@@ -1227,28 +1410,57 @@ fn limite(t: &mut Tabela, i: usize, recurso: u64, destino: usize) -> R {
     Ok(0)
 }
 
+/// rt_sigaction(sinal, &novo, &velho): struct {tratador, flags,
+/// restaurador, mascara}.
 fn rt_sigaction(t: &mut Tabela, i: usize, sinal: usize, novo: usize, velho: usize) -> R {
-    if sinal == 0 || sinal >= SINAIS || sinal == 9 || sinal == 19 {
+    if sinal == 0 || sinal >= SINAIS {
         return Err(EINVAL);
     }
-    let antes = t.processos[i].linux.sinais[sinal];
+    let antes = t.processos[i].linux.acoes[sinal];
+    let pedido = if novo != 0 {
+        if sinal == 9 || sinal == 19 {
+            return Err(EINVAL);
+        }
+        Some(Acao {
+            tratador: ler_u64(t, i, novo)?,
+            flags: ler_u64(t, i, novo + 8)?,
+            restaurador: ler_u64(t, i, novo + 16)?,
+            mascara: ler_u64(t, i, novo + 24)?,
+        })
+    } else {
+        None
+    };
     if velho != 0 {
         let mut b = [0u8; 32];
-        b[..8].copy_from_slice(&antes.to_le_bytes());
+        b[..8].copy_from_slice(&antes.tratador.to_le_bytes());
+        b[8..16].copy_from_slice(&antes.flags.to_le_bytes());
+        b[16..24].copy_from_slice(&antes.restaurador.to_le_bytes());
+        b[24..].copy_from_slice(&antes.mascara.to_le_bytes());
         escrever_mem(t, i, velho, &b)?;
     }
-    if novo != 0 {
-        let tratador = ler_u64(t, i, novo)?;
-        t.processos[i].linux.sinais[sinal] = tratador;
+    if let Some(acao) = pedido {
+        let l = &mut t.processos[i].linux;
+        l.acoes[sinal] = acao;
+        if acao.tratador == sinais::SIG_IGN {
+            l.pendentes &= !sinais::bit(sinal);
+        }
     }
     Ok(0)
 }
 
-fn rt_sigprocmask(t: &mut Tabela, i: usize, velho: usize) -> R {
-    if velho != 0 {
-        escrever_mem(t, i, velho, &[0u8; 8])?;
+/// rt_sigsuspend(&mascara): troca a mascara e espera um sinal; a mascara
+/// antiga volta quando o tratador termina.
+fn sigsuspend(t: &mut Tabela, i: usize, endereco: usize) -> Fim {
+    if t.processos[i].linux.mascara_suspensa.is_none() {
+        let nova = match ler_u64(t, i, endereco) {
+            Ok(m) => m,
+            Err(e) => return Fim::Valor(-e),
+        };
+        let l = &mut t.processos[i].linux;
+        l.mascara_suspensa = Some(l.mascara);
+        l.mascara = nova & !(sinais::bit(9) | sinais::bit(19));
     }
-    Ok(0)
+    Fim::Esperar("esperando um sinal")
 }
 
 fn kill(t: &mut Tabela, i: usize, pid: i64, sinal: usize) -> R {
@@ -1293,21 +1505,32 @@ fn setsid(t: &mut Tabela, i: usize) -> R {
     Ok(pid as i64)
 }
 
-/// clone: so o fork (com ou sem CLONE_VFORK/CLONE_VM, que viram copia).
-/// Threads (CLONE_THREAD) ainda nao existem.
-fn clone(t: &mut Tabela, i: usize, flags: u64, pilha: usize, tls: u64) -> Fim {
+/// clone(flags, pilha, &tid_pai, tls, &tid_filho). Sem CLONE_THREAD e o
+/// fork (com CLONE_VFORK o pai espera); a memoria e copiada mesmo com
+/// CLONE_VM. Com CLONE_THREAD e uma thread: mesma memoria, mesmos
+/// descritores (CLONE_FILES), mesmo getpid.
+#[allow(clippy::too_many_arguments)]
+fn clone(t: &mut Tabela, i: usize, flags: u64, pilha: usize, tid_pai: usize, tls: u64, tid_filho: usize) -> Fim {
     const CLONE_VM: u64 = 0x100;
+    const CLONE_FILES: u64 = 0x400;
     const CLONE_VFORK: u64 = 0x4000;
-    const CLONE_SETTLS: u64 = 0x80000;
     const CLONE_THREAD: u64 = 0x10000;
-    let _ = CLONE_VM;
-    if flags & CLONE_THREAD != 0 {
-        *t.desconhecidas.entry(220).or_insert(0) += 1;
-        return Fim::Valor(-ENOSYS);
-    }
-    let Some(asid) = t.asid_para_novo() else { return Fim::Valor(-EAGAIN) };
+    const CLONE_SETTLS: u64 = 0x80000;
+    const CLONE_PARENT_SETTID: u64 = 0x10_0000;
+    const CLONE_CHILD_CLEARTID: u64 = 0x20_0000;
+    const CLONE_CHILD_SETTID: u64 = 0x100_0000;
+    let thread = flags & CLONE_THREAD != 0 && flags & CLONE_VM != 0;
+    let asid = if thread {
+        if t.processos.len() >= super::MAX_PROCESSOS {
+            return Fim::Valor(-EAGAIN);
+        }
+        t.processos[i].espaco.asid
+    } else {
+        let Some(asid) = t.asid_para_novo() else { return Fim::Valor(-EAGAIN) };
+        asid
+    };
     let p = &t.processos[i];
-    let espaco = p.espaco.duplicar(asid);
+    let espaco = if thread { Espaco::novo(asid) } else { p.espaco.duplicar(asid) };
     let mut contexto = p.contexto.copia();
     contexto.x[0] = 0; // o filho ve 0
     if pilha != 0 {
@@ -1316,11 +1539,28 @@ fn clone(t: &mut Tabela, i: usize, flags: u64, pilha: usize, tls: u64) -> Fim {
     if flags & CLONE_SETTLS != 0 {
         contexto.tpidr = tls;
     }
-    let linux = p.linux.duplicar();
-    let (pid_pai, nome) = (p.pid, p.nome.clone());
+    let mut linux = p.linux.duplicar();
+    if flags & CLONE_FILES != 0 && thread {
+        linux.fds = p.linux.fds.dividir();
+    }
+    // o pai de uma thread e o pai do processo; o de um fork e o processo
+    let (pid_pai, tgid, nome) = (if thread { p.pai } else { p.tgid }, p.tgid, p.nome.clone());
     let filho = t.acrescentar(pid_pai, nome, contexto, espaco);
     let j = t.processos.len() - 1;
     t.processos[j].linux = linux;
+    if thread {
+        t.processos[j].espaco = t.processos[i].espaco.dividir();
+        t.processos[j].tgid = tgid;
+    }
+    if flags & CLONE_CHILD_CLEARTID != 0 {
+        t.processos[j].limpar_tid = tid_filho;
+    }
+    if flags & CLONE_CHILD_SETTID != 0 {
+        let _ = t.processos[j].espaco.escrever(tid_filho, &filho.to_le_bytes());
+    }
+    if flags & CLONE_PARENT_SETTID != 0 {
+        let _ = escrever_mem(t, i, tid_pai, &filho.to_le_bytes());
+    }
     if flags & CLONE_VFORK != 0 {
         // o pai para ate o filho trocar de programa ou sair
         t.processos[j].linux.pai_vfork = Some(pid_pai);
@@ -1392,17 +1632,24 @@ pub fn trocar_programa(t: &mut Tabela, i: usize, caminho: &str, mut argumentos: 
         dados = armazenamento::ler(&caminho).map_err(errno)?;
     }
     elf::conferir(&dados).map_err(|_| ENOEXEC)?;
+    // as outras threads morrem no exec
+    let (pid, tgid) = (t.processos[i].pid, t.processos[i].tgid);
+    t.processos.retain(|q| !(q.tgid == tgid && q.pid != pid));
+    let i = t.indice(pid).unwrap_or(i);
     let asid = t.processos[i].espaco.asid;
     let mut espaco = Espaco::novo(asid);
     let programa = elf::carregar(&dados, &mut espaco).map_err(|_| ENOEXEC)?;
+    espaco.brk_inicio = programa.fim.next_multiple_of(PAGINA);
+    espaco.brk = espaco.brk_inicio;
     espaco.mapear_faixa(TOPO_PILHA - TAMANHO_PILHA, TOPO_PILHA, Permissao::Dados).map_err(|_| ENOMEM)?;
     let args: Vec<&[u8]> = argumentos.iter().map(|a| a.as_slice()).collect();
     let env: Vec<&[u8]> = ambiente.iter().map(|a| a.as_slice()).collect();
     let sp = elf::montar_pilha(&mut espaco, TOPO_PILHA, &args, &env, &programa, caminho.as_bytes()).map_err(|_| ENOMEM)?;
 
     let p = &mut t.processos[i];
-    p.espaco = espaco;
+    p.espaco = Dividido::novo(espaco);
     p.contexto = Contexto::novo(programa.entrada, sp);
+    p.limpar_tid = 0;
     // o nome e o do argv[0] (o applet do BusyBox), como no ps do Linux
     let primeiro = argumentos.first().map(|a| String::from_utf8_lossy(a).into_owned()).unwrap_or_default();
     let nome = if primeiro.is_empty() { caminho.clone() } else { primeiro };
@@ -1410,18 +1657,21 @@ pub fn trocar_programa(t: &mut Tabela, i: usize, caminho: &str, mut argumentos: 
     p.exe = caminho.clone();
     p.cmdline = argumentos.iter().flat_map(|a| a.iter().copied().chain([0])).collect();
     let l = &mut p.linux;
-    l.brk_inicio = programa.fim.next_multiple_of(PAGINA);
-    l.brk = l.brk_inicio;
     l.acordar_em = None;
+    l.na_chamada = None;
+    l.mascara_suspensa = None;
+    l.futex = None;
+    // a tabela de descritores deixa de ser dividida
+    l.fds = Dividido::novo((*l.fds).clone());
     for fd in l.fds.iter_mut() {
         if fd.as_ref().is_some_and(|f| f.fecha_no_exec) {
             *fd = None;
         }
     }
     // tratadores somem no exec (o codigo deles foi embora); ignorados ficam
-    for s in l.sinais.iter_mut() {
-        if *s != SIG_IGN {
-            *s = SIG_DFL;
+    for acao in l.acoes.iter_mut() {
+        if acao.tem_tratador() {
+            *acao = Acao::PADRAO;
         }
     }
     if let Some(pai) = l.pai_vfork.take() {
@@ -1439,10 +1689,11 @@ fn pasta_de_programas(caminho: &str) -> bool {
 /// wait4(pid, &status, opcoes, rusage).
 fn wait4(t: &mut Tabela, i: usize, pid: i64, status: usize, opcoes: u64) -> Fim {
     const WNOHANG: u64 = 1;
-    let eu = t.processos[i].pid;
+    let eu = t.processos[i].tgid;
     let grupo = t.processos[i].linux.grupo;
     let serve = |p: &super::Processo| {
         p.pai == eu
+            && p.pid == p.tgid
             && match pid {
                 -1 => true,
                 0 => p.linux.grupo == grupo,
@@ -1465,6 +1716,7 @@ fn wait4(t: &mut Tabela, i: usize, pid: i64, status: usize, opcoes: u64) -> Fim 
         return Fim::Valor(-EFAULT);
     }
     t.processos[i].contexto.x[0] = filho as u64;
+    t.processos[i].linux.na_chamada = None;
     // o indice do processo mudou: devolve o valor direto e nao mexe mais
     Fim::Nada
 }
