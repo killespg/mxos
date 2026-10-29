@@ -384,7 +384,7 @@ pub fn ler_comprimento(l: &mut Leitor, numero_e_px: bool) -> Option<Comprimento>
             l.proximo();
             let args = l.argumentos()?;
             let mut partes = Vec::new();
-            for parte in args.split(|t| *t == Token::Virgula) {
+            for parte in dividir_virgulas(&args) {
                 let mut sub = Leitor::novo(parte);
                 partes.push(expressao(&mut sub)?);
             }
@@ -505,6 +505,27 @@ pub fn eh_zero(c: &Comprimento) -> bool {
 }
 
 // ----------------------------------------------------------------- leitor
+
+/// Divide por virgulas do nivel de fora (as de dentro de rgba(), calc()...
+/// ficam onde estao).
+pub fn dividir_virgulas(t: &[Token]) -> Vec<&[Token]> {
+    let mut v = Vec::new();
+    let mut nivel = 0i32;
+    let mut inicio = 0;
+    for (k, x) in t.iter().enumerate() {
+        match x {
+            Token::Funcao(_) | Token::AbreParen | Token::AbreColchete => nivel += 1,
+            Token::FechaParen | Token::FechaColchete => nivel -= 1,
+            Token::Virgula if nivel == 0 => {
+                v.push(&t[inicio..k]);
+                inicio = k + 1;
+            }
+            _ => {}
+        }
+    }
+    v.push(&t[inicio..]);
+    v
+}
 
 /// Le tokens pulando espacos (com `proximo_cru` para quem precisa deles).
 #[derive(Clone)]
@@ -641,7 +662,7 @@ pub fn ler_imagem(l: &mut Leitor, atual: Option<Cor>) -> Option<Imagem> {
             let repetir = f.contains("repeating");
             let args = l.argumentos()?;
             let mut g = Gradiente { angulo: 180.0, radial, repetir, paradas: Vec::new() };
-            for (k, parte) in args.split(|t| *t == Token::Virgula).enumerate() {
+            for (k, parte) in dividir_virgulas(&args).into_iter().enumerate() {
                 let mut sub = Leitor::novo(parte);
                 if k == 0 {
                     match sub.espiar() {

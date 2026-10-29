@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 use super::token::Token;
 use super::valores::{
-    Comprimento, Contexto, Cor, Fixo, Imagem, Leitor, Linear, Medida, UM, eh_zero, fixo, ler_comprimento, ler_cor, ler_imagem,
+    Comprimento, Contexto, Cor, Fixo, Imagem, Leitor, Linear, Medida, UM, dividir_virgulas, eh_zero, fixo, ler_comprimento, ler_cor, ler_imagem,
 };
 use crate::web::atomo::Atomo;
 
@@ -722,7 +722,7 @@ fn faixa(t: &[Token], c: &Calculo) -> Option<Faixa> {
         let mut l = Leitor::novo(t);
         l.proximo();
         let args = l.argumentos()?;
-        let pedacos: Vec<&[Token]> = args.split(|x| *x == Token::Virgula).collect();
+        let pedacos: Vec<&[Token]> = dividir_virgulas(&args);
         return match f.as_str() {
             "minmax" if pedacos.len() == 2 => {
                 Some(Faixa::MinMax(Box::new(faixa(apara(pedacos[0]), c)?), Box::new(faixa(apara(pedacos[1]), c)?)))
@@ -1307,7 +1307,7 @@ impl Estilo {
             "background-color" => self.fundo = ok!(cor(t, self.cor)).unwrap_or(self.cor),
             "background" => {
                 // so a ultima camada tem cor; a imagem vem da primeira
-                let camadas: Vec<&[Token]> = t.split(|x| *x == Token::Virgula).collect();
+                let camadas: Vec<&[Token]> = dividir_virgulas(t);
                 self.fundo = Cor::TRANSPARENTE;
                 self.imagem_fundo = None;
                 self.repetir_fundo = Repetir::Repetir;
@@ -1369,7 +1369,7 @@ impl Estilo {
                 }
             }
             "background-position" => {
-                let ps = partes(t.split(|x| *x == Token::Virgula).next().unwrap_or(t));
+                let ps = partes(dividir_virgulas(t)[0]);
                 self.posicao_fundo = posicao_fundo(&ps, c);
             }
             "background-size" => self.tamanho_fundo = ok!(tamanho_fundo(&partes(t), c)),
@@ -1513,8 +1513,9 @@ impl Estilo {
             "grid-row-start" => self.grade_linha.0 = ok!(linha_grade(t)),
             "grid-row-end" => self.grade_linha.1 = ok!(linha_grade(t)),
             "grid-area" => {
-                if let Some(s) = p {
-                    self.area = Some(Atomo::de(&s));
+                // nomes de area diferenciam maiusculas: o token cru
+                if let [Token::Ident(s)] = t {
+                    self.area = Some(Atomo::de(s));
                 } else {
                     let ps: Vec<&[Token]> = t.split(|x| *x == Token::Delim('/')).collect();
                     let l = |k: usize| ps.get(k).and_then(|x| linha_grade(apara(x))).unwrap_or(LinhaGrade::Auto);
@@ -1586,7 +1587,7 @@ impl Estilo {
                 if p == Some("none") {
                     self.sombra = None;
                 } else {
-                    let primeira = t.split(|x| *x == Token::Virgula).next().unwrap_or(t);
+                    let primeira = dividir_virgulas(t)[0];
                     let mut nums = Vec::new();
                     let mut co = Cor::rgba(0, 0, 0, 80);
                     let mut dentro = false;
@@ -1614,7 +1615,7 @@ impl Estilo {
                     if let Token::Funcao(f) = x {
                         let f = f.clone();
                         let args = l.argumentos().unwrap_or_default();
-                        let vals: Vec<&[Token]> = args.split(|a| *a == Token::Virgula).map(apara).collect();
+                        let vals: Vec<&[Token]> = dividir_virgulas(&args).into_iter().map(apara).collect();
                         let m = |k: usize| vals.get(k).and_then(|v| medida(v, c)).unwrap_or(Medida::ZERO);
                         match f.as_str() {
                             "translate" => self.deslocar = (m(0), m(1)),

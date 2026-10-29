@@ -91,7 +91,15 @@ pub fn baixar(url: &str) -> Result<(u16, String, Vec<u8>), String> {
 
 /// Como `baixar`, mas guarda em target/paginas/<nome> e usa de la depois.
 pub fn pagina(url: &str) -> Result<(String, Vec<u8>), String> {
-    let nome: String = url.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    let mut nome: String = url.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    if nome.len() > 100 {
+        // caminhos longos nao cabem no Windows: corta e poe um resumo
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in url.bytes() {
+            h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+        }
+        nome = format!("{}_{h:016x}", &nome[..80]);
+    }
     let pasta = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/paginas");
     std::fs::create_dir_all(&pasta).ok();
     let arq = pasta.join(&nome);

@@ -14,5 +14,7 @@ pub mod css;
 pub mod dom;
 pub mod fonte;
 pub mod html;
+pub mod layout;
+pub mod pagina;
 pub mod pintura;
 pub mod url;

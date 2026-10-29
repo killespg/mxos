@@ -36,3 +36,4 @@ pub fn fontes() -> web::fonte::Fontes {
     }
     f
 }
+pub mod render;
