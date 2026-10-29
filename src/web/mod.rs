@@ -12,5 +12,7 @@
 pub mod atomo;
 pub mod css;
 pub mod dom;
+pub mod fonte;
 pub mod html;
+pub mod pintura;
 pub mod url;
