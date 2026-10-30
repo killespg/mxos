@@ -5,11 +5,16 @@
 
 import bisect
 import collections
+import pathlib
 import re
 import subprocess
 import sys
 
-OBJDUMP = r"C:\Users\VenâncioKilles\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-objdump.exe"
+# o llvm-objdump do rustup (rustup component add llvm-tools)
+OBJDUMP = next(
+    pathlib.Path.home().glob(".rustup/toolchains/*/lib/rustlib/*/bin/llvm-objdump*"),
+    "llvm-objdump",
+)
 
 
 def main():

@@ -1,6 +1,10 @@
 //! Valores m e n da inicializacao do CABAC do H.264 (tabelas 9-12 a
-//! 9-33 da norma), no formato que o RKVDEC le da RAM: [cabac_init_idc
-//! 0..2 dos quadros P/B e o I][ctxIdx 0..463][m, n].
+//! 9-33 da norma ITU-T H.264), no formato que o RKVDEC le da RAM:
+//! [cabac_init_idc 0..2 dos quadros P/B e o I][ctxIdx 0..463][m, n].
+//!
+//! Gerado por ferramentas/gerar_cabac.py a partir das tabelas do FFmpeg
+//! (libavcodec/h264_cabac.c, LGPL-2.1-or-later); os ctxIdx 460..463
+//! (so do 4:4:4) vao zerados. Nao editar a mao.
 
 pub const TABELA: [[[i8; 2]; 464]; 4] = [
     [

@@ -1,7 +1,36 @@
-# MXOS (ARM64)
+# MXOS
 
-Kernel escrito do zero em Rust para a TV box **MXQ PRO 4K** (Amlogic S905W, 4x Cortex-A53).
-Ele é testado primeiro no QEMU (`-M virt`) e depois gera uma imagem para o U-Boot da box.
+Sistema operacional escrito do zero em Rust (`no_std`), feito para transformar uma TV box barata num computador:
+área de trabalho com janelas, navegador com JavaScript e YouTube, vídeo H.264 por hardware, som pelo HDMI, rede,
+apps nativos instalados por uma Loja e compatibilidade com programas de Linux.
+
+| Máquina | CPU | Estado |
+|---|---|---|
+| TV box **RK3228/RK3229** (`--features rk322x`) | 4x Cortex-A7, ARMv7 32 bits | liga pelo `recovery` do Android, área de trabalho no HDMI, rede, USB, RGA e RKVDEC, som HDMI |
+| QEMU `virt` | Cortex-A53, AArch64 | onde tudo é testado primeiro (`python rodar.py`) |
+| TV box **MXQ PRO 4K** (`--features mxq`) | Amlogic S905W, AArch64 | compila; não testado no hardware |
+
+O que tem:
+
+- **Kernel:** MMU com tabelas por processo (ASID), heap, GIC, timer, PSCI, processos em modo usuário com
+  copy-on-write, threads e sinais, cache de arquivos, FAT32 e ext4.
+- **Interface:** compositor por software com sombras e cantos arredondados, temas, fontes Inter e JetBrains Mono
+  com acentos, área de trabalho, menu iniciar, barra de tarefas; na RK322x o RGA (acelerador 2D) copia para a tela.
+- **Navegador:** HTML5, CSS com layout de blocos, flex e grid, JavaScript próprio (compilador para bytecode),
+  HTTPS com TLS 1.2/1.3 próprio, YouTube pela API youtubei com vídeo DASH em 720p decodificado no RKVDEC e áudio
+  AAC decodificado do zero, tocando pelo HDMI.
+- **Apps do sistema:** Arquivos, Discos, Terminal, Editor de código (com o Claude), Tarefas, Configurações,
+  Personalizar, Calculadora, Pintura, CHIP-8, Loja, Atualizar o sistema.
+- **Apps nativos de fora:** pacotes `.mxa` que a **Loja** baixa do repositório
+  [mxos-apps](https://github.com/killespg/mxos-apps) e instala sem atualizar o sistema. Para fazer um app,
+  veja o [SDK](sdk/README.md).
+- **Programas de Linux** AArch64 (BusyBox, NetSurf, programas dinâmicos com `ld-linux`) e um servidor X11.
+
+## Licença
+
+O MXOS é **GPL-3.0-or-later** (`LICENSE`): quem fizer um sistema a partir deste kernel tem de publicar o código
+do mesmo jeito. Os **apps** que só usam a ABI dos apps e o SDK podem ter qualquer licença: é a exceção descrita em
+[`EXCECAO-APPS.md`](EXCECAO-APPS.md), que também lista o que veio de terceiros.
 
 ## Como rodar
 
@@ -396,7 +425,14 @@ o fundo e as bordas entram antes do texto e ganham a altura quando a caixa fecha
 
 A página `disco:/paginas/css.html` (com `estilo.css` por `<link>`) mostra tudo isso.
 
-## Na TV box (ainda não testado no hardware)
+## Na TV box RK3228/RK3229
+
+`bash` com o ambiente do projeto: o build gera `saida/tvbox-rk322x/recovery-mxos.img` (`ferramentas/gerar_box_rk.py
+nova`), uma imagem de boot do Android com o MXOS no lugar do kernel do recovery. Gravada na partição `recovery`
+pelo `adb`, ela liga o MXOS quando a box entra no modo recovery; tirando da tomada, volta o Android. O disco `/`
+é um pendrive FAT32.
+
+## Na TV box MXQ (ainda não testado no hardware)
 
 A imagem da box (`--features mxq`) tem o sistema inteiro: área de trabalho no HDMI (no framebuffer que o U-Boot
 deixa ligado), processos, NetSurf, X11, os 4 núcleos, a rede cabeada (Ethernet da Amlogic), o cartão SD e a eMMC

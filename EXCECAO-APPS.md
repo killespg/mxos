@@ -27,5 +27,9 @@ Quem modificar o MXOS pode manter esta exceção na sua versão ou retirá-la.
 
 - As fontes em `src/fonte/*.mxf` são convertidas da **Inter** (Rasmus Andersson) e da **JetBrains Mono**
   (JetBrains), ambas sob a SIL Open Font License 1.1.
-- As tabelas de códigos de Huffman e de quantização do decodificador AAC (`src/midia/aac_tabelas.rs`) são os
-  valores da norma ISO/IEC 14496-3, conferidos com as tabelas do FFmpeg (LGPL-2.1-or-later).
+- As tabelas de Huffman e de quantização do decodificador AAC (`src/midia/aac_tabelas.rs`) são os valores da
+  norma ISO/IEC 14496-3, conferidos com as tabelas do FFmpeg (LGPL-2.1-or-later).
+- A tabela de inicialização do CABAC do H.264 (`src/midia/h264_cabac.rs`) é gerada das tabelas do FFmpeg
+  (`libavcodec/h264_cabac.c`, LGPL-2.1-or-later) por `ferramentas/gerar_cabac.py`.
+- Os drivers do RGA, do RKVDEC e do relógio da RK322x foram escritos a partir dos mapas de registradores, com os
+  drivers do Linux como documentação de consulta.

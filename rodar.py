@@ -30,6 +30,7 @@ Uso:
   python rodar.py --porta 8080:80 encaminha http://localhost:8080 do PC para a porta 80
                                   do MXOS (ex.: executar httpd -h /paginas)
   python rodar.py --mxq           gera saida/mxos-mxq.img para a TV box
+  python rodar.py --rk322x        gera saida/tvbox-rk322x/recovery-mxos.img (TV box RK3228/RK3229)
 
 O disco (saida/disco.img, FAT32 de 64 MB) e criado por ferramentas/criar_disco.py
 na primeira vez. A rede e a "user" do QEMU (DHCP 10.0.2.15, saida para a internet).
@@ -95,6 +96,27 @@ def compilar(mxq: bool) -> pathlib.Path:
     if subprocess.run(comando, cwd=RAIZ, env=ambiente).returncode != 0:
         sys.exit("falha na compilacao")
     return pasta / ALVO / "release" / "mxos"
+
+
+def compilar_rk322x() -> pathlib.Path:
+    """TV box RK3228/RK3229 (Cortex-A7, ARMv7 32 bits): o kernel e a imagem
+    de recovery do Android com ele (ferramentas/gerar_box_rk.py)."""
+    pasta = RAIZ / "target" / "rk322x"
+    ambiente = os.environ.copy()
+    # NEON e VFPv4 do Cortex-A7 (o alvo armv7a-none-eabihf desliga o NEON)
+    ambiente["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join([
+        "-Clink-arg=-Tlinker-rk322x.ld", "-Ctarget-feature=+strict-align,+neon,+vfp4,+d32", "-Ctarget-cpu=cortex-a7",
+    ])
+    comando = [cargo(), "build", "--release", "--features", "rk322x", "--target", "armv7a-none-eabihf", "--target-dir", str(pasta)]
+    if subprocess.run(comando, cwd=RAIZ, env=ambiente).returncode != 0:
+        sys.exit("falha na compilacao")
+    elf = pasta / "armv7a-none-eabihf" / "release" / "mxos"
+    saida = RAIZ / "saida" / "tvbox-rk322x"
+    saida.mkdir(parents=True, exist_ok=True)
+    gerar = [sys.executable, "-I", str(RAIZ / "ferramentas" / "gerar_box_rk.py")]
+    subprocess.run(gerar + ["binario", str(saida / "mxos-rk322x.bin"), str(elf)], cwd=RAIZ, check=True)
+    subprocess.run(gerar + ["nova", str(saida / "mxos-rk322x.bin"), str(saida / "recovery-mxos.img")], cwd=RAIZ, check=True)
+    return saida / "recovery-mxos.img"
 
 
 # Portas TCP encaminhadas do PC para o MXOS: (porta no PC, porta no MXOS).
@@ -602,6 +624,7 @@ def main() -> int:
     parser.add_argument("--el2", action="store_true", help="comeca em EL2, como o U-Boot")
     parser.add_argument("--teste", metavar="CMDS", help="comandos separados por ';'")
     parser.add_argument("--mxq", action="store_true", help="gera a imagem da TV box, a pasta do pendrive e o .img para gravar")
+    parser.add_argument("--rk322x", action="store_true", help="gera a imagem de recovery da TV box RK3228/RK3229")
     parser.add_argument("--servir", action="store_true", help="como --mxq e serve a atualizacao para a box na rede de casa")
     parser.add_argument("--publicar", action="store_true", help="como --mxq e publica a atualizacao no GitHub (gh release)")
     parser.add_argument("--captura", metavar="PNG", help="com --teste: salva a tela no fim")
@@ -631,6 +654,10 @@ def main() -> int:
     if opcoes.disco:
         global DISCO
         DISCO = (RAIZ / opcoes.disco).resolve()
+
+    if opcoes.rk322x:
+        print(f"pronto: {compilar_rk322x().relative_to(RAIZ)}")
+        return 0
 
     if opcoes.mxq or opcoes.servir or opcoes.publicar:
         pendrive = preparar_pendrive()
