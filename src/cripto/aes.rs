@@ -108,30 +108,89 @@ fn somar(b: &mut [u8; 16], k: &[u8; 16]) {
 
 // ----------------------------------------------------------------- AES-GCM
 
-/// Multiplicacao em GF(2^128) com a ordem de bits do GCM.
-fn multiplicar(x: u128, y: u128) -> u128 {
-    let mut z = 0u128;
-    let mut v = y;
-    for i in 0..128 {
-        if (x >> (127 - i)) & 1 != 0 {
-            z ^= v;
+/// H vezes cada valor de 4 bits em GF(2^128) (ordem de bits do GCM), em
+/// metades de 64 bits: o GHASH anda de 4 em 4 bits com uma consulta e um
+/// deslocamento, em vez de 128 voltas por bloco (que em 32 bits, com u128
+/// emulado, pesavam meio segundo por megabyte baixado).
+#[derive(Clone)]
+struct TabelaH {
+    alto: [u64; 16],
+    baixo: [u64; 16],
+}
+
+/// A reducao dos 4 bits que saem pela direita a cada passo.
+const RESTO4: [u64; 16] = [
+    0x0000, 0x1C20, 0x3840, 0x2460, 0x7080, 0x6CA0, 0x48C0, 0x54E0, 0xE100, 0xFD20, 0xD940, 0xC560, 0x9180, 0x8DA0, 0xA9C0,
+    0xB5E0,
+];
+
+impl TabelaH {
+    fn nova(h: &[u8; 16]) -> TabelaH {
+        let mut t = TabelaH { alto: [0; 16], baixo: [0; 16] };
+        let mut vh = u64::from_be_bytes(h[..8].try_into().unwrap());
+        let mut vl = u64::from_be_bytes(h[8..].try_into().unwrap());
+        t.alto[8] = vh;
+        t.baixo[8] = vl;
+        // 4, 2, 1: H vezes x, x^2, x^3 (cada um, metade do anterior com reducao)
+        let mut i = 4;
+        while i > 0 {
+            let reduz = if vl & 1 != 0 { 0xE100_0000_0000_0000u64 } else { 0 };
+            vl = (vh << 63) | (vl >> 1);
+            vh = (vh >> 1) ^ reduz;
+            t.alto[i] = vh;
+            t.baixo[i] = vl;
+            i >>= 1;
         }
-        v = if v & 1 != 0 { (v >> 1) ^ (0xE1u128 << 120) } else { v >> 1 };
+        // o resto e soma (xor) das potencias
+        for i in [2usize, 4, 8] {
+            let (ah, al) = (t.alto[i], t.baixo[i]);
+            for j in 1..i {
+                t.alto[i + j] = ah ^ t.alto[j];
+                t.baixo[i + j] = al ^ t.baixo[j];
+            }
+        }
+        t
     }
-    z
+
+    /// x vezes H.
+    fn multiplicar(&self, x: &[u8; 16]) -> [u8; 16] {
+        let lo = (x[15] & 0xF) as usize;
+        let (mut zh, mut zl) = (self.alto[lo], self.baixo[lo]);
+        for i in (0..16).rev() {
+            let lo = (x[i] & 0xF) as usize;
+            let hi = (x[i] >> 4) as usize;
+            if i != 15 {
+                let resto = (zl & 0xF) as usize;
+                zl = (zh << 60) | (zl >> 4);
+                zh = (zh >> 4) ^ (RESTO4[resto] << 48);
+                zh ^= self.alto[lo];
+                zl ^= self.baixo[lo];
+            }
+            let resto = (zl & 0xF) as usize;
+            zl = (zh << 60) | (zl >> 4);
+            zh = (zh >> 4) ^ (RESTO4[resto] << 48);
+            zh ^= self.alto[hi];
+            zl ^= self.baixo[hi];
+        }
+        let mut z = [0u8; 16];
+        z[..8].copy_from_slice(&zh.to_be_bytes());
+        z[8..].copy_from_slice(&zl.to_be_bytes());
+        z
+    }
 }
 
-struct Ghash {
-    h: u128,
-    y: u128,
+struct Ghash<'a> {
+    h: &'a TabelaH,
+    y: [u8; 16],
 }
 
-impl Ghash {
+impl Ghash<'_> {
     fn absorver(&mut self, dados: &[u8]) {
         for pedaco in dados.chunks(16) {
-            let mut b = [0u8; 16];
-            b[..pedaco.len()].copy_from_slice(pedaco);
-            self.y = multiplicar(self.y ^ u128::from_be_bytes(b), self.h);
+            for (y, b) in self.y.iter_mut().zip(pedaco) {
+                *y ^= b;
+            }
+            self.y = self.h.multiplicar(&self.y);
         }
     }
 }
@@ -139,7 +198,7 @@ impl Ghash {
 #[derive(Clone)]
 pub struct AesGcm {
     aes: Aes,
-    h: u128,
+    h: TabelaH,
 }
 
 impl AesGcm {
@@ -147,7 +206,7 @@ impl AesGcm {
         let aes = Aes::novo(chave)?;
         let mut h = [0u8; 16];
         aes.cifrar(&mut h);
-        Some(AesGcm { aes, h: u128::from_be_bytes(h) })
+        Some(AesGcm { aes, h: TabelaH::nova(&h) })
     }
 
     fn ctr(&self, nonce: &[u8; 12], dados: &mut [u8]) {
@@ -165,7 +224,7 @@ impl AesGcm {
     }
 
     fn etiqueta(&self, nonce: &[u8; 12], aad: &[u8], cifrado: &[u8]) -> [u8; 16] {
-        let mut g = Ghash { h: self.h, y: 0 };
+        let mut g = Ghash { h: &self.h, y: [0; 16] };
         g.absorver(aad);
         g.absorver(cifrado);
         let tamanhos = ((aad.len() as u128 * 8) << 64) | (cifrado.len() as u128 * 8);
@@ -174,7 +233,11 @@ impl AesGcm {
         j0[..12].copy_from_slice(nonce);
         j0[15] = 1;
         self.aes.cifrar(&mut j0);
-        (g.y ^ u128::from_be_bytes(j0)).to_be_bytes()
+        let mut t = g.y;
+        for (a, b) in t.iter_mut().zip(j0) {
+            *a ^= b;
+        }
+        t
     }
 
     /// Cifra `dados` no lugar e devolve a etiqueta.
