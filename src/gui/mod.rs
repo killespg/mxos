@@ -37,7 +37,7 @@ use crate::entrada::{Entrada, Layout};
 use crate::shell::Shell;
 use crate::uart::Uart;
 use crate::video::tela::Tela;
-use crate::{drivers, excecao, processo, rede, smp, timer, x11};
+use crate::{cpu, drivers, excecao, processo, rede, smp, timer, x11};
 use apps::janela_x::JanelaX;
 use apps::terminal::{self, AppTerminal};
 use janelas::{EventoApp, Gerenciador, Pedido};
@@ -94,14 +94,21 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
     let mut utf8 = Utf8::default();
 
     loop {
+        let mut t = cpu::contador();
         id_terminal = repassar_serial(&mut gerenciador, id_terminal, tela, &mut utf8);
         while let Some(evento) = entrada.proximo() {
             gerenciador.evento(evento);
         }
+        // mouse e botoes mandados pela depuracao (testes remotos)
+        for evento in crate::depuracao::eventos() {
+            gerenciador.evento(evento);
+        }
         atender_externos(&mut gerenciador, &mut entrada);
+        medir(FASE_ENTRADA, &mut t);
         rede::processar();
         crate::nas::atender();
         crate::depuracao::atender();
+        medir(FASE_REDE, &mut t);
         for url in crate::depuracao::paginas_para_abrir() {
             // arquivo de midia do disco abre no visualizador; o resto, no navegador
             if !url.contains("://") && apps::visualizador::eh_midia(&url) {
@@ -116,11 +123,14 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
             crate::console_boot::alimentar();
             atender_externos(&mut gerenciador, &mut entrada);
         }
+        medir(FASE_TIQUE, &mut t);
         // os processos rodam ate o proximo tique; o shell da janela mostra a saida
         gerenciador.enviar(id_terminal, EventoApp::Processos);
         gerenciador.quadro();
+        medir(FASE_QUADRO, &mut t);
         atender_x11(&mut gerenciador, &mut janelas_x, (largura as i32, altura as i32));
         crate::audio::dsp::bombear();
+        medir(FASE_OUTROS, &mut t);
         // tela cheia (video): quem pediu desenha direto no framebuffer
         if TELA_CHEIA.load(Ordering::Relaxed) {
             JA_ESTAVA_CHEIA.store(true, Ordering::Relaxed);
@@ -130,6 +140,7 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
             }
             gerenciador.compor(&framebuffer);
         }
+        medir(FASE_COMPOR, &mut t);
         // o tique de 100 Hz acorda; teclado e mouse sao lidos na volta.
         // Com processo pronto a CPU nao dorme: ele usa o tempo ate o tique.
         if processo::tem_prontos() {
@@ -137,7 +148,50 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
         } else {
             smp::ocioso();
         }
+        medir(FASE_OCIOSO, &mut t);
+        VOLTAS.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+// ------------------------------------------------ medidor do laco da GUI
+
+const FASE_ENTRADA: usize = 0;
+const FASE_REDE: usize = 1;
+const FASE_TIQUE: usize = 2;
+const FASE_QUADRO: usize = 3;
+const FASE_OUTROS: usize = 4;
+const FASE_COMPOR: usize = 5;
+const FASE_OCIOSO: usize = 6;
+const NOMES_FASES: [&str; 7] = ["entrada", "rede", "tique dos apps", "quadro dos apps", "x11/som", "compor a tela", "ocioso"];
+static CICLOS: [core::sync::atomic::AtomicU64; 7] = [const { core::sync::atomic::AtomicU64::new(0) }; 7];
+static VOLTAS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Pior volta (ciclos) desde o ultimo relatorio.
+static PIOR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn medir(fase: usize, t: &mut u64) {
+    let agora = cpu::contador();
+    let d = agora.wrapping_sub(*t);
+    CICLOS[fase].fetch_add(d, Ordering::Relaxed);
+    if fase != FASE_OCIOSO {
+        // a parte ocupada de uma volta: guarda a maior
+        let _ = PIOR.fetch_max(d, Ordering::Relaxed);
+    }
+    *t = agora;
+}
+
+/// Quanto do tempo foi para cada parte do laco desde a ultima chamada (e
+/// zera). Para o INFO da depuracao.
+pub fn relatorio_desempenho() -> alloc::string::String {
+    let ciclos: [u64; 7] = core::array::from_fn(|i| CICLOS[i].swap(0, Ordering::Relaxed));
+    let total: u64 = ciclos.iter().sum::<u64>().max(1);
+    let freq = cpu::frequencia_timer().max(1);
+    let voltas = VOLTAS.swap(0, Ordering::Relaxed);
+    let pior = PIOR.swap(0, Ordering::Relaxed);
+    let mut s = alloc::format!("gui: {} voltas em {} ms, pior fase {} ms |", voltas, total * 1000 / freq, pior * 1000 / freq);
+    for (i, c) in ciclos.iter().enumerate() {
+        s += &alloc::format!(" {} {}%", NOMES_FASES[i], c * 100 / total);
+    }
+    s
 }
 
 /// Um app pegou a tela inteira (video em tela cheia): as janelas param de

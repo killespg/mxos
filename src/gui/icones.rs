@@ -5,6 +5,8 @@
 //!
 //! Os de navegacao (voltar, recarregar...) continuam os de widgets::icone.
 
+use alloc::vec::Vec;
+
 use super::grafico::{self, Cor, Superficie};
 use super::widgets::Icone;
 use crate::web::js::mat64;
@@ -94,24 +96,42 @@ fn desenho(tipo: Icone) -> (Cor, Cor, &'static [Forma], &'static [Forma]) {
     }
 }
 
-/// O icone `tipo` em azulejo de `lado` pixels com o canto em (x, y), sobre
-/// o que ja esta em `s`.
-pub fn icone_app(s: &mut Superficie, x: i32, y: i32, tipo: Icone, lado: i32) {
+/// Um icone pronto: por pixel, a cor ja multiplicada pela opacidade e a
+/// opacidade (0..255). Desenhar = fundo * (1 - a) + cor.
+struct Pronto {
+    tipo: Icone,
+    lado: i32,
+    px: Vec<(u32, u8)>,
+}
+
+struct Cache(core::cell::UnsafeCell<Vec<Pronto>>);
+// So o laco principal desenha.
+unsafe impl Sync for Cache {}
+static CACHE: Cache = Cache(core::cell::UnsafeCell::new(Vec::new()));
+
+/// Margem em volta do azulejo (a sombra passa da borda).
+const MARGEM: i32 = 2;
+const DESCE: i32 = 4;
+
+/// Calcula o icone uma vez (as formas com 4 x 4 amostras sao caras: na
+/// passada do mouse o icone e redesenhado, e recalcular travava a tela).
+fn preparar(tipo: Icone, lado: i32) -> Pronto {
     let (cima, baixo, simbolo, buracos) = desenho(tipo);
     let l = lado as f32;
-    // azulejo: retangulo arredondado com raio de 23% (o "squircle" atual)
     let azulejo = Forma::Caixa(0.5, 0.5, 0.5, 0.5, 0.23);
-    // sombra: o azulejo descido 3% e borrado ~6%
     let sombra = Forma::Caixa(0.5, 0.54, 0.5, 0.5, 0.23);
-    let px = 1.0 / l;
-    for py in (y - 2)..(y + lado + 4) {
-        for qx in (x - 2)..(x + lado + 2) {
-            let Some(fundo) = s.ler_pixel(qx, py) else { continue };
+    let px_l = 1.0 / l;
+    let (largura, altura) = (lado + 2 * MARGEM, lado + MARGEM + DESCE);
+    let mut px = Vec::with_capacity((largura * altura) as usize);
+    let canais = |c: Cor| [(c >> 16 & 0xFF) as f32, (c >> 8 & 0xFF) as f32, (c & 0xFF) as f32];
+    for j in 0..altura {
+        for i in 0..largura {
+            let (qx, py) = (i - MARGEM, j - MARGEM);
             let (mut cobre_az, mut cobre_sim) = (0u32, 0u32);
             for sy in 0..4 {
                 for sx in 0..4 {
-                    let u = ((qx - x) as f32 + (sx as f32 + 0.5) / 4.0) * px;
-                    let v = ((py - y) as f32 + (sy as f32 + 0.5) / 4.0) * px;
+                    let u = (qx as f32 + (sx as f32 + 0.5) / 4.0) * px_l;
+                    let v = (py as f32 + (sy as f32 + 0.5) / 4.0) * px_l;
                     if distancia(azulejo, u, v) <= 0.0 {
                         cobre_az += 1;
                         let no_simbolo = simbolo.iter().any(|&f| distancia(f, u, v) <= 0.0);
@@ -122,20 +142,50 @@ pub fn icone_app(s: &mut Superficie, x: i32, y: i32, tipo: Icone, lado: i32) {
                     }
                 }
             }
-            // a sombra fica embaixo de tudo, mais fraca longe do azulejo
-            let (u, v) = (((qx - x) as f32 + 0.5) * px, ((py - y) as f32 + 0.5) * px);
+            let (u, v) = ((qx as f32 + 0.5) * px_l, (py as f32 + 0.5) * px_l);
             let ds = distancia(sombra, u, v);
-            let alfa_sombra = if ds <= 0.0 { 90.0 } else { (90.0 * (1.0 - ds / 0.07)).max(0.0) };
-            let mut cor = grafico::misturar(fundo, 0, alfa_sombra as u32);
-            if cobre_az > 0 {
-                let t = ((py - y) as f32 / l).clamp(0.0, 1.0);
-                let tile = grafico::misturar(cima, baixo, (t * 255.0) as u32);
-                cor = grafico::misturar(cor, tile, cobre_az * 255 / 16);
-                if cobre_sim > 0 {
-                    cor = grafico::misturar(cor, 0x00FF_FFFF, cobre_sim * 255 / 16);
-                }
-            }
-            s.pixel(qx, py, cor);
+            let a_s = if ds <= 0.0 { 90.0 / 255.0 } else { (90.0 * (1.0 - ds / 0.07)).max(0.0) / 255.0 };
+            let c_t = cobre_az as f32 / 16.0;
+            let w = cobre_sim as f32 / 16.0;
+            let t = (py as f32 / l).clamp(0.0, 1.0);
+            let tile = canais(grafico::misturar(cima, baixo, (t * 255.0) as u32));
+            // fundo -> sombra (preta) -> azulejo -> simbolo (branco)
+            let fica = (1.0 - a_s) * (1.0 - c_t) * (1.0 - w);
+            let cor: [f32; 3] = core::array::from_fn(|k| tile[k] * c_t * (1.0 - w) + 255.0 * w);
+            let c = |v: f32| v.clamp(0.0, 255.0) as u32;
+            px.push((c(cor[0]) << 16 | c(cor[1]) << 8 | c(cor[2]), ((1.0 - fica) * 255.0).clamp(0.0, 255.0) as u8));
         }
+    }
+    Pronto { tipo, lado, px }
+}
+
+/// O icone `tipo` em azulejo de `lado` pixels com o canto em (x, y), sobre
+/// o que ja esta em `s`. Calculado so na primeira vez.
+pub fn icone_app(s: &mut Superficie, x: i32, y: i32, tipo: Icone, lado: i32) {
+    let cache = unsafe { &mut *CACHE.0.get() };
+    let i = match cache.iter().position(|p| p.tipo == tipo && p.lado == lado) {
+        Some(i) => i,
+        None => {
+            cache.push(preparar(tipo, lado));
+            cache.len() - 1
+        }
+    };
+    let p = &cache[i];
+    let largura = lado + 2 * MARGEM;
+    let (x0, y0) = (x - MARGEM, y - MARGEM);
+    let (sl, sa) = (s.largura() as i32, s.altura() as i32);
+    let destino = s.pixels_mut();
+    for (k, &(cor, a)) in p.px.iter().enumerate() {
+        if a == 0 {
+            continue;
+        }
+        let (px, py) = (x0 + k as i32 % largura, y0 + k as i32 / largura);
+        if px < 0 || py < 0 || px >= sl || py >= sa {
+            continue;
+        }
+        let d = &mut destino[(py * sl + px) as usize];
+        let fica = 255 - a as u32;
+        let mistura = |c: u32, sh: u32| (((*d >> sh & 0xFF) * fica + 127) / 255 + (c >> sh & 0xFF)).min(255) << sh;
+        *d = mistura(cor, 16) | mistura(cor, 8) | mistura(cor, 0);
     }
 }

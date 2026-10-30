@@ -46,13 +46,16 @@ struct Estado {
     /// Paginas para o laco da GUI abrir.
     abrir: Vec<String>,
     shell: Option<crate::shell::Shell>,
+    /// Eventos de mouse para o laco da GUI (MOUSE, BOTAO).
+    eventos: Vec<crate::entrada::Evento>,
 }
 
 struct Global(UnsafeCell<Estado>);
 // So o laco principal mexe.
 unsafe impl Sync for Global {}
 
-static ESTADO: Global = Global(UnsafeCell::new(Estado { ligado: false, tentou: false, clientes: Vec::new(), abrir: Vec::new(), shell: None }));
+static ESTADO: Global = Global(UnsafeCell::new(Estado { ligado: false, tentou: false, clientes: Vec::new(), abrir: Vec::new(),
+    eventos: Vec::new(), shell: None }));
 
 fn estado() -> &'static mut Estado {
     unsafe { &mut *ESTADO.0.get() }
@@ -153,7 +156,7 @@ fn comando(c: &mut Cliente, linha: &str) {
             let rga = crate::video::rga::versao();
             #[cfg(not(feature = "rk322x"))]
             let rga = 0u32;
-            let s = format!(
+            let s = crate::gui::relatorio_desempenho() + "\n" + &format!(
                 "cpu {}\nrga {rga:08x}\nheap {} MB livres de {} MB\nligado ha {} s\nrede {ip}\n",
                 crate::frequencia::descricao(),
                 h.livre >> 20,
@@ -189,6 +192,18 @@ fn comando(c: &mut Cliente, linha: &str) {
             }
             _ => texto(c, "ERRO sem tela XRGB"),
         },
+        "MOUSE" => {
+            let mut p = resto.split_whitespace().filter_map(|v| v.parse::<i32>().ok());
+            if let (Some(x), Some(y)) = (p.next(), p.next()) {
+                estado().eventos.push(crate::entrada::Evento::Mouse { x, y });
+            }
+            texto(c, "OK");
+        }
+        "BOTAO" => {
+            let pressionado = resto.trim() == "1";
+            estado().eventos.push(crate::entrada::Evento::Botao { botao: crate::entrada::Botao::Esquerdo, pressionado });
+            texto(c, "OK");
+        }
         "ABRIR" => {
             estado().abrir.push(String::from(resto.trim()));
             texto(c, "OK");
@@ -216,4 +231,9 @@ fn comando(c: &mut Cliente, linha: &str) {
         }
         _ => texto(c, "ERRO comando desconhecido (INFO, SH, TELA, ABRIR, ANDROID, TCHAU)"),
     }
+}
+
+/// Eventos de mouse mandados pela depuracao, para o laco da GUI entregar.
+pub fn eventos() -> Vec<crate::entrada::Evento> {
+    core::mem::take(&mut estado().eventos)
 }

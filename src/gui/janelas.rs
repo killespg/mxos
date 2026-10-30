@@ -449,36 +449,49 @@ fn disco_suave(s: &mut Superficie, r: Retangulo, cor: Cor, fundo: Cor) {
 }
 
 /// Sombra macia em volta da moldura, descida SOMBRA_DESCE: escurece o que
-/// ja esta na cena com forca que cai como 1 - (d / raio)^2 da borda para
-/// fora. Dentro da moldura so os cantos (a janela pinta o resto).
+/// ja esta na cena com forca que cai como (1 - (d / raio)^2)^2 da borda
+/// para fora. A forca vem de uma tabela pela distancia ao quadrado (sem
+/// divisao por pixel), e so as faixas em volta sao visitadas: dentro da
+/// moldura, so os cantos arredondados (a janela pinta o resto).
 fn pintar_sombra_suave(cena: &mut Superficie, moldura: Retangulo, area: Retangulo, cor: Cor) {
+    const R: i32 = SOMBRA_RAIO;
+    const R2: usize = (SOMBRA_RAIO * SOMBRA_RAIO) as usize;
+    let mut tabela = [0u8; R2];
+    for (d2, t) in tabela.iter_mut().enumerate() {
+        let f = (R2 - d2) as u32;
+        *t = (SOMBRA_FORCA * f / R2 as u32 * f / R2 as u32) as u8;
+    }
     let base = moldura.deslocado(0, SOMBRA_DESCE);
-    let r = SOMBRA_RAIO;
-    let toda = Retangulo::novo(base.x - r, base.y - r, base.largura + 2 * r, base.altura + 2 * r);
+    let toda = Retangulo::novo(base.x - R, base.y - R, base.largura + 2 * R, base.altura + 2 * R);
     let alvo = toda.intersecao(&area).intersecao(&cena.area());
     if alvo.vazio() {
         return;
     }
-    let miolo = Retangulo::novo(moldura.x, moldura.y + RAIO_JANELA, moldura.largura, moldura.altura - 2 * RAIO_JANELA);
-    let miolo2 = Retangulo::novo(moldura.x + RAIO_JANELA, moldura.y, moldura.largura - 2 * RAIO_JANELA, moldura.altura);
     let largura = cena.largura();
     let pixels = cena.pixels_mut();
-    let r2 = (r * r) as u32;
+    let mut pintar = |y: i32, x0: i32, x1: i32, dy: i32| {
+        let linha = y as usize * largura;
+        for x in x0.max(alvo.x)..x1.min(alvo.direita()) {
+            let dx = (base.x - x).max(x - (base.direita() - 1)).max(0);
+            let d2 = (dx * dx + dy * dy) as usize;
+            if d2 < R2 {
+                let p = &mut pixels[linha + x as usize];
+                *p = grafico::misturar(*p, cor, tabela[d2] as u32);
+            }
+        }
+    };
     for y in alvo.y..alvo.baixo() {
         let dy = (base.y - y).max(y - (base.baixo() - 1)).max(0);
-        let linha = y as usize * largura;
-        for x in alvo.x..alvo.direita() {
-            if miolo.contem(x, y) || miolo2.contem(x, y) {
-                continue;
-            }
-            let dx = (base.x - x).max(x - (base.direita() - 1)).max(0);
-            let d2 = (dx * dx + dy * dy) as u32;
-            if d2 >= r2 {
-                continue;
-            }
-            let alfa = SOMBRA_FORCA * (r2 - d2) / r2 * (r2 - d2) / r2;
-            let p = &mut pixels[linha + x as usize];
-            *p = grafico::misturar(*p, cor, alfa);
+        // linhas com a janela: so as faixas dos lados (e os cantos, onde a
+        // curva da moldura deixa o fundo aparecer)
+        let na_janela = y >= moldura.y && y < moldura.baixo();
+        if na_janela {
+            let canto = y < moldura.y + RAIO_JANELA || y >= moldura.baixo() - RAIO_JANELA;
+            let dentro = if canto { RAIO_JANELA } else { 0 };
+            pintar(y, toda.x, moldura.x + dentro, dy);
+            pintar(y, moldura.direita() - dentro, toda.direita(), dy);
+        } else {
+            pintar(y, toda.x, toda.direita(), dy);
         }
     }
 }
