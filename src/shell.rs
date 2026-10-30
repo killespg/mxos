@@ -387,6 +387,9 @@ impl Shell {
                 _ => diga!(self, "NAS desligado  (config nas_senha <senha>, depois nas ligar)"),
             },
             "mem" => self.memoria(),
+            "reg" => self.registrador(argumentos),
+            #[cfg(feature = "rk322x")]
+            "rga" => diga!(self, "{}", crate::video::rga::relatorio().trim_end()),
             "mmu" => self.mmu(),
             "traduzir" => self.traduzir(argumentos),
             "heap" => self.testar_heap(),
@@ -788,6 +791,29 @@ impl Shell {
             depois.blocos_livres,
             if devolvido { "tudo devolvido e juntado" } else { "VAZAMENTO DE MEMÓRIA" }
         );
+    }
+
+    /// "reg 20060028" le um registrador de 32 bits; "reg 110e0104 30000"
+    /// escreve. So na faixa de perifericos da plataforma.
+    fn registrador(&mut self, argumentos: &str) {
+        let mut p = argumentos.split_whitespace();
+        let hexa = |t: &str| u32::from_str_radix(t.trim_start_matches("0x"), 16).ok();
+        let Some(endereco) = p.next().and_then(hexa) else {
+            diga!(self, "uso: reg <endereço hexa> [valor hexa]");
+            return;
+        };
+        let e = endereco as usize;
+        let dentro = crate::plataforma::DISPOSITIVOS.iter().any(|&(i, f)| e >= i && e + 4 <= f);
+        if e % 4 != 0 || !dentro {
+            diga!(self, "fora dos periféricos (ou desalinhado)");
+            return;
+        }
+        if let Some(v) = p.next().and_then(hexa) {
+            unsafe { core::ptr::write_volatile(e as *mut u32, v) };
+            crate::cpu::barreira();
+        }
+        let v = unsafe { core::ptr::read_volatile(e as *const u32) };
+        diga!(self, "{endereco:08x}: {v:08x}");
     }
 
     /// "processo ola" (primeiro plano) ou "processo conta &" (fundo).

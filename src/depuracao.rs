@@ -148,8 +148,12 @@ fn comando(c: &mut Cliente, linha: &str) {
         "INFO" => {
             let h = crate::heap::estatisticas();
             let ip = crate::rede::info().map(|i| format!("{}.{}.{}.{}", i.ip[0], i.ip[1], i.ip[2], i.ip[3])).unwrap_or_else(|| String::from("sem rede"));
+            #[cfg(feature = "rk322x")]
+            let rga = crate::video::rga::versao();
+            #[cfg(not(feature = "rk322x"))]
+            let rga = 0u32;
             let s = format!(
-                "cpu {}\nheap {} MB livres de {} MB\nligado ha {} s\nrede {ip}\n",
+                "cpu {}\nrga {rga:08x}\nheap {} MB livres de {} MB\nligado ha {} s\nrede {ip}\n",
                 crate::frequencia::descricao(),
                 h.livre >> 20,
                 h.total >> 20,

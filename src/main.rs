@@ -102,6 +102,15 @@ pub extern "C" fn kernel_main(el_boot: u64) -> ! {
         Ok(v) => diga(&mut terminal, format_args!("vídeo   : {}x{}, {}", v.largura, v.altura, v.nome)),
         Err(motivo) => diga(&mut terminal, format_args!("vídeo   : desligado ({motivo})")),
     }
+    #[cfg(feature = "rk322x")]
+    {
+        diga(&mut terminal, format_args!("rga     : ligando o acelerador 2D..."));
+        if video::rga::iniciar() {
+            diga(&mut terminal, format_args!("rga     : versão {:08x}, copia e escala a tela", video::rga::versao()));
+        } else {
+            diga(&mut terminal, format_args!("rga     : não respondeu ao teste, a CPU desenha"));
+        }
+    }
         let terminal = qemu::iniciar(terminal, el_boot);
     // sem area de trabalho: o shell le a propria serial
     Shell::nova(terminal, el_boot).rodar()

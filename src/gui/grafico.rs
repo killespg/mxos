@@ -441,6 +441,11 @@ pub fn apresentar_em(origem: &Superficie, framebuffer: &Tela, x: i32, y: i32) {
 /// linha inteira de cache por pixel).
 fn apresentar_deslocado(origem: &Superficie, framebuffer: &Tela, area: Retangulo, x: i32, y: i32) {
     let (ox, largura) = (area.x as usize, area.largura as usize);
+    // area grande na TV box: o RGA copia (a CPU so limpa o cache)
+    #[cfg(feature = "rk322x")]
+    if largura * area.altura as usize >= 64 * 64 && apresentar_pelo_rga(origem, framebuffer, area, x, y) {
+        return;
+    }
     for k in 0..area.altura as usize {
         let linha = (area.y as usize + k) * origem.largura + ox;
         framebuffer.escrever_cores(x as usize, y as usize + k, &origem.pixels[linha..linha + largura]);
@@ -448,6 +453,20 @@ fn apresentar_deslocado(origem: &Superficie, framebuffer: &Tela, area: Retangulo
     framebuffer.limpar_cache_area(x as usize, y as usize, largura, area.altura as usize);
     // Garante que as escritas sairam antes de qualquer outra coisa
     crate::cpu::barreira();
+}
+
+/// A copia de `apresentar_deslocado` pelo RGA. false = nao deu (sem RGA,
+/// formato de tela diferente): segue pela CPU.
+#[cfg(feature = "rk322x")]
+fn apresentar_pelo_rga(origem: &Superficie, framebuffer: &Tela, area: Retangulo, x: i32, y: i32) -> bool {
+    use crate::video::rga;
+    if !rga::disponivel() || framebuffer.formato() != crate::video::tela::Formato::Xrgb8888 {
+        return false;
+    }
+    let (l, a) = (area.largura as usize, area.altura as usize);
+    let de = rga::Imagem::xrgb(origem.pixels.as_ptr() as usize, origem.largura * 4, origem.largura, origem.altura);
+    let para = rga::Imagem::xrgb(framebuffer.base(), framebuffer.passo(), framebuffer.largura(), framebuffer.altura());
+    rga::copiar(&de, (area.x as usize, area.y as usize, l, a), &para, (x as usize, y as usize, l, a))
 }
 
 impl fonte::Alvo for Superficie {
