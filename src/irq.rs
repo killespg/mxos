@@ -87,6 +87,8 @@ fn atender(id: u32) {
             crate::frequencia::vigiar();
             crate::console_boot::vigiar_travamento();
         }
+        #[cfg(feature = "rk322x")]
+        crate::audio::hdmi::IRQ => crate::audio::hdmi::atender(),
         IRQ_SERIAL => {
             somar(&SERIAL, 1);
             let lidos = Uart::new().atender_interrupcao();

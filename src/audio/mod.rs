@@ -6,5 +6,7 @@
 #![allow(dead_code)]
 
 pub mod dsp;
+#[cfg(feature = "rk322x")]
+pub mod hdmi;
 pub mod gerador;
 pub mod virtio_som;

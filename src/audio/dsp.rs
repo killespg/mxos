@@ -61,8 +61,25 @@ impl Fonte for DaFila<'_> {
     }
 }
 
+/// TV box: o som vai pelo HDMI (audio::hdmi) e nao pelo virtio.
+#[cfg(feature = "rk322x")]
+static CANAIS_HDMI: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(2);
+
+#[cfg(feature = "rk322x")]
+fn hdmi() -> bool {
+    super::hdmi::ligado()
+}
+#[cfg(not(feature = "rk322x"))]
+fn hdmi() -> bool {
+    false
+}
+
 /// open de /dev/dsp. false = nao ha placa de som.
 pub fn abrir() -> bool {
+    #[cfg(feature = "rk322x")]
+    if super::hdmi::iniciar() {
+        return true;
+    }
     if let Some(d) = dsp() {
         d.abertos += 1;
         return true;
@@ -98,6 +115,10 @@ pub fn fechar() {
 
 /// SNDCTL_DSP_SPEED: a taxa pedida, se a placa aceita; senao a dela.
 pub fn taxa(pedida: u32) -> u32 {
+    #[cfg(feature = "rk322x")]
+    if hdmi() {
+        return super::hdmi::TAXA;
+    }
     let Some(d) = dsp() else { return pedida };
     if pedida != d.p.taxa_hz && d.info.suporta_taxa(pedida) {
         if let Ok(p) = virtio_som::escolher_parametros(&d.info, &[pedida], 20, 8) {
@@ -116,6 +137,12 @@ pub fn taxa(pedida: u32) -> u32 {
 
 /// SNDCTL_DSP_CHANNELS: 1 ou 2.
 pub fn canais(pedidos: u32) -> u32 {
+    #[cfg(feature = "rk322x")]
+    if hdmi() {
+        let c = if pedidos <= 1 { 1 } else { 2 };
+        CANAIS_HDMI.store(c, core::sync::atomic::Ordering::Relaxed);
+        return c as u32;
+    }
     let Some(d) = dsp() else { return pedidos };
     d.canais_programa = if pedidos <= 1 { 1 } else { 2 };
     d.canais_programa as u32
@@ -123,11 +150,30 @@ pub fn canais(pedidos: u32) -> u32 {
 
 /// Quantos bytes cabem na fila agora.
 pub fn espaco() -> usize {
+    #[cfg(feature = "rk322x")]
+    if hdmi() {
+        let por_quadro = 2 * CANAIS_HDMI.load(core::sync::atomic::Ordering::Relaxed) as usize;
+        return super::hdmi::espaco() * por_quadro;
+    }
     dsp().map_or(0, |d| MAXIMO_FILA.saturating_sub(d.fila.len()) * 2)
 }
 
 /// write: amostras S16 little-endian. Devolve quantos bytes entraram.
 pub fn escrever(dados: &[u8]) -> usize {
+    #[cfg(feature = "rk322x")]
+    if hdmi() {
+        let mono = CANAIS_HDMI.load(core::sync::atomic::Ordering::Relaxed) == 1;
+        let amostras: alloc::vec::Vec<i16> = if mono {
+            dados.chunks_exact(2).flat_map(|b| {
+                let v = i16::from_le_bytes([b[0], b[1]]);
+                [v, v]
+            }).collect()
+        } else {
+            dados.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect()
+        };
+        let quadros = super::hdmi::escrever(&amostras);
+        return quadros * if mono { 2 } else { 4 };
+    }
     let Some(d) = dsp() else { return dados.len() };
     let cabe = (MAXIMO_FILA.saturating_sub(d.fila.len()) * 2).min(dados.len()) & !1;
     d.fila.extend(dados[..cabe].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])));

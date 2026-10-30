@@ -396,6 +396,28 @@ impl Shell {
             "irq" => self.irq(),
             "esperar" => self.esperar(argumentos),
             "video" => self.video(),
+            #[cfg(feature = "rk322x")]
+            "som" if argumentos.trim() == "hdmi" => diga!(self, "{}", crate::audio::hdmi::relatorio()),
+            #[cfg(feature = "rk322x")]
+            "som" if argumentos.trim() == "teste" => {
+                // bipe de 440 Hz de meio segundo pelo HDMI
+                if crate::audio::hdmi::iniciar() {
+                    let n = 24_000usize;
+                    let mut a = alloc::vec::Vec::with_capacity(2 * n);
+                    for i in 0..n {
+                        // seno por aproximacao de Bhaskara (sem f32 no no_std)
+                        let fase = (i * 440 * 360 / 48_000) % 360;
+                        let (x, sinal) = if fase < 180 { (fase as i64, 1) } else { (fase as i64 - 180, -1) };
+                        let v = sinal * 4 * x * (180 - x) * 8000 / (40500 - x * (180 - x));
+                        a.push(v as i16);
+                        a.push(v as i16);
+                    }
+                    let n = crate::audio::hdmi::escrever(&a);
+                    diga!(self, "bipe: {n} quadros na fila; {}", crate::audio::hdmi::relatorio());
+                } else {
+                    diga!(self, "som pelo HDMI não ligou");
+                }
+            }
             "som" => self.som(),
             "clear" | "limpar" => self.console.limpar(),
             "erro" => self.erro(argumentos),
