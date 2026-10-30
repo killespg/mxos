@@ -77,6 +77,8 @@ pub fn ligar() {
     for &(inicio, fim) in plataforma::RAM_EXTRA {
         mapear(t, inicio, fim, RAM);
     }
+    // a secao de guarda abaixo da pilha fica sem mapeamento: estouro = excecao
+    t.0[crate::mapa::kernel().guarda >> 20] = 0;
     let raiz = t as *const Tabela as usize;
     RAIZ.store(raiz, Ordering::Relaxed);
     limpar_cache(raiz, core::mem::size_of::<Tabela>());

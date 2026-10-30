@@ -108,7 +108,8 @@ fn descrever(saida: &mut dyn Write, tipo: u64, esr: u64, elr: u64, far: u64) -> 
         };
         writeln!(saida, "  MMU     : {} (tabela nível {}) ao {acao}", falha_mmu(codigo), codigo & 3)?;
         let guarda = mapa::kernel().guarda as u64;
-        if far >= guarda && far < guarda + 4096 {
+        // a guarda tem 1 MB (no AArch64 so a primeira pagina fica sem mapear)
+        if far >= guarda && far < guarda + 0x10_0000 {
             writeln!(saida, "  >>> ESTOURO DE PILHA: a pilha passou do limite e bateu na página de guarda")?;
         }
     }

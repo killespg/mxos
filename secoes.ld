@@ -33,15 +33,17 @@ SECTIONS
         __bss_end = .;
     }
 
-    /* pagina de guarda: fica sem mapeamento, entao um estouro de pilha
-       vira uma excecao em vez de corromper o BSS em silencio */
-    . = ALIGN(4096);
+    /* guarda: fica sem mapeamento, entao um estouro de pilha vira uma
+       excecao em vez de corromper o BSS em silencio. 1 MB alinhado: o
+       ARMv7 mapeia em secoes de 1 MB (o AArch64 tira so a primeira pagina) */
+    . = ALIGN(0x100000);
     __guarda = .;
-    . += 0x1000;
+    . += 0x100000;
 
-    /* pilha do kernel: 64 KB */
+    /* pilha do kernel: 2 MB (o parser e o interpretador de JS sao
+       recursivos; com 64 KB o JS do Google estourava na TV box) */
     __stack_bottom = .;
-    . += 0x10000;
+    . += 0x200000;
     __stack_top = .;
 
     /* pilha separada para tratar excecoes (inclusive o estouro da outra) */
