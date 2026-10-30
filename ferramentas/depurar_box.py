@@ -110,7 +110,8 @@ def main():
         s.sendall((" ".join(a[1:]) + "\n").encode())
         r = ler_ate_ponto(s)
         s.close()
-        sys.stdout.write(r.decode(errors="replace").removesuffix(".\n"))
+        # bytes direto: o console do Windows (cp1252) nao tem setas e afins
+        sys.stdout.buffer.write(r.removesuffix(b".\n"))
     else:
         print(__doc__)
         sys.exit(1)

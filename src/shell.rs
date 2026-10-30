@@ -778,7 +778,9 @@ impl Shell {
             diga!(self, "durante     : {} em uso em {} alocações", Bytes(durante.total - durante.livre), durante.alocacoes);
         }
         let depois = heap::estatisticas();
-        let devolvido = depois.livre == antes.livre && depois.blocos_livres == antes.blocos_livres;
+        // pela contagem: as classes de tamanho guardam lotes para reusar,
+        // entao o livre nao volta ao valor exato de antes
+        let devolvido = depois.alocacoes == antes.alocacoes;
         diga!(
             self,
             "depois      : {} em uso, {} bloco(s) livre(s) → {}",

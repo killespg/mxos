@@ -423,7 +423,22 @@ impl Placa for Dwmac {
         let k = self.proximo_tx;
         limpar(&self.tx[k]);
         if unsafe { read_volatile(&self.tx[k]) }.d0 & DONO != 0 {
-            return false; // anel cheio
+            // anel cheio: o TCP manda a janela inteira de uma vez (ate 45
+            // segmentos) e o anel tem 32. Descartar aqui custava um RTO por
+            // segmento perdido; a 100 Mbit um quadro sai em ~120 us, entao
+            // vale esperar a placa liberar um (no maximo 10 ms)
+            let freq = crate::cpu::frequencia_timer().max(1);
+            let fim = crate::cpu::contador() + freq / 100;
+            loop {
+                limpar(&self.tx[k]);
+                if unsafe { read_volatile(&self.tx[k]) }.d0 & DONO == 0 {
+                    break;
+                }
+                if crate::cpu::contador() > fim {
+                    return false;
+                }
+                core::hint::spin_loop();
+            }
         }
         let mut n = 0;
         for p in partes {
