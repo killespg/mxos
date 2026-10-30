@@ -20,6 +20,8 @@ const DISPAROU: u64 = 1 << 2; // ISTATUS: o contador ja passou do alvo
 /// Ticks do contador entre dois tiques (frequencia / HZ).
 static PERIODO: AtomicU64 = AtomicU64::new(0);
 static TIQUES: AtomicU64 = AtomicU64::new(0);
+/// Os 32 bits de baixo dos tiques, lidos com um ldr simples (ver tiques_32).
+static TIQUES_32: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 #[cfg(target_arch = "aarch64")]
 fn escrever_alvo(valor: u64) {
@@ -103,7 +105,8 @@ pub fn disparou() -> bool {
 /// Chamado pela interrupcao do timer (so quando `disparou`): conta o tique
 /// e marca o proximo.
 pub fn tique() {
-    TIQUES.fetch_add(1, Ordering::Relaxed);
+    let t = TIQUES.fetch_add(1, Ordering::Relaxed) + 1;
+    TIQUES_32.store(t as u32, Ordering::Relaxed);
     let periodo = PERIODO.load(Ordering::Relaxed);
     let agora = cpu::contador();
     let mut alvo = ler_alvo() + periodo;
@@ -113,6 +116,12 @@ pub fn tique() {
         alvo = agora + periodo;
     }
     escrever_alvo(alvo);
+}
+
+/// Tiques desde `iniciar`, so os 32 bits de baixo: le sem atomico de 64
+/// bits (que no ARMv7 antes da MMU trava). Para comparar com wrapping_sub.
+pub fn tiques_32() -> u32 {
+    TIQUES_32.load(Ordering::Relaxed)
 }
 
 /// Tiques desde `iniciar`.
