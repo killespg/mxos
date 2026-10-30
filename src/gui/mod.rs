@@ -67,6 +67,7 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
     x11::iniciar(largura, altura);
     // os outros nucleos rodam processos; daqui em diante o nucleo 0 tem a
     // trava do kernel e so solta para rodar programas e dormir
+    let _ = writeln!(shell.terminal(), "cpu     : ligando os outros núcleos...");
     let nucleos = smp::ligar_nucleos();
     let _ = writeln!(shell.terminal(), "cpu     : {nucleos} núcleo(s) rodando programas");
     let mut janelas_x: Vec<usize> = Vec::new();

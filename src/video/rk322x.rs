@@ -14,11 +14,13 @@ use super::tela::{Formato, Tela};
 
 const VOP: usize = 0x2005_0000;
 const CFG_DONE: usize = 0x0000;
-const WIN0_CTRL0: usize = 0x0030;
-const WIN0_VIR: usize = 0x003C;
-const WIN0_YRGB_MST: usize = 0x0040;
-const WIN0_ACT_INFO: usize = 0x0048;
-const WIN0_DSP_INFO: usize = 0x004C;
+/// Janelas 0 e 1 (rk3288_vop_win_data do Linux) e os registradores de cada.
+const JANELAS: [usize; 2] = [0x0030, 0x0070];
+const CTRL0: usize = 0x00;
+const VIR: usize = 0x0C;
+const YRGB_MST: usize = 0x10;
+const ACT_INFO: usize = 0x18;
+const DSP_INFO: usize = 0x1C;
 
 fn ler(r: usize) -> u32 {
     unsafe { read_volatile((VOP + r) as *const u32) }
@@ -28,15 +30,17 @@ fn escrever(r: usize, v: u32) {
     unsafe { write_volatile((VOP + r) as *mut u32, v) }
 }
 
-/// (largura, altura) da janela 0, se ela esta ligada.
+/// A primeira janela ligada pelo U-Boot (base dos registradores dela).
+fn janela() -> Result<usize, &'static str> {
+    JANELAS.into_iter().find(|&j| ler(j + CTRL0) & 1 != 0).ok_or("o U-Boot deixou o vídeo desligado (VOP sem janela)")
+}
+
+/// (largura, altura) da janela que o U-Boot ligou.
 pub fn descobrir() -> Result<(usize, usize), &'static str> {
-    let ctrl = ler(WIN0_CTRL0);
-    if ctrl & 1 == 0 {
-        return Err("o U-Boot deixou o vídeo desligado (VOP sem janela)");
-    }
+    let j = janela()?;
     // a area que aparece na tela (DSP_INFO), senao a da imagem (ACT_INFO)
-    let info = match ler(WIN0_DSP_INFO) {
-        0 => ler(WIN0_ACT_INFO),
+    let info = match ler(j + DSP_INFO) {
+        0 => ler(j + ACT_INFO),
         v => v,
     };
     let largura = (info & 0x1FFF) as usize + 1;
@@ -51,6 +55,7 @@ pub fn descobrir() -> Result<(usize, usize), &'static str> {
 /// janela 0 do VOP. Devolve a Tela e o endereco.
 pub fn tomar_posse() -> Result<(Tela, usize), &'static str> {
     let (largura, altura) = descobrir()?;
+    let j = janela()?;
     let bytes = largura * altura * 4;
     let layout = Layout::from_size_align(bytes, 4096).map_err(|_| "tamanho inválido")?;
     let base = unsafe { alloc_zeroed(layout) } as usize;
@@ -61,11 +66,13 @@ pub fn tomar_posse() -> Result<(Tela, usize), &'static str> {
     tela.limpar(super::tela::PRETO);
     // formato ARGB8888 (0 nos bits 1-3), passo em palavras, endereco novo;
     // a imagem tem o tamanho da tela
-    let ctrl = ler(WIN0_CTRL0) & !(0x7 << 1);
-    escrever(WIN0_VIR, largura as u32);
-    escrever(WIN0_ACT_INFO, ((altura as u32 - 1) << 16) | (largura as u32 - 1));
-    escrever(WIN0_YRGB_MST, base as u32);
-    escrever(WIN0_CTRL0, ctrl | 1);
+    let ctrl = ler(j + CTRL0) & !(0x7 << 1);
+    escrever(j + VIR, largura as u32);
+    escrever(j + ACT_INFO, ((altura as u32 - 1) << 16) | (largura as u32 - 1));
+    escrever(j + YRGB_MST, base as u32);
+    escrever(j + CTRL0, ctrl | 1);
     escrever(CFG_DONE, 1);
+    // o VOP agora mostra o framebuffer do MXOS: o console de boot sai
+    crate::console_boot::desligar();
     Ok((tela, base))
 }

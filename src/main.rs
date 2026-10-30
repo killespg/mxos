@@ -12,6 +12,7 @@ mod atualizacao;
 mod audio;
 mod chip8;
 mod config;
+mod console_boot;
 mod cpu;
 mod cripto;
 mod drivers;
@@ -67,14 +68,32 @@ global_asm!(include_str!("vetores_arm.s"), options(raw));
 /// Chamado pelo boot.s, ja em EL1, com pilhas e BSS prontos.
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(el_boot: u64) -> ! {
+    // TV box: as mensagens do boot na tela desde ja (no framebuffer do U-Boot)
+    if console_boot::iniciar() {
+        etapa(format_args!("MXOS {}: kernel no ar (núcleo 0, modo {el_boot})", env!("CARGO_PKG_VERSION")));
+    }
     let mut terminal = Terminal::new();
+    etapa(format_args!("mmu     : ligando tabelas de páginas e caches"));
     mmu::ligar();
-    heap::iniciar(mapa::kernel().fim, plataforma::RAM_FIM);
+    etapa(format_args!("mmu     : ligada"));
+    // o heap pula o framebuffer do U-Boot enquanto o console de boot o usa
+    let (inicio_heap, fim_heap) = (mapa::kernel().fim, plataforma::RAM_FIM);
+    match console_boot::faixa() {
+        Some((fb, fim_fb)) if fb > inicio_heap && fim_fb < fim_heap => {
+            heap::iniciar(inicio_heap, fb);
+            heap::acrescentar(fim_fb, fim_heap);
+        }
+        _ => heap::iniciar(inicio_heap, fim_heap),
+    }
     for &(inicio, fim) in plataforma::RAM_EXTRA {
         heap::acrescentar(inicio, fim);
     }
+    etapa(format_args!("heap    : {} MB livres", heap::estatisticas().livre >> 20));
+    etapa(format_args!("irq     : ligando GIC e timer ({} Hz no contador)", cpu::frequencia_timer()));
     irq::iniciar(&mut terminal.serial);
+    etapa(format_args!("irq     : ligadas"));
     // sem ramfb (ou na TV box, por enquanto) o terminal fica so na serial
+    diga(&mut terminal, format_args!("vídeo   : procurando a tela..."));
     match terminal.ligar_video() {
         Ok(v) => diga(&mut terminal, format_args!("vídeo   : {}x{}, {}", v.largura, v.altura, v.nome)),
         Err(motivo) => diga(&mut terminal, format_args!("vídeo   : desligado ({motivo})")),
@@ -82,6 +101,11 @@ pub extern "C" fn kernel_main(el_boot: u64) -> ! {
         let terminal = qemu::iniciar(terminal, el_boot);
     // sem area de trabalho: o shell le a propria serial
     Shell::nova(terminal, el_boot).rodar()
+}
+
+/// Linha do boot antes do Terminal existir: so o console de boot da tela.
+fn etapa(linha: core::fmt::Arguments) {
+    let _ = writeln!(console_boot::Boot, "{linha}");
 }
 
 /// Uma linha de estado do boot (serial e, se ligado, o console da tela).
@@ -113,20 +137,25 @@ mod qemu {
     pub fn iniciar(mut terminal: Terminal, el_boot: u64) -> Terminal {
         // TV box: o pendrive (disco "/"), teclado e mouse sao USB
         #[cfg(any(feature = "mxq", feature = "rk322x"))]
+        diga(&mut terminal, format_args!("usb     : ligando os controladores..."));
+        #[cfg(any(feature = "mxq", feature = "rk322x"))]
         match crate::usb::iniciar() {
             Ok(linha) => diga(&mut terminal, format_args!("usb     : {linha}")),
             Err(motivo) => diga(&mut terminal, format_args!("usb     : desligado ({motivo})")),
         }
+        diga(&mut terminal, format_args!("disco   : procurando..."));
         iniciar_disco(&mut terminal);
         // a frequencia escolhida mora na config, que esta no disco
         if let Some(linha) = crate::frequencia::aplicar_config() {
             diga(&mut terminal, format_args!("cpu     : {linha}"));
         }
+        diga(&mut terminal, format_args!("rede    : ligando (DHCP)..."));
         iniciar_rede(&mut terminal);
         let (Ok(video), Some(framebuffer)) = (terminal.video(), terminal.tela_do_framebuffer()) else {
             diga(&mut terminal, format_args!("gui     : sem vídeo, fica só o shell na serial"));
             return terminal;
         };
+        diga(&mut terminal, format_args!("entrada : procurando teclado e mouse..."));
         let entrada = match Entrada::iniciar(video.largura as u32, video.altura as u32) {
             Ok(entrada) => entrada,
             Err(motivo) => {
@@ -175,6 +204,7 @@ mod qemu {
 fn panic(info: &PanicInfo) -> ! {
     let mut console = uart::Uart::new();
     let _ = writeln!(console, "\n*** PÂNICO no kernel: {info}");
+    let _ = writeln!(console_boot::Erro, "\n*** PÂNICO no kernel: {info}");
     // com a area de trabalho ligada o erro tambem aparece na tela
     excecao::tela_de_erro("PÂNICO NO KERNEL", |painel| write!(painel, "{info}"));
     cpu::parar()

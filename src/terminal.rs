@@ -116,8 +116,11 @@ impl fmt::Write for Terminal {
         if self.com_serial {
             self.serial.write_str(texto)?;
         }
-        if let Some(console) = &mut self.tela {
-            console.write_str(texto)?;
+        match &mut self.tela {
+            Some(console) => console.write_str(texto)?,
+            // sem video do MXOS: no console de boot (TV box), se houver
+            None if self.com_serial => crate::console_boot::escrever(texto),
+            None => {}
         }
         Ok(())
     }
