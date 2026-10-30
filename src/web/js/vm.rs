@@ -158,6 +158,9 @@ pub struct Vm {
     pub global: Ref,
     pub p: Protos,
     pub quadros: Vec<Quadro>,
+    /// Vetores de quadros que ja voltaram (pilha, locais, args), vazios mas
+    /// com a capacidade: a chamada seguinte reaproveita em vez de alocar.
+    sobras: Vec<Vec<Valor>>,
     pub microtarefas: VecDeque<Tarefa>,
     pub nativas: Vec<FnNativa>,
     pub prox_simbolo: u32,
@@ -198,6 +201,7 @@ impl Vm {
             global: 0,
             p: Protos::default(),
             quadros: Vec::new(),
+            sobras: Vec::new(),
             microtarefas: VecDeque::new(),
             nativas: Vec::new(),
             prox_simbolo: PRIMEIRO_SIMBOLO_LIVRE,
@@ -980,6 +984,21 @@ impl Vm {
         Ok(None)
     }
 
+    /// Um vetor vazio (do estoque, se houver).
+    #[inline]
+    fn sobra(&mut self) -> Vec<Valor> {
+        self.sobras.pop().unwrap_or_else(|| Vec::with_capacity(16))
+    }
+
+    /// Devolve os vetores de um quadro que terminou ao estoque.
+    #[inline]
+    fn reciclar(&mut self, mut v: Vec<Valor>) {
+        if self.sobras.len() < 256 && v.capacity() <= 1024 {
+            v.clear();
+            self.sobras.push(v);
+        }
+    }
+
     pub fn empurrar_quadro(&mut self, r: Ref, mut this: Valor, args: Vec<Valor>, novo_alvo: Valor, construindo: bool) -> R<()> {
         let (mut proto, amb, this_lex) = match &self.heap.get(r).classe {
             Classe::Funcao { proto, amb, this, .. } => (proto.clone(), amb.clone(), this.clone()),
@@ -1002,11 +1021,14 @@ impl Vm {
         }
         let amb = if proto.amb_funcao > 0 { Some(novo_amb(proto.amb_funcao as usize, amb)) } else { amb };
         let n = proto.n_locais as usize;
+        let pilha = self.sobra();
+        let mut locais = self.sobra();
+        locais.resize(n, Valor::Indef);
         self.quadros.push(Quadro {
             proto,
             ip: 0,
-            pilha: Vec::with_capacity(16),
-            locais: alloc::vec![Valor::Indef; n],
+            pilha,
+            locais,
             amb,
             this,
             funcao: Valor::Obj(r),
@@ -2104,7 +2126,8 @@ impl Vm {
                     Op::Chama(n) => {
                         let n = *n as usize;
                         let l = q!().pilha.len();
-                        let args: Vec<Valor> = q!().pilha.drain(l - n..).collect();
+                        let mut args = self.sobra();
+                        args.extend(q!().pilha.drain(l - n..));
                         let this = pop!();
                         let f = pop!();
                         // JS chamando JS: so empurra o quadro
@@ -2152,7 +2175,10 @@ impl Vm {
                     }
                     Op::Retorna => {
                         let v = pop!();
-                        let q = self.quadros.pop().unwrap_or_else(|| unreachable!());
+                        let mut q = self.quadros.pop().unwrap_or_else(|| unreachable!());
+                        self.reciclar(core::mem::take(&mut q.pilha));
+                        self.reciclar(core::mem::take(&mut q.locais));
+                        self.reciclar(core::mem::take(&mut q.args));
                         let v = if q.construindo && !matches!(v, Valor::Obj(_)) { q.this } else { v };
                         if self.quadros.len() <= base {
                             return Ok(Saida::Retorno(v));

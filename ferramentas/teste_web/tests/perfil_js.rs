@@ -24,3 +24,13 @@ fn perfil_objetos() {
     println!("{} amostras", a.len());
     teste_web::perfil::gravar("objetos", &a);
 }
+
+#[test]
+fn perfil_chamadas() {
+    let a = teste_web::perfil::amostrar(|| {
+        let mut vm = Vm::novo();
+        let _ = js::avaliar(&mut vm, "(function () { function f(x, y) { return x + y; } let s = 0; for (let i = 0; i < 4000000; i++) s = f(s, i) % 1000003; return s; })()");
+    });
+    println!("{} amostras", a.len());
+    teste_web::perfil::gravar("chamadas", &a);
+}
