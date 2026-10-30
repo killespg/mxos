@@ -902,7 +902,9 @@ impl Gerenciador {
                 self.fechar(id);
             }
             Pedido::AbrirArquivo(caminho) => {
-                self.abrir_em_cascata(apps::abrir_arquivo(&caminho));
+                if let Some(app) = apps::abrir_arquivo(&caminho) {
+                    self.abrir_em_cascata(app);
+                }
             }
             Pedido::TemaMudou => self.redesenhar_tudo(),
             Pedido::PacotesMudaram => self.atualizar_pacotes(),

@@ -2,8 +2,10 @@
 //! que ele pede, entrega os eventos, chama Tique e Quadro na hora certa e
 //! manda os pixels quando ele diz que mudou.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::entrada::Botao;
 use crate::gui::grafico::Superficie;
@@ -108,70 +110,111 @@ const TIQUE_US: u64 = 100_000;
 /// Intervalo entre dois Quadros (60 por segundo).
 const QUADRO_US: u64 = 16_667;
 
-/// Roda o app ate a janela fechar. Nunca volta.
-pub fn rodar<A: App>(mut app: A) -> ! {
+/// Uma janela aberta com o App dela.
+struct Aberta {
+    janela: Janela,
+    app: Box<dyn App>,
+    s: Superficie,
+    titulo: String,
+    quadros: bool,
+    /// O app pediu para fechar (ou a janela foi fechada).
+    fechar: bool,
+}
+
+impl Aberta {
+    fn abrir(mut app: Box<dyn App>) -> Option<Aberta> {
+        let (largura, altura) = app.tamanho();
+        let janela = Janela::criar(largura, altura, app.titulo())?;
+        let mut s = Superficie::nova(largura, altura, tema::atual().fundo_janela);
+        app.desenhar(&mut s);
+        janela.mostrar(&s);
+        let titulo = String::from(app.titulo());
+        let quadros = app.quer_quadros();
+        Some(Aberta { janela, app, s, titulo, quadros, fechar: false })
+    }
+}
+
+/// Roda o app ate a ultima janela dele fechar (Pedido::Abrir abre outras
+/// no mesmo processo). Nunca volta.
+pub fn rodar<A: App + 'static>(app: A) -> ! {
     carregar_tema();
-    let (largura, altura) = app.tamanho();
-    let Some(janela) = Janela::criar(largura, altura, app.titulo()) else {
-        sys::log("[app] não deu para criar a janela\n");
+    let Some(primeira) = Aberta::abrir(Box::new(app)) else {
+        sys::log("[app] não deu para criar a janela
+");
         sys::sair(1)
     };
-    let mut s = Superficie::nova(largura, altura, tema::atual().fundo_janela);
-    let mut titulo = String::from(app.titulo());
-    app.desenhar(&mut s);
-    janela.mostrar(&s);
-    let quadros = app.quer_quadros();
+    let mut abertas = vec![primeira];
     let mut proximo_tique = sys::tempo_us() + TIQUE_US;
     let mut proximo_quadro = sys::tempo_us() + QUADRO_US;
-    let mut fila = vec![];
+    let mut fila = Vec::new();
     loop {
         let agora = sys::tempo_us();
+        let quadros = abertas.iter().any(|a| a.quadros);
         let alvo = if quadros { proximo_quadro.min(proximo_tique) } else { proximo_tique };
         if alvo > agora {
             esperar(((alvo - agora) / 1000).max(1) as u32);
         }
-        let mut sujo = false;
-        while let Some(e) = janela.evento() {
-            fila.push(e);
-        }
-        for e in fila.drain(..) {
-            match e {
-                Evento::Fechar => {
-                    app.fechar();
-                    sys::sair(0);
-                }
-                Evento::App(e) => sujo |= app.evento(e),
-            }
-        }
         let agora = sys::tempo_us();
-        if quadros && agora >= proximo_quadro {
-            sujo |= app.evento(EventoApp::Quadro);
+        let quadro = quadros && agora >= proximo_quadro;
+        if quadro {
             proximo_quadro = (proximo_quadro + QUADRO_US).max(agora);
         }
-        if agora >= proximo_tique {
-            sujo |= app.evento(EventoApp::Tique);
+        let tique = agora >= proximo_tique;
+        if tique {
             proximo_tique = agora + TIQUE_US;
         }
-        for p in app.pedidos() {
-            match p {
-                Pedido::FecharEsta => {
-                    app.fechar();
-                    sys::sair(0);
+        let mut novas = Vec::new();
+        for a in &mut abertas {
+            let mut sujo = false;
+            while let Some(e) = a.janela.evento() {
+                fila.push(e);
+            }
+            for e in fila.drain(..) {
+                match e {
+                    Evento::Fechar => a.fechar = true,
+                    Evento::App(e) if !a.fechar => sujo |= a.app.evento(e),
+                    Evento::App(_) => {}
                 }
-                Pedido::TemaMudou => {
-                    carregar_tema();
-                    sujo = true;
+            }
+            if a.fechar {
+                continue;
+            }
+            if quadro && a.quadros {
+                sujo |= a.app.evento(EventoApp::Quadro);
+            }
+            if tique {
+                sujo |= a.app.evento(EventoApp::Tique);
+            }
+            for p in a.app.pedidos() {
+                match p {
+                    Pedido::FecharEsta => a.fechar = true,
+                    Pedido::Abrir { app, .. } => novas.push(app),
+                    Pedido::TemaMudou => {
+                        carregar_tema();
+                        sujo = true;
+                    }
+                    _ => {}
                 }
-                _ => {}
+            }
+            if a.fechar {
+                continue;
+            }
+            if a.app.titulo() != a.titulo {
+                a.titulo = String::from(a.app.titulo());
+                a.janela.titulo(&a.titulo);
+            }
+            if sujo {
+                a.app.desenhar(&mut a.s);
+                a.janela.mostrar(&a.s);
             }
         }
-        if app.titulo() != titulo {
-            titulo = String::from(app.titulo());
-            janela.titulo(&titulo);
+        for a in abertas.iter_mut().filter(|a| a.fechar) {
+            a.app.fechar();
         }
-        if sujo {
-            app.desenhar(&mut s);
-            janela.mostrar(&s);
+        abertas.retain(|a| !a.fechar);
+        abertas.extend(novas.into_iter().filter_map(Aberta::abrir));
+        if abertas.is_empty() {
+            sys::sair(0);
         }
     }
 }

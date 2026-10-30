@@ -26,11 +26,13 @@
 extern crate alloc;
 
 pub mod armazenamento;
+pub mod audio;
 pub mod cpu;
 pub mod entrada;
 pub mod gui;
 mod heap;
 pub mod http;
+pub mod ia;
 pub mod janela;
 pub mod sys;
 pub mod video;

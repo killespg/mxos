@@ -296,7 +296,7 @@ fn gerar_aurora(l: i32, a: i32, cor: Cor) -> Vec<Cor> {
 /// Copia as linhas da aurora (gera se a tela ou a cor mudou). false = a
 /// tela ainda nao tem tamanho.
 fn pintar_aurora(s: &mut Superficie, area: Retangulo, origem: (i32, i32), altura_area: i32, cor: Cor) -> bool {
-    let (l, a) = tema::tamanho_da_tela();
+    let (l, _) = tema::tamanho_da_tela();
     if l <= 0 || altura_area <= 0 {
         return false;
     }

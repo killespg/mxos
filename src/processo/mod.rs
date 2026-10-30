@@ -638,8 +638,9 @@ impl Tabela {
     /// pai, entrega os filhos ao kernel e devolve a memoria.
     pub fn terminar(&mut self, i: usize, status: i32) {
         let (pid, tgid) = (self.processos[i].pid, self.processos[i].tgid);
-        // as janelas de um app nativo fecham junto
+        // um app nativo: grava os arquivos abertos, fecha janelas e som
         if self.processos[i].mxos {
+            abi::fechar_tudo(self, i);
             crate::gui::apps::janela_app::processo_saiu(pid);
         }
         if pid != tgid {

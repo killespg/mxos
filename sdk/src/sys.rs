@@ -31,6 +31,8 @@ pub const TELA: usize = 24;
 pub const TEMA: usize = 25;
 pub const COPIAR: usize = 26;
 pub const COLAR: usize = 27;
+pub const IA_PERGUNTAR: usize = 28;
+pub const SOM_FORMATO: usize = 29;
 
 pub const ERRO_INVALIDO: isize = -1;
 pub const ERRO_NAO_EXISTE: isize = -2;

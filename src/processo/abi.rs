@@ -7,6 +7,10 @@
 //! Erros voltam negativos (ERRO_*). Ponteiros sao do espaco do app; o
 //! kernel le e escreve pelos quadros dele (memoria.rs).
 //!
+//! IA_PERGUNTAR manda uma pergunta ao Claude com a chave guardada no
+//! sistema (crate::ia): o app nunca ve a chave. A resposta sai como um
+//! pedido HTTP (HTTP_ESTADO/HTTP_LER): status 200 = texto, outro = erro.
+//!
 //! Janelas: o app desenha os pixels (XRGB 0x00RRGGBB) na memoria dele e
 //! chama JANELA_MOSTRAR com o retangulo que mudou; o kernel copia para a
 //! janela (gui/apps/janela_app.rs) e o compositor apresenta. Os eventos
@@ -49,6 +53,8 @@ pub const TELA: u64 = 24;
 pub const TEMA: u64 = 25;
 pub const COPIAR: u64 = 26;
 pub const COLAR: u64 = 27;
+pub const IA_PERGUNTAR: u64 = 28;
+pub const SOM_FORMATO: u64 = 29;
 
 pub const ERRO_INVALIDO: i64 = -1;
 pub const ERRO_NAO_EXISTE: i64 = -2;
@@ -75,6 +81,7 @@ struct Arquivo {
 /// Um pedido HTTP(S) andando em segundo plano.
 struct PedidoHttp {
     resposta: Option<Result<(u32, Vec<u8>), &'static str>>,
+    #[allow(dead_code)] // para a depuracao (o que o app pediu)
     url: String,
     lido: usize,
 }
@@ -92,6 +99,8 @@ pub struct EstadoApp {
     pub argumentos: Vec<u8>,
     /// Prazo do ESPERAR_EVENTO em andamento (contador).
     prazo: Option<u64>,
+    /// O app abriu a saida de som (fecha quando ele sair).
+    som: bool,
 }
 
 fn agora_us() -> u64 {
@@ -146,7 +155,7 @@ enum Fim {
 fn despachar(t: &mut Tabela, i: usize, numero: u64, a: [u64; 6]) -> Fim {
     let r: Result<i64, i64> = match numero {
         SAIR => {
-            fechar_tudo(t, i);
+            // o terminar fecha arquivos, janelas e som (fechar_tudo)
             t.terminar(i, (a[0] as i32 & 0xFF) << 8);
             return Fim::Nada;
         }
@@ -279,13 +288,32 @@ fn despachar(t: &mut Tabela, i: usize, numero: u64, a: [u64; 6]) -> Fim {
             }
             escrever(t, i, a[1], &pedaco).map(|_| n as i64)
         }
+        // SOM(pcm, n): PCM de 16 bits no formato do SOM_FORMATO (padrao
+        // 48 kHz estereo). Devolve quantos bytes couberam.
         SOM => match ler(t, i, a[0], a[1], 1 << 20) {
             Ok(b) => {
-                crate::audio::dsp::abrir();
+                if !abrir_som(t, i) {
+                    return Fim::Valor(ERRO_NAO_EXISTE);
+                }
                 Ok(crate::audio::dsp::escrever(&b) as i64)
             }
             Err(e) => Err(e),
         },
+        // SOM_FORMATO(taxa, canais) -> a taxa que a placa aceitou; taxa 0
+        // fecha a saida de som.
+        SOM_FORMATO => {
+            if a[0] == 0 {
+                if core::mem::take(&mut t.processos[i].app.som) {
+                    crate::audio::dsp::fechar();
+                }
+                Ok(0)
+            } else if !abrir_som(t, i) {
+                Err(ERRO_NAO_EXISTE)
+            } else {
+                crate::audio::dsp::canais(a[1].clamp(1, 2) as u32);
+                Ok(crate::audio::dsp::taxa(a[0] as u32) as i64)
+            }
+        }
         ARGUMENTOS => {
             let args = t.processos[i].app.argumentos.clone();
             let n = (a[1] as usize).min(args.len());
@@ -313,6 +341,16 @@ fn despachar(t: &mut Tabela, i: usize, numero: u64, a: [u64; 6]) -> Fim {
             let n = (a[1] as usize).min(s.len());
             escrever(t, i, a[0], &s.as_bytes()[..n]).map(|_| s.len() as i64)
         }
+        IA_PERGUNTAR => match (texto(t, i, a[0], a[1]), texto(t, i, a[2], a[3])) {
+            (Ok(sistema), Ok(pergunta)) => {
+                let resposta = match crate::ia::perguntar(&sistema, &pergunta) {
+                    Ok(texto) => (200, texto.into_bytes()),
+                    Err(erro) => (400, erro.into_bytes()),
+                };
+                Ok(guardar_http(t, i, String::from("ia"), Ok(resposta)))
+            }
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        },
         _ => Err(ERRO_DESCONHECIDA),
     };
     Fim::Valor(r.unwrap_or_else(|e| e))
@@ -368,8 +406,20 @@ fn fechar_arquivo(t: &mut Tabela, i: usize, fd: u32) -> Result<i64, i64> {
     Ok(0)
 }
 
-/// Fecha arquivos (gravando os de escrita) e janelas do app que saiu.
+/// Abre a saida de som para o app (uma vez). false = sem placa de som.
+fn abrir_som(t: &mut Tabela, i: usize) -> bool {
+    let app = &mut t.processos[i].app;
+    if !app.som {
+        app.som = crate::audio::dsp::abrir();
+    }
+    app.som
+}
+
+/// Fecha arquivos (gravando os de escrita), janelas e som do app que saiu.
 pub fn fechar_tudo(t: &mut Tabela, i: usize) {
+    if core::mem::take(&mut t.processos[i].app.som) {
+        crate::audio::dsp::fechar();
+    }
     let fds: Vec<u32> = t.processos[i].app.arquivos.keys().copied().collect();
     for fd in fds {
         let _ = fechar_arquivo(t, i, fd);
@@ -444,10 +494,14 @@ fn janela_mostrar(t: &mut Tabela, i: usize, a: [u64; 6]) -> Result<i64, i64> {
 fn http_pedir(t: &mut Tabela, i: usize, a: [u64; 6]) -> Result<i64, i64> {
     let url = texto(t, i, a[0], a[1])?;
     let resposta = crate::rede::http_get(&url, 30_000).map(|r| (r.status as u32, r.corpo)).map_err(|e| e.descricao());
+    Ok(guardar_http(t, i, url, resposta))
+}
+
+/// Guarda uma resposta pronta para o app ler. Devolve o id.
+fn guardar_http(t: &mut Tabela, i: usize, url: String, resposta: Result<(u32, Vec<u8>), &'static str>) -> i64 {
     let app = &mut t.processos[i].app;
     app.proximo_http += 1;
     let id = app.proximo_http;
     app.http.insert(id, PedidoHttp { resposta: Some(resposta), url, lido: 0 });
-    let _ = &app.http[&id].url;
-    Ok(id as i64)
+    id as i64
 }

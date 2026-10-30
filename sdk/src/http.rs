@@ -17,7 +17,11 @@ pub fn baixar(url: &str) -> Result<Resposta, isize> {
     if id < 0 {
         return Err(id);
     }
-    let id = id as usize;
+    esperar(id as usize)
+}
+
+/// Espera o pedido `id` (HTTP_PEDIR, IA_PERGUNTAR) terminar e le tudo.
+pub(crate) fn esperar(id: usize) -> Result<Resposta, isize> {
     let (status, tamanho) = loop {
         let v = sys::chamada64(sys::HTTP_ESTADO, [id, 0, 0, 0, 0, 0]) as i64;
         if v < 0 {

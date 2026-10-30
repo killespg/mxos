@@ -81,10 +81,23 @@ pub fn registrar_atalhos(g: &mut Gerenciador) {
     g.registrar_atalho("Configurações", Icone::Engrenagem, configuracoes::criar);
 }
 
-/// O app certo para um arquivo do disco: paginas (.htm, .html) no
+/// O app certo para um arquivo do disco: um app instalado que diz abrir
+/// a extensao (roda como processo: None), paginas (.htm, .html) no
 /// navegador, o resto no editor de texto.
-pub fn abrir_arquivo(caminho: &str) -> Box<dyn App> {
+pub fn abrir_arquivo(caminho: &str) -> Option<Box<dyn App>> {
     let minusculo = caminho.to_ascii_lowercase();
+    if !minusculo.ends_with(".mxa") {
+        if let Some(m) = crate::pacotes::app_para(caminho) {
+            return match crate::pacotes::abrir(&m.id, caminho) {
+                Ok(_) => None,
+                Err(e) => Some(aviso::criar("Não abriu", &e)),
+            };
+        }
+    }
+    Some(abrir_arquivo_no_sistema(caminho, &minusculo))
+}
+
+fn abrir_arquivo_no_sistema(caminho: &str, minusculo: &str) -> Box<dyn App> {
     if minusculo.ends_with(".mxa") {
         return loja::abrir_arquivo(caminho);
     }

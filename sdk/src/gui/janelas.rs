@@ -57,3 +57,29 @@ pub enum Pedido {
     DefinirLayout(Layout),
     TemaMudou,
 }
+
+/// Um app numa caixa tambem e um app (para o mxos::app! aceitar
+/// `fn() -> Box<dyn App>`).
+impl<T: App + ?Sized> App for Box<T> {
+    fn titulo(&self) -> &str {
+        (**self).titulo()
+    }
+    fn tamanho(&self) -> (usize, usize) {
+        (**self).tamanho()
+    }
+    fn desenhar(&mut self, conteudo: &mut Superficie) {
+        (**self).desenhar(conteudo)
+    }
+    fn evento(&mut self, e: EventoApp) -> bool {
+        (**self).evento(e)
+    }
+    fn fechar(&mut self) {
+        (**self).fechar()
+    }
+    fn pedidos(&mut self) -> Vec<Pedido> {
+        (**self).pedidos()
+    }
+    fn quer_quadros(&self) -> bool {
+        (**self).quer_quadros()
+    }
+}

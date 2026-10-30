@@ -4,6 +4,7 @@
 //!   manifesto.json   {"id": "calculadora", "nome": "Calculadora",
 //!                     "versao": "1.0.0", "descricao": "...", "autor": "...",
 //!                     "licenca": "GPL-3.0-or-later", "icone": "Calculadora",
+//!                     "extensoes": [".txt"],
 //!                     "programas": {"armv7": "armv7/calculadora",
 //!                                   "aarch64": "aarch64/calculadora"}}
 //!   armv7/...        o programa de cada arquitetura (ELF estatico, sdk/)
@@ -12,7 +13,8 @@
 //! Instalar copia tudo (menos os programas das outras arquiteturas) para
 //! /apps/<id>/; o app roda como processo com a ABI do MXOS
 //! (processo/abi.rs) e abre a propria janela. O icone e o nome de um dos
-//! icones do sistema (gui::widgets::Icone).
+//! icones do sistema (gui::widgets::Icone). `extensoes` sao os arquivos
+//! que o app abre (o caminho chega como argumento).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -45,6 +47,8 @@ pub struct Manifesto {
     pub icone: String,
     /// O programa desta arquitetura (caminho dentro do pacote).
     pub programa: String,
+    /// Arquivos que o app abre (".txt"), em minusculas.
+    pub extensoes: Vec<String>,
 }
 
 impl Manifesto {
@@ -74,6 +78,14 @@ impl Manifesto {
             licenca: campo("licenca"),
             icone: campo("icone"),
             programa,
+            extensoes: j
+                .campo("extensoes")
+                .map(Json::lista)
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(Json::texto)
+                .map(|e| e.to_ascii_lowercase())
+                .collect(),
         })
     }
 
@@ -247,6 +259,12 @@ pub fn desinstalar(id: &str) -> Result<(), String> {
 pub fn abrir(id: &str, argumentos: &str) -> Result<u32, String> {
     let m = instalado(id).ok_or_else(|| format!("{id}: o app não está instalado"))?;
     crate::processo::abrir_app(&m.nome, &format!("{}/{}", m.pasta(), m.programa), argumentos)
+}
+
+/// O app instalado que abre `caminho` (pela extensao), se houver.
+pub fn app_para(caminho: &str) -> Option<Manifesto> {
+    let minusculo = caminho.to_ascii_lowercase();
+    instalados().into_iter().find(|m| m.extensoes.iter().any(|e| minusculo.ends_with(e.as_str())))
 }
 
 /// Compara versoes "1.2.10" > "1.2.9" (pedaco a pedaco, numerico).
