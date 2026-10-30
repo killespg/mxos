@@ -178,6 +178,10 @@ impl Scripts {
                     let (u, texto) = match src {
                         Some(s) => {
                             let u = crate::web::url::resolver(&base, &s);
+                            if crate::web::bloqueio::bloqueado(&u) {
+                                jsdom::disparar(&mut self.vm, id, "error", &[]);
+                                continue;
+                            }
                             match buscar(&u) {
                                 Some(t) => (u, t),
                                 None => {
@@ -192,7 +196,7 @@ impl Scripts {
                     self.modulo(&u, &texto);
                     // as dependencias vem pela rede ja (os modulos rodam antes do DOMContentLoaded)
                     self.rede(&mut |p| {
-                        if p.metodo != "GET" {
+                        if p.metodo != "GET" || crate::web::bloqueio::bloqueado(p.url) {
                             return None;
                         }
                         buscar(p.url).map(|corpo| Resposta { status: 200, corpo, cabecalhos: Vec::new(), url: String::from(p.url) })
@@ -200,6 +204,11 @@ impl Scripts {
                 }
                 FonteScript::Externo(u) => {
                     let u = crate::web::url::resolver(&base, &u);
+                    // anuncio ou rastreador: nem baixa (a pagina ve um erro de carga)
+                    if crate::web::bloqueio::bloqueado(&u) {
+                        jsdom::disparar(&mut self.vm, id, "error", &[]);
+                        continue;
+                    }
                     self.origem = u.rsplit('/').next().unwrap_or("").chars().take(40).collect();
                     match buscar(&u) {
                         Some(t) => {
@@ -313,7 +322,11 @@ impl Scripts {
                 break;
             }
             for p in pedidos {
-                let r = buscar(&PedidoRede { metodo: &p.metodo, url: &p.url, corpo: p.corpo.as_deref(), cabecalhos: &p.cabecalhos });
+                let r = if crate::web::bloqueio::bloqueado(&p.url) {
+                    None
+                } else {
+                    buscar(&PedidoRede { metodo: &p.metodo, url: &p.url, corpo: p.corpo.as_deref(), cabecalhos: &p.cabecalhos })
+                };
                 let cab = self.vm.novo_objeto();
                 let (status, corpo, url) = match &r {
                     Some(r) => {

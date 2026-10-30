@@ -179,7 +179,12 @@ fn buscar_imagens(doc: &crate::web::dom::Documento, base: &str, imgs: &mut Imgs)
             if imgs.pixels >= MAX_PIXELS_PAGINA {
                 continue;
             }
-            if let Some(i) = imagem_de(&url::resolver(base, &s)) {
+            let u = url::resolver(base, &s);
+            // pixel de rastreio e banner de anuncio: nem baixa
+            if crate::web::bloqueio::bloqueado(&u) {
+                continue;
+            }
+            if let Some(i) = imagem_de(&u) {
                 imgs.pixels += i.px.len();
                 imgs.por_no.insert(id, i);
             }

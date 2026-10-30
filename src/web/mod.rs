@@ -9,6 +9,7 @@
 
 #![allow(dead_code)]
 
+pub mod bloqueio;
 pub mod atomo;
 pub mod css;
 pub mod dom;
