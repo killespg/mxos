@@ -34,3 +34,13 @@ fn perfil_chamadas() {
     println!("{} amostras", a.len());
     teste_web::perfil::gravar("chamadas", &a);
 }
+
+#[test]
+fn perfil_props() {
+    let a = teste_web::perfil::amostrar(|| {
+        let mut vm = Vm::novo();
+        let _ = js::avaliar(&mut vm, "(function () { const o = {a: 1, b: 2, c: 3, d: 4, e: 5, f: 6}; let s = 0; for (let i = 0; i < 4000000; i++) { o.a = o.b + o.e; s += o.a; } return s; })()");
+    });
+    println!("{} amostras", a.len());
+    teste_web::perfil::gravar("props", &a);
+}

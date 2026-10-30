@@ -64,7 +64,7 @@ fn itens_de(vm: &mut Vm, v: &Valor) -> R<Vec<Valor>> {
             Valor::texto(ch.encode_utf8(&mut b))
         }).collect());
     }
-    let len = vm.pegar(v, chave("length"))?;
+    let len = vm.pegar(v, const { crate::web::atomo::fixo("length").0 })?;
     let n = vm.para_numero(&len)?;
     let n = if n.is_finite() && n > 0.0 { (n as usize).min(10_000_000) } else { 0 };
     let mut out = Vec::with_capacity(n);
@@ -104,8 +104,8 @@ fn obj_com(vm: &mut Vm, proto: Ref) -> Ref {
 fn construtor(vm: &mut Vm, nome: &str, f: super::vm::FnNativa, aridade: u8, proto: Ref) -> Ref {
     let ctor = vm.nativa(nome, f, aridade);
     let r = ctor.obj().unwrap_or(0);
-    vm.heap.get_mut(r).definir(chave("prototype"), Slot { v: Valor::Obj(proto), acessor: None, enumeravel: false, gravavel: false, configuravel: false });
-    vm.heap.get_mut(proto).definir(chave("constructor"), Slot::oculto(ctor.clone()));
+    vm.heap.get_mut(r).definir(const { crate::web::atomo::fixo("prototype").0 }, Slot { v: Valor::Obj(proto), acessor: None, enumeravel: false, gravavel: false, configuravel: false });
+    vm.heap.get_mut(proto).definir(const { crate::web::atomo::fixo("constructor").0 }, Slot::oculto(ctor.clone()));
     let g = vm.global;
     vm.heap.get_mut(g).definir(chave(nome), Slot::oculto(ctor));
     r
@@ -214,8 +214,8 @@ fn instalar_objeto(vm: &mut Vm) {
     // __proto__ como acessor
     let get = vm.nativa("__proto__", obj_proto_get, 0);
     let set = vm.nativa("__proto__", obj_proto_set, 1);
-    vm.definir_acessor(po, chave("__proto__"), get, 0, false);
-    vm.definir_acessor(po, chave("__proto__"), set, 1, false);
+    vm.definir_acessor(po, const { crate::web::atomo::fixo("__proto__").0 }, get, 0, false);
+    vm.definir_acessor(po, const { crate::web::atomo::fixo("__proto__").0 }, set, 1, false);
 }
 
 fn obj_ctor(vm: &mut Vm, c: &Ctx) -> R<Valor> {
@@ -293,8 +293,8 @@ fn obj_create(vm: &mut Vm, c: &Ctx) -> R<Valor> {
 }
 
 fn definir_descritor(vm: &mut Vm, r: Ref, ch: Chave, d: &Valor) -> R<()> {
-    let get = vm.pegar(d, chave("get"))?;
-    let set = vm.pegar(d, chave("set"))?;
+    let get = vm.pegar(d, const { crate::web::atomo::fixo("get").0 })?;
+    let set = vm.pegar(d, const { crate::web::atomo::fixo("set").0 })?;
     let tem = |vm: &mut Vm, n: &str| -> bool { matches!(d, Valor::Obj(x) if vm.tem_propriedade(*x, chave(n))) };
     let existente = vm.heap.get(r).slot(ch).cloned();
     let enumeravel = if tem(vm, "enumerable") { vm.pegar(d, chave("enumerable"))?.verdadeiro() } else { existente.as_ref().is_some_and(|s| s.enumeravel) };
@@ -306,7 +306,7 @@ fn definir_descritor(vm: &mut Vm, r: Ref, ch: Chave, d: &Valor) -> R<()> {
         vm.heap.get_mut(r).definir(ch, Slot { v: Valor::Indef, acessor: Some(Box::new((g, s))), enumeravel, gravavel: true, configuravel });
         return Ok(());
     }
-    let valor = if tem(vm, "value") { vm.pegar(d, chave("value"))? } else { existente.as_ref().map(|s| s.v.clone()).unwrap_or_default() };
+    let valor = if tem(vm, "value") { vm.pegar(d, const { crate::web::atomo::fixo("value").0 })? } else { existente.as_ref().map(|s| s.v.clone()).unwrap_or_default() };
     let gravavel = if tem(vm, "writable") { vm.pegar(d, chave("writable"))?.verdadeiro() } else { existente.as_ref().is_some_and(|s| s.gravavel) };
     // arrays: indices vao para o vetor
     if let Classe::Array(_) = vm.heap.get(r).classe {
@@ -370,7 +370,7 @@ fn descritor(vm: &mut Vm, r: Ref, ch: Chave) -> R<Valor> {
                 if !matches!(v, Valor::Indef) || nome_da_chave(ch) == "length" {
                     let d = vm.novo_objeto();
                     let dr = d.obj().unwrap_or(0);
-                    vm.definir_propria(dr, chave("value"), v);
+                    vm.definir_propria(dr, const { crate::web::atomo::fixo("value").0 }, v);
                     vm.definir_propria(dr, chave("writable"), Valor::Bool(true));
                     vm.definir_propria(dr, chave("enumerable"), Valor::Bool(nome_da_chave(ch) != "length"));
                     vm.definir_propria(dr, chave("configurable"), Valor::Bool(nome_da_chave(ch) != "length"));
@@ -384,11 +384,11 @@ fn descritor(vm: &mut Vm, r: Ref, ch: Chave) -> R<Valor> {
     let dr = d.obj().unwrap_or(0);
     match &s.acessor {
         Some(a) => {
-            vm.definir_propria(dr, chave("get"), a.0.clone());
-            vm.definir_propria(dr, chave("set"), a.1.clone());
+            vm.definir_propria(dr, const { crate::web::atomo::fixo("get").0 }, a.0.clone());
+            vm.definir_propria(dr, const { crate::web::atomo::fixo("set").0 }, a.1.clone());
         }
         None => {
-            vm.definir_propria(dr, chave("value"), s.v.clone());
+            vm.definir_propria(dr, const { crate::web::atomo::fixo("value").0 }, s.v.clone());
             vm.definir_propria(dr, chave("writable"), Valor::Bool(s.gravavel));
         }
     }
@@ -632,10 +632,10 @@ fn fun_bind(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     }
     let pf = vm.p.funcao;
     let args = if c.args.is_empty() { Vec::new() } else { c.args[1..].to_vec() };
-    let nome = vm.pegar(c.this, chave("name"))?;
+    let nome = vm.pegar(c.this, const { crate::web::atomo::fixo("name").0 })?;
     let r = vm.alocar(Some(pf), Classe::Ligada { alvo: c.this.clone(), this: c.arg(0), args });
     let n = vm.para_texto(&nome)?;
-    vm.heap.get_mut(r).definir(chave("name"), Slot::oculto(Valor::texto(&format!("bound {n}"))));
+    vm.heap.get_mut(r).definir(const { crate::web::atomo::fixo("name").0 }, Slot::oculto(Valor::texto(&format!("bound {n}"))));
     Ok(Valor::Obj(r))
 }
 
@@ -648,7 +648,7 @@ fn fun_to_string(vm: &mut Vm, c: &Ctx) -> R<Valor> {
             return Ok(Valor::texto(&format!("function {}() {{ [código] }}", proto.nome)));
         }
     }
-    let n = vm.pegar(c.this, chave("name"))?;
+    let n = vm.pegar(c.this, const { crate::web::atomo::fixo("name").0 })?;
     let n = vm.para_texto(&n)?;
     Ok(Valor::texto(&format!("function {n}() {{ [native code] }}")))
 }
@@ -777,7 +777,7 @@ fn generico(vm: &mut Vm, c: &Ctx, f: super::vm::FnNativa) -> R<Valor> {
             vm.heap.get_mut(*o).remover(chave(&alloc::format!("{i}")));
         }
     }
-    vm.por(c.this, chave("length"), Valor::Num(novos.len() as f64))?;
+    vm.por(c.this, const { crate::web::atomo::fixo("length").0 }, Valor::Num(novos.len() as f64))?;
     Ok(if r == tmp { c.this.clone() } else { r })
 }
 
@@ -786,7 +786,7 @@ fn eh_array_this(vm: &Vm, c: &Ctx) -> bool {
 }
 
 fn tamanho_generico(vm: &mut Vm, v: &Valor) -> R<usize> {
-    let len = vm.pegar(v, chave("length"))?;
+    let len = vm.pegar(v, const { crate::web::atomo::fixo("length").0 })?;
     let n = vm.para_numero(&len)?;
     Ok(if n.is_finite() && n > 0.0 { n as usize } else { 0 })
 }
@@ -801,7 +801,7 @@ fn arr_push(vm: &mut Vm, c: &Ctx) -> R<Valor> {
         vm.por_idx(c.this, &Valor::Num(n as f64), a.clone())?;
         n += 1;
     }
-    vm.por(c.this, chave("length"), Valor::Num(n as f64))?;
+    vm.por(c.this, const { crate::web::atomo::fixo("length").0 }, Valor::Num(n as f64))?;
     Ok(Valor::Num(n as f64))
 }
 
@@ -811,7 +811,7 @@ fn arr_pop(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     }
     let n = tamanho_generico(vm, c.this)?;
     if n == 0 {
-        vm.por(c.this, chave("length"), Valor::Num(0.0))?;
+        vm.por(c.this, const { crate::web::atomo::fixo("length").0 }, Valor::Num(0.0))?;
         return Ok(Valor::Indef);
     }
     let k = Valor::Num((n - 1) as f64);
@@ -819,7 +819,7 @@ fn arr_pop(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     if let Valor::Obj(o) = c.this {
         vm.heap.get_mut(*o).remover(chave(&alloc::format!("{}", n - 1)));
     }
-    vm.por(c.this, chave("length"), Valor::Num((n - 1) as f64))?;
+    vm.por(c.this, const { crate::web::atomo::fixo("length").0 }, Valor::Num((n - 1) as f64))?;
     Ok(v)
 }
 
@@ -2257,7 +2257,7 @@ fn nada(_vm: &mut Vm, _c: &Ctx) -> R<Valor> {
 fn erro_ctor(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     // o prototipo vem do construtor chamado (new TypeError) ou do this
     let proto = match c.novo {
-        Some(alvo) => vm.pegar(alvo, chave("prototype"))?.obj(),
+        Some(alvo) => vm.pegar(alvo, const { crate::web::atomo::fixo("prototype").0 })?.obj(),
         None => {
             // chamado sem new: Error("x")
             let f = vm.quadros.last().map(|q| q.funcao.clone());
@@ -2268,7 +2268,7 @@ fn erro_ctor(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     let r = vm.alocar(proto, Classe::Erro);
     if !matches!(c.arg(0), Valor::Indef) {
         let m = texto(vm, c, 0)?;
-        vm.heap.get_mut(r).definir(chave("message"), Slot::oculto(Valor::Texto(m)));
+        vm.heap.get_mut(r).definir(const { crate::web::atomo::fixo("message").0 }, Slot::oculto(Valor::Texto(m)));
     }
     let opcoes = c.arg(1);
     if let Valor::Obj(_) = opcoes {
@@ -2277,13 +2277,13 @@ fn erro_ctor(vm: &mut Vm, c: &Ctx) -> R<Valor> {
             vm.heap.get_mut(r).definir(chave("cause"), Slot::oculto(causa));
         }
     }
-    vm.heap.get_mut(r).definir(chave("stack"), Slot::oculto(Valor::texto("")));
+    vm.heap.get_mut(r).definir(const { crate::web::atomo::fixo("stack").0 }, Slot::oculto(Valor::texto("")));
     Ok(Valor::Obj(r))
 }
 
 fn erro_to_string(vm: &mut Vm, c: &Ctx) -> R<Valor> {
-    let n = vm.pegar(c.this, chave("name"))?;
-    let m = vm.pegar(c.this, chave("message"))?;
+    let n = vm.pegar(c.this, const { crate::web::atomo::fixo("name").0 })?;
+    let m = vm.pegar(c.this, const { crate::web::atomo::fixo("message").0 })?;
     let n = if matches!(n, Valor::Indef) { Rc::from("Error") } else { vm.para_texto(&n)? };
     let m = if matches!(m, Valor::Indef) { Rc::from("") } else { vm.para_texto(&m)? };
     Ok(Valor::texto(&if m.is_empty() { String::from(&*n) } else if n.is_empty() { String::from(&*m) } else { format!("{n}: {m}") }))
@@ -2845,7 +2845,7 @@ fn prom_ctor(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     }
     let p = vm.nova_promessa();
     if let (Some(alvo), Valor::Obj(r)) = (c.novo, &p) {
-        if let Valor::Obj(pr) = vm.pegar(alvo, chave("prototype"))? {
+        if let Valor::Obj(pr) = vm.pegar(alvo, const { crate::web::atomo::fixo("prototype").0 })? {
             vm.heap.get_mut(*r).proto = Some(pr);
         }
     }
@@ -2868,7 +2868,7 @@ fn prom_then(vm: &mut Vm, c: &Ctx) -> R<Valor> {
 }
 
 fn prom_catch(vm: &mut Vm, c: &Ctx) -> R<Valor> {
-    let then = vm.pegar(c.this, chave("then"))?;
+    let then = vm.pegar(c.this, const { crate::web::atomo::fixo("then").0 })?;
     vm.chamar(&then, c.this, &[Valor::Indef, c.arg(0)])
 }
 
@@ -3089,7 +3089,7 @@ fn weakref_ctor(vm: &mut Vm, c: &Ctx) -> R<Valor> {
 
 fn novo_mapa(vm: &mut Vm, c: &Ctx, eh_mapa: bool) -> R<Ref> {
     let proto = match c.novo {
-        Some(alvo) => vm.pegar(alvo, chave("prototype"))?.obj(),
+        Some(alvo) => vm.pegar(alvo, const { crate::web::atomo::fixo("prototype").0 })?.obj(),
         None => return vm.erro_tipo("Map/Set precisam de new"),
     };
     Ok(vm.alocar(proto, Classe::Mapa(Box::new(Mapa { eh_mapa, ..Default::default() }))))
@@ -3536,7 +3536,7 @@ fn data_ctor(vm: &mut Vm, c: &Ctx) -> R<Valor> {
         return Ok(Valor::texto(&texto_data(agora(vm))));
     }
     let p = match c.novo {
-        Some(alvo) => vm.pegar(alvo, chave("prototype"))?.obj(),
+        Some(alvo) => vm.pegar(alvo, const { crate::web::atomo::fixo("prototype").0 })?.obj(),
         None => Some(vm.p.data),
     };
     let t = if t.is_finite() { m::trunc(t) } else { f64::NAN };

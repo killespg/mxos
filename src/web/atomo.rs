@@ -36,6 +36,10 @@ static FIXOS: &[&str] = &[
     "method", "for", "placeholder", "target", "media", "srcset", "sizes", "loading", "async", "defer",
     "role", "tabindex", "encoding", "start", "reversed", "valign", "nowrap", "background", "text",
     "viewBox", "fill", "stroke", "d", "multiple", "readonly", "maxlength", "aria-hidden",
+    // propriedades que o JS consulta o tempo todo (comparar com constante,
+    // sem ir a tabela global com trava a cada acesso)
+    "length", "prototype", "constructor", "__proto__", "then", "next", "done", "call", "apply",
+    "bind", "toString", "valueOf", "get", "set", "push", "message", "stack", "caller", "arguments",
 ];
 
 const fn igual(a: &str, b: &str) -> bool {

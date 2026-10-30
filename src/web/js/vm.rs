@@ -193,6 +193,8 @@ pub struct Ids {
 }
 
 pub const CH_LENGTH: &str = "length";
+/// O atomo de "length" (fixo: comparar e so comparar inteiros).
+pub const K_LENGTH: Chave = crate::web::atomo::fixo("length").0;
 
 impl Vm {
     pub fn novo() -> Vm {
@@ -240,13 +242,13 @@ impl Vm {
     pub fn novo_erro(&mut self, proto: Ref, msg: &str) -> Valor {
         let r = self.alocar(Some(proto), Classe::Erro);
         let m = Valor::texto(msg);
-        self.heap.get_mut(r).definir(chave("message"), Slot::oculto(m));
+        self.heap.get_mut(r).definir(const { crate::web::atomo::fixo("message").0 }, Slot::oculto(m));
         // pilha: a linha atual, se houver
         let mut pilha = String::new();
         for q in self.quadros.iter().rev().take(6) {
             pilha.push_str(&format!("    at {} (pos {})\n", q.proto.nome, q.proto.linhas.get(q.ip.saturating_sub(1)).copied().unwrap_or(0)));
         }
-        self.heap.get_mut(r).definir(chave("stack"), Slot::oculto(Valor::texto(&pilha)));
+        self.heap.get_mut(r).definir(const { crate::web::atomo::fixo("stack").0 }, Slot::oculto(Valor::texto(&pilha)));
         Valor::Obj(r)
     }
 
@@ -284,8 +286,8 @@ impl Vm {
         let pf = self.p.funcao;
         let r = self.alocar(Some(pf), Classe::Nativa { id, dado });
         let o = self.heap.get_mut(r);
-        o.definir(chave("name"), Slot { v: Valor::texto(nome), acessor: None, enumeravel: false, gravavel: false, configuravel: true });
-        o.definir(chave(CH_LENGTH), Slot { v: Valor::Num(aridade as f64), acessor: None, enumeravel: false, gravavel: false, configuravel: true });
+        o.definir(const { crate::web::atomo::fixo("name").0 }, Slot { v: Valor::texto(nome), acessor: None, enumeravel: false, gravavel: false, configuravel: true });
+        o.definir(K_LENGTH, Slot { v: Valor::Num(aridade as f64), acessor: None, enumeravel: false, gravavel: false, configuravel: true });
         Valor::Obj(r)
     }
 
@@ -393,12 +395,12 @@ impl Vm {
                     return format!("[ {} ]", partes.join(", "));
                 }
                 if self.eh_chamavel(v) {
-                    let n = self.pegar(v, chave("name")).ok().map(|n| self.mostrar(&n, 0)).unwrap_or_default();
+                    let n = self.pegar(v, const { crate::web::atomo::fixo("name").0 }).ok().map(|n| self.mostrar(&n, 0)).unwrap_or_default();
                     return format!("[Function: {n}]");
                 }
                 if matches!(self.heap.get(r).classe, Classe::Erro) {
-                    let n = self.pegar(v, chave("name")).ok().map(|n| self.mostrar(&n, 0)).unwrap_or_default();
-                    let m = self.pegar(v, chave("message")).ok().map(|n| self.mostrar(&n, 0)).unwrap_or_default();
+                    let n = self.pegar(v, const { crate::web::atomo::fixo("name").0 }).ok().map(|n| self.mostrar(&n, 0)).unwrap_or_default();
+                    let m = self.pegar(v, const { crate::web::atomo::fixo("message").0 }).ok().map(|n| self.mostrar(&n, 0)).unwrap_or_default();
                     return format!("{n}: {m}");
                 }
                 if let Classe::Dom(_) = self.heap.get(r).classe {
@@ -573,12 +575,12 @@ impl Vm {
                         if let Some(e) = v.get(i) {
                             return Ok(e.clone());
                         }
-                    } else if c == chave(CH_LENGTH) {
+                    } else if c == K_LENGTH {
                         return Ok(Valor::Num(v.len() as f64));
                     }
                 }
                 Classe::Texto(s) if primeiro => {
-                    if c == chave(CH_LENGTH) {
+                    if c == K_LENGTH {
                         return Ok(Valor::Num(s.encode_utf16().count() as f64));
                     }
                 }
@@ -589,7 +591,7 @@ impl Vm {
                         let po = self.p.objeto;
                         let pg = self.p.gerador;
                         let novo = self.alocar(Some(if proto.geradora { pg } else { po }), Classe::Comum);
-                        self.heap.get_mut(novo).definir(chave("constructor"), Slot::oculto(Valor::Obj(x)));
+                        self.heap.get_mut(novo).definir(const { crate::web::atomo::fixo("constructor").0 }, Slot::oculto(Valor::Obj(x)));
                         let s = Slot { v: Valor::Obj(novo), acessor: None, enumeravel: false, gravavel: true, configuravel: false };
                         self.heap.get_mut(x).definir(c, s);
                         return Ok(Valor::Obj(novo));
@@ -613,7 +615,7 @@ impl Vm {
                 }
                 Classe::Proxy(alvo, manip) => {
                     let (alvo, manip) = (alvo.clone(), manip.clone());
-                    let get = self.pegar(&manip, chave("get"))?;
+                    let get = self.pegar(&manip, const { crate::web::atomo::fixo("get").0 })?;
                     let k = if c & SIMBOLO != 0 { Valor::Simbolo(c) } else { Valor::texto(nome_da_chave(c)) };
                     if self.eh_chamavel(&get) {
                         return self.chamar(&get, &manip, &[alvo, k, this.clone()]);
@@ -691,7 +693,7 @@ impl Vm {
         };
         let r = *r;
         // arrays
-        let eh_length = c == chave(CH_LENGTH);
+        let eh_length = c == K_LENGTH;
         let idx = Self::indice_de_chave(c);
         if let Classe::Array(arr) = &mut self.heap.get_mut(r).classe {
             if let Some(i) = idx {
@@ -729,7 +731,7 @@ impl Vm {
             }
             Classe::Proxy(alvo, manip) => {
                 let (alvo, manip) = (alvo.clone(), manip.clone());
-                let set = self.pegar(&manip, chave("set"))?;
+                let set = self.pegar(&manip, const { crate::web::atomo::fixo("set").0 })?;
                 if self.eh_chamavel(&set) {
                     let k = if c & SIMBOLO != 0 { Valor::Simbolo(c) } else { Valor::texto(nome_da_chave(c)) };
                     self.chamar(&set, &manip, &[alvo, k, v, Valor::Obj(r)])?;
@@ -857,7 +859,7 @@ impl Vm {
                         if i < a.len() {
                             return true;
                         }
-                    } else if c == chave(CH_LENGTH) {
+                    } else if c == K_LENGTH {
                         return true;
                     }
                 }
@@ -894,7 +896,7 @@ impl Vm {
             _ => f.clone(),
         };
         let Valor::Obj(mut o) = v.clone() else { return Ok(false) };
-        let proto = self.pegar(&f, chave("prototype"))?;
+        let proto = self.pegar(&f, const { crate::web::atomo::fixo("prototype").0 })?;
         let Valor::Obj(p) = proto else { return Ok(false) };
         loop {
             match self.heap.get(o).proto {
@@ -966,7 +968,7 @@ impl Vm {
         };
         if q.proto.geradora {
             let q = self.quadros.pop().unwrap_or_else(|| unreachable!());
-            let pg = match self.pegar(&q.funcao, chave("prototype"))? {
+            let pg = match self.pegar(&q.funcao, const { crate::web::atomo::fixo("prototype").0 })? {
                 Valor::Obj(p) => p,
                 _ => self.p.gerador,
             };
@@ -1051,9 +1053,9 @@ impl Vm {
                     _ => "objeto",
                 };
                 // nome do construtor, se houver
-                let ctor = self.pegar(v, chave("constructor")).unwrap_or_default();
+                let ctor = self.pegar(v, const { crate::web::atomo::fixo("constructor").0 }).unwrap_or_default();
                 let nome = match &ctor {
-                    Valor::Obj(_) => self.pegar(&ctor, chave("name")).ok().and_then(|n| if let Valor::Texto(t) = n { Some(t) } else { None }),
+                    Valor::Obj(_) => self.pegar(&ctor, const { crate::web::atomo::fixo("name").0 }).ok().and_then(|n| if let Valor::Texto(t) = n { Some(t) } else { None }),
                     _ => None,
                 };
                 match nome {
@@ -1090,7 +1092,7 @@ impl Vm {
                 let (id, dado) = (*id, dado.clone());
                 let fun = self.nativas[id as usize];
                 // this: objeto com o prototype do alvo
-                let pr = self.pegar(novo_alvo, chave("prototype"))?;
+                let pr = self.pegar(novo_alvo, const { crate::web::atomo::fixo("prototype").0 })?;
                 let po = self.p.objeto;
                 let proto = pr.obj().unwrap_or(po);
                 let this = Valor::Obj(self.alocar(Some(proto), Classe::Comum));
@@ -1116,7 +1118,7 @@ impl Vm {
                 let this = if derivado {
                     Valor::Indef
                 } else {
-                    let pr = self.pegar(novo_alvo, chave("prototype"))?;
+                    let pr = self.pegar(novo_alvo, const { crate::web::atomo::fixo("prototype").0 })?;
                     let po = self.p.objeto;
                     let proto = pr.obj().unwrap_or(po);
                     let t = Valor::Obj(self.alocar(Some(proto), Classe::Comum));
@@ -1172,7 +1174,7 @@ impl Vm {
             if let Classe::Promessa(_) = self.heap.get(*r).classe {
                 // atalho para promessas nossas
             }
-            let then = match self.pegar(&v, chave("then")) {
+            let then = match self.pegar(&v, const { crate::web::atomo::fixo("then").0 }) {
                 Ok(t) => t,
                 Err(e) => {
                     self.assentar(p, e, true);
@@ -1451,16 +1453,16 @@ impl Vm {
                 return Ok(res);
             }
         }
-        let next = self.pegar(it, chave("next"))?;
+        let next = self.pegar(it, const { crate::web::atomo::fixo("next").0 })?;
         let res = self.chamar(&next, it, &[])?;
         if !matches!(res, Valor::Obj(_)) {
             return self.erro_tipo("resultado de iterador não é objeto");
         }
-        let feito = self.pegar(&res, chave("done"))?;
+        let feito = self.pegar(&res, const { crate::web::atomo::fixo("done").0 })?;
         if feito.verdadeiro() {
             return Ok(None);
         }
-        Ok(Some(self.pegar(&res, chave("value"))?))
+        Ok(Some(self.pegar(&res, const { crate::web::atomo::fixo("value").0 })?))
     }
 
     pub fn para_vec(&mut self, v: &Valor) -> R<Vec<Valor>> {
@@ -1483,8 +1485,8 @@ impl Vm {
     pub fn resultado_iter(&mut self, v: Valor, feito: bool) -> Valor {
         let o = self.novo_objeto();
         if let Valor::Obj(r) = o {
-            self.heap.get_mut(r).definir(chave("value"), Slot::valor(v));
-            self.heap.get_mut(r).definir(chave("done"), Slot::valor(Valor::Bool(feito)));
+            self.heap.get_mut(r).definir(const { crate::web::atomo::fixo("value").0 }, Slot::valor(v));
+            self.heap.get_mut(r).definir(const { crate::web::atomo::fixo("done").0 }, Slot::valor(Valor::Bool(feito)));
         }
         o
     }
@@ -2223,7 +2225,7 @@ impl Vm {
                                 if !self.eh_chamavel(p) {
                                     lancar!(self.erro_tipo::<()>("extends precisa de uma classe").unwrap_err());
                                 }
-                                match t!(self.pegar(p, chave("prototype"))) {
+                                match t!(self.pegar(p, const { crate::web::atomo::fixo("prototype").0 })) {
                                     Valor::Obj(x) => Some(x),
                                     _ => None,
                                 }
@@ -2231,9 +2233,9 @@ impl Vm {
                             None => Some(po),
                         };
                         let pr = self.alocar(proto_pai, Classe::Comum);
-                        self.heap.get_mut(pr).definir(chave("constructor"), Slot::oculto(f.clone()));
+                        self.heap.get_mut(pr).definir(const { crate::web::atomo::fixo("constructor").0 }, Slot::oculto(f.clone()));
                         self.heap.get_mut(fr).definir(
-                            chave("prototype"),
+                            const { crate::web::atomo::fixo("prototype").0 },
                             Slot { v: Valor::Obj(pr), acessor: None, enumeravel: false, gravavel: false, configuravel: false },
                         );
                         if let Some(Valor::Obj(p)) = &pai {
@@ -2498,9 +2500,9 @@ impl Vm {
                                 Classe::Funcao { proto, .. } => proto.nome.is_empty(),
                                 _ => false,
                             };
-                            if sem_nome && self.heap.get(r).achar(chave("name")).is_none() {
+                            if sem_nome && self.heap.get(r).achar(const { crate::web::atomo::fixo("name").0 }).is_none() {
                                 let s = Slot { v: Valor::texto(nome_da_chave(*c)), acessor: None, enumeravel: false, gravavel: false, configuravel: true };
-                                self.heap.get_mut(r).definir(chave("name"), s);
+                                self.heap.get_mut(r).definir(const { crate::web::atomo::fixo("name").0 }, s);
                             }
                         }
                     }

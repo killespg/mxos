@@ -345,8 +345,8 @@ fn propriedade(d: &mut Dom, vm: &mut Vm, no: Id, nome: &str) -> Option<R<Valor>>
                 .map(|(n, val)| {
                     let o = vm.novo_objeto();
                     if let Valor::Obj(r) = o {
-                        vm.definir_propria(r, chave("name"), Valor::texto(&n));
-                        vm.definir_propria(r, chave("value"), Valor::texto(&val));
+                        vm.definir_propria(r, const { crate::web::atomo::fixo("name").0 }, Valor::texto(&n));
+                        vm.definir_propria(r, const { crate::web::atomo::fixo("value").0 }, Valor::texto(&val));
                     }
                     o
                 })
@@ -1294,7 +1294,7 @@ fn remove_listener(vm: &mut Vm, c: &Ctx) -> R<Valor> {
 fn dispatch(vm: &mut Vm, c: &Ctx) -> R<Valor> {
     let alvo = if c.this.eh_nulo_ou_indef() || matches!(c.this, Valor::Obj(r) if *r == vm.global) { JANELA } else { this_no(vm, c)? };
     let ev = c.arg(0);
-    let tipo = vm.pegar(&ev, chave("type"))?;
+    let tipo = vm.pegar(&ev, const { crate::web::atomo::fixo("type").0 })?;
     let tipo = vm.para_texto(&tipo)?;
     Ok(Valor::Bool(disparar_evento(vm, alvo, &tipo, ev)))
 }
@@ -1836,7 +1836,7 @@ pub fn instalar(vm: &mut Vm, doc: Rc<RefCell<Documento>>, url: &str, largura: f3
             vm.metodo(r, "clear", storage_clear, 0);
             vm.metodo(r, "key", storage_key, 1);
             let len = vm.nativa("length", storage_len, 0);
-            vm.definir_acessor(r, chave("length"), len, 0, false);
+            vm.definir_acessor(r, const { crate::web::atomo::fixo("length").0 }, len, 0, false);
         }
         vm.definir(g, nome, s);
     }
