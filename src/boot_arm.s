@@ -24,13 +24,15 @@ _start:
     .word   __bss_start - _start        @ 0x2C: fim (tamanho do arquivo)
 
 @ Sinal de vida antes do Rust: uma faixa branca no logo que o U-Boot da
-@ RK322x deixa na tela (uboot_logo=0x02000000@0x9dc00000 na linha de
-@ comando dele). Faixa n = 32 KB a partir de 0x9dc00000 + n * 128 KB.
+@ RK322x deixa na tela. O endereco vem do VOP (WIN0_YRGB_MST, 0x20050040):
+@ e o que esta de fato no HDMI. Faixa n = 64 KB a partir de base + n * 256 KB.
 @ Caches e MMU desligados: a escrita vai direto para a memoria do VOP.
 .macro faixa n
-    ldr     r0, =(0x9dc00000 + \n * 0x20000)
+    ldr     r0, =0x20050040
+    ldr     r0, [r0]
+    add     r0, r0, #(\n * 0x40000)
     mvn     r1, #0
-    mov     r2, #0x8000
+    mov     r2, #0x10000
 91: str     r1, [r0], #4
     subs    r2, r2, #4
     bgt     91b
@@ -71,13 +73,22 @@ em_svc:
     beq     no_lugar
     ldr     r2, =__bss_start
     sub     r2, r2, r1                  @ bytes do arquivo
-    add     r0, r0, r2
-    add     r3, r1, r2
-1:  ldr     r12, [r0, #-4]!             @ de tras para frente: os dois
-    str     r12, [r3, #-4]!             @ lugares podem se sobrepor
+    @ os dois lugares podem se sobrepor: destino acima da origem copia de
+    @ tras para frente; abaixo, da frente para tras (como o memmove)
+    cmp     r1, r0
+    bhi     3f
+1:  ldr     r12, [r0], #4
+    str     r12, [r1], #4
     subs    r2, r2, #4
     bgt     1b
-    mov     r12, #0
+    b       4f
+3:  add     r0, r0, r2
+    add     r3, r1, r2
+5:  ldr     r12, [r0, #-4]!
+    str     r12, [r3, #-4]!
+    subs    r2, r2, #4
+    bgt     5b
+4:  mov     r12, #0
     mcr     p15, 0, r12, c7, c5, 0      @ ICIALLU
     dsb
     isb

@@ -105,7 +105,7 @@ def recovery(original, kernel, saida):
 
 # Enderecos do U-Boot legado da Rockchip (RAM em 0x60000000): o kernel e
 # carregado longe do endereco em que o MXOS se copia (0x60200000).
-KERNEL_END = 0x62008000
+KERNEL_END = 0x62000000
 RAMDISK_END = 0x64000000
 TAGS_END = 0x60088000
 PAGINA = 2048
