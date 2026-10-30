@@ -147,7 +147,8 @@ mod hw {
     /// Troca segura do APLL: cristal, novos divisores, trava, normal.
     pub fn trocar_pll_cpu(mhz: u32) {
         let fb = mhz / 24;
-        crate::cpu::desligar_interrupcoes();
+        // guarda e volta o estado: o throttling chama de dentro da IRQ do timer
+        let estado = crate::cpu::guardar_e_desligar_irq();
         escrever(MODO, campo(0, 1, 0));
         escrever(APLL, campo(1, 7, 12) | campo(fb, 0xFFF, 0));
         escrever(APLL + 4, campo(1, 1, 12) | campo(1, 7, 6) | campo(1, 0x3F, 0));
@@ -158,7 +159,7 @@ mod hw {
             core::hint::spin_loop();
         }
         escrever(MODO, campo(1, 1, 0));
-        crate::cpu::ligar_interrupcoes();
+        crate::cpu::restaurar_irq(estado);
     }
 
     /// O carregador deixou o PWM como o do fabricante (ligado, continuo,
@@ -391,7 +392,8 @@ pub fn definir_limite(graus: i32) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Uma vez por segundo, do laco principal: passou do limite desce para o
+/// Uma vez por segundo, da interrupcao do timer (anda mesmo com o laco
+/// principal preso numa pagina pesada): passou do limite desce para o
 /// Stock; esfriou 10 graus volta ao escolhido.
 pub fn vigiar() {
     if !SENSOR.load(Ordering::Relaxed) {

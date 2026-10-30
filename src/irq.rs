@@ -83,6 +83,9 @@ fn atender(id: u32) {
         IRQ_TIMER => {
             somar(&TIMER, 1);
             timer::tique();
+            // TV box: temperatura e travamento, mesmo com o laco principal preso
+            crate::frequencia::vigiar();
+            crate::console_boot::vigiar_travamento();
         }
         IRQ_SERIAL => {
             somar(&SERIAL, 1);

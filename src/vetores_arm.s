@@ -27,6 +27,8 @@ vetores:
 irq_entrada:
     sub     lr, lr, #4
     push    {r0-r3, r12, lr}
+    ldr     r0, =ULTIMO_PC_IRQ          @ onde a CPU estava (detector de travamento)
+    str     lr, [r0]
     vpush   {d0-d7}
     vmrs    r0, fpscr
     push    {r0, r1}                    @ r1 so mantem a pilha em 8 bytes

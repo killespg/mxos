@@ -149,7 +149,6 @@ impl Shell {
         self.banner();
         loop {
             self.atender_processos();
-            crate::frequencia::vigiar();
             crate::console_boot::alimentar();
             if processos::tem_prontos() {
                 // com processo para rodar a CPU nao dorme: so olha a serial

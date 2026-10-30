@@ -10,7 +10,7 @@
 //! Fora da TV box tudo aqui e vazio.
 
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::fonte::{MONO, MONO_ALTURA, MONO_BASE, MONO_LARGURA};
 
@@ -111,9 +111,35 @@ pub fn reiniciar_depois_de_erro() {
     }
 }
 
+/// Onde a CPU estava quando a ultima IRQ chegou (vetores_arm.s grava).
+#[unsafe(no_mangle)]
+pub static ULTIMO_PC_IRQ: AtomicU32 = AtomicU32::new(0);
+/// Tique da ultima vez que o laco principal (ou uma linha do boot) deu sinal.
+static ULTIMO_SINAL: AtomicU64 = AtomicU64::new(0);
+/// Sem sinal por tanto tempo e travamento: grava onde estava e reinicia.
+const TRAVADO_S: u64 = 60;
+
+/// Da IRQ do timer: o laco principal parou de dar sinal por 60 s? Entao
+/// grava no rastro 0xB0B0_0000 e o endereco da instrucao em que a CPU
+/// estava (OS_REG2) e reinicia; o Android le depois. So na TV box.
+pub fn vigiar_travamento() {
+    if !cfg!(feature = "rk322x") {
+        return;
+    }
+    let ultimo = ULTIMO_SINAL.load(Ordering::Relaxed);
+    if ultimo != 0 && crate::timer::tiques() > ultimo + TRAVADO_S * crate::timer::HZ {
+        rastro(0xB0B0_0000, ULTIMO_PC_IRQ.load(Ordering::Relaxed));
+        #[cfg(feature = "rk322x")]
+        unsafe {
+            core::ptr::write_volatile(0x110E_01F0 as *mut u32, 0xFDB9);
+        }
+    }
+}
+
 /// Alimenta o watchdog que o boot_arm.s ligou (~28 s): cada linha do boot e
 /// cada volta do laco principal. Travou, a placa reinicia sozinha.
 pub fn alimentar() {
+    ULTIMO_SINAL.store(crate::timer::tiques().max(1), Ordering::Relaxed);
     #[cfg(feature = "rk322x")]
     unsafe {
         core::ptr::write_volatile(0x110A_000C as *mut u32, 0x76);
