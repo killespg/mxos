@@ -134,6 +134,18 @@ pub fn vigiar_travamento() {
     }
     let ultimo = ULTIMO_SINAL.load(Ordering::Relaxed);
     let agora = crate::timer::tiques_32();
+    // so nas builds de teste (MXOS_VOLTA_ANDROID_S=segundos): volta sozinho
+    // ao Android depois desse tempo, para a box nunca ficar presa no MXOS
+    // sem ninguem para tirar da tomada
+    if let Some(s) = option_env!("MXOS_VOLTA_ANDROID_S").and_then(|s| s.parse::<u64>().ok()) {
+        if agora as u64 > s * crate::timer::HZ {
+            #[cfg(feature = "rk322x")]
+            unsafe {
+                core::ptr::write_volatile(0x1100_05C8 as *mut u32, 0x5242_C300);
+                core::ptr::write_volatile(0x110E_01F0 as *mut u32, 0xFDB9);
+            }
+        }
+    }
     if ultimo != 0 && agora.wrapping_sub(ultimo) as u64 > TRAVADO_S * crate::timer::HZ {
         rastro(0xB0B0_0000, ULTIMO_PC_IRQ.load(Ordering::Relaxed));
         // OS_REG5/6: o laco JS (posicao no fonte, FNV do nome da funcao);
