@@ -17,6 +17,10 @@ pub struct Video {
     pub nome: &'static str,
 }
 
+/// TV box: desenhar na resolucao da saida em vez da do U-Boot (config `video`).
+#[cfg_attr(not(feature = "rk322x"), allow(dead_code))]
+static RESOLUCAO_NATIVA: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 pub struct Terminal {
     pub serial: Uart,
     tela: Option<Console>,
@@ -96,6 +100,15 @@ impl Terminal {
     }
 
     /// Liga o video. Se nao der, o terminal segue so na serial.
+    /// TV box: liga o video de novo na resolucao da saida (1920x1080), sem
+    /// ampliacao. Chamado depois do disco, quando a config ja foi lida.
+    #[cfg(feature = "rk322x")]
+    pub fn video_nativo(&mut self) -> Result<Video, &'static str> {
+        RESOLUCAO_NATIVA.store(true, core::sync::atomic::Ordering::Relaxed);
+        self.video = None;
+        self.ligar_video()
+    }
+
     pub fn ligar_video(&mut self) -> Result<Video, &'static str> {
         if self.video.is_none() {
             match video_qemu::ligar() {
@@ -188,7 +201,7 @@ mod video_qemu {
     use crate::video::tela::{self, Console, Escala};
 
     pub fn ligar() -> Result<(Video, tela::Tela, Console), &'static str> {
-        let (tela, base) = rk322x::tomar_posse()?;
+        let (tela, base) = rk322x::tomar_posse(super::RESOLUCAO_NATIVA.load(core::sync::atomic::Ordering::Relaxed))?;
         let (largura, altura) = (tela.largura(), tela.altura());
         let console = Console::new(tela, Escala::CONSOLE, tela::BRANCO, tela::PRETO);
         Ok((Video { largura, altura, base, nome: "VOP da Rockchip (HDMI), XRGB8888" }, tela, console))

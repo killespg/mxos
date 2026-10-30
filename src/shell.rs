@@ -354,6 +354,7 @@ impl Shell {
             "uptime" => self.uptime(),
             "config" => self.config(argumentos),
             "cpu" => self.frequencia(argumentos),
+            "papel" => self.papel(argumentos.trim()),
             #[cfg(any(feature = "mxq", feature = "rk322x"))]
             "usb" => {
                 let linhas = crate::usb::relatorio();
@@ -610,6 +611,25 @@ impl Shell {
                 Ok(()) => diga!(self, "gravado em /config/mxos.cfg"),
                 Err(e) => diga!(self, "config: não gravou ({e})"),
             }
+        }
+    }
+
+    /// papel ARQUIVO -> imagem de fundo (JPEG, PNG, GIF, BMP) e grava
+    /// papel nenhum  -> volta ao papel desenhado
+    fn papel(&mut self, caminho: &str) {
+        if caminho.is_empty() {
+            diga!(self, "uso: papel <arquivo de imagem> | papel nenhum   (ou abra a imagem e aperte P)");
+            return;
+        }
+        let nenhum = caminho == "nenhum";
+        match crate::gui::area::definir_imagem_papel((!nenhum).then_some(caminho)) {
+            Ok(()) => {
+                let mut cfg = crate::config::Config::carregar();
+                cfg.definir("papel_imagem", if nenhum { "" } else { caminho });
+                let _ = cfg.salvar();
+                diga!(self, "papel de parede {}", if nenhum { "desenhado de volta" } else { "trocado" });
+            }
+            Err(e) => diga!(self, "papel: {e}"),
         }
     }
 

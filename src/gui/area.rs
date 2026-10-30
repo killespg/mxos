@@ -157,6 +157,71 @@ pub fn civil(dias: i64) -> (i64, u32, u32) {
 
 // --------------------------------------------------------- papel de parede
 
+/// Imagem do papel de parede ja no tamanho da tela (preenche e corta o que
+/// sobra no centro): o fundo so copia pixels. So o laco principal mexe.
+struct ImagemPapel(core::cell::UnsafeCell<Option<(i32, i32, Vec<u32>)>>);
+
+unsafe impl Sync for ImagemPapel {}
+
+static IMAGEM_PAPEL: ImagemPapel = ImagemPapel(core::cell::UnsafeCell::new(None));
+
+/// Le, decodifica (JPEG, PNG, GIF, BMP) e ajusta `caminho` a tela.
+/// `None` tira a imagem e volta ao papel desenhado.
+pub fn definir_imagem_papel(caminho: Option<&str>) -> Result<(), &'static str> {
+    let Some(caminho) = caminho else {
+        unsafe { *IMAGEM_PAPEL.0.get() = None };
+        return Ok(());
+    };
+    let (l, a) = tema::tamanho_da_tela();
+    let dados = crate::armazenamento::ler(caminho).map_err(|e| e.descricao())?;
+    // decodifica ja perto do tamanho final (o JPEG reduz por 1/2 a 1/8)
+    let img = crate::web::imagem::decodificar_max(&dados, l * 2, a * 2).ok_or("formato de imagem não reconhecido")?;
+    drop(dados);
+    if img.largura <= 0 || img.altura <= 0 {
+        return Err("imagem vazia");
+    }
+    // preencher: a menor escala que cobre a tela; o excesso sai do centro
+    let (il, ia) = (img.largura as i64, img.altura as i64);
+    let (tl, ta) = (l as i64, a as i64);
+    let (num, den) = if il * ta > ia * tl { (ia, ta) } else { (il, tl) }; // fonte por pixel da tela
+    let (cx, cy) = ((il - tl * num / den) / 2, (ia - ta * num / den) / 2);
+    let mut px = Vec::with_capacity((l * a) as usize);
+    for y in 0..ta {
+        let sy = (cy + y * num / den).clamp(0, ia - 1);
+        for x in 0..tl {
+            let sx = (cx + x * num / den).clamp(0, il - 1);
+            px.push(img.px[(sy * il + sx) as usize] & 0x00FF_FFFF);
+        }
+    }
+    unsafe { *IMAGEM_PAPEL.0.get() = Some((l, a, px)) };
+    Ok(())
+}
+
+/// Copia as linhas da imagem do papel de parede; false = sem imagem.
+fn pintar_imagem(s: &mut Superficie, area: Retangulo, origem: (i32, i32), altura_area: i32) -> bool {
+    let Some((l, a, px)) = (unsafe { &*IMAGEM_PAPEL.0.get() }) else { return false };
+    let largura_s = s.largura() as i32;
+    let destino = s.pixels_mut();
+    for y in area.y..area.baixo() {
+        let y_tela = y + origem.1;
+        if y_tela >= altura_area || y_tela >= *a {
+            break;
+        }
+        if y_tela < 0 {
+            continue;
+        }
+        let x0 = (area.x + origem.0).max(0);
+        let x1 = (area.direita() + origem.0).min(*l);
+        if x1 <= x0 {
+            continue;
+        }
+        let linha = &px[(y_tela * l + x0) as usize..(y_tela * l + x1) as usize];
+        let d = (y * largura_s + x0 - origem.0) as usize;
+        destino[d..d + linha.len()].copy_from_slice(linha);
+    }
+    true
+}
+
 /// Papel de parede (da aparencia atual) dentro de `area`, so nas linhas
 /// acima de `altura_area` (o resto e da barra de tarefas). As cores vem da
 /// Aparencia, nao do tema `_t` (o parametro ficou da versao 0.6).
@@ -170,6 +235,9 @@ pub fn pintar_fundo(s: &mut Superficie, area: Retangulo, altura_area: i32, _t: &
 pub fn pintar_papel(s: &mut Superficie, area: Retangulo, origem: (i32, i32), altura_area: i32, ap: &Aparencia) {
     let area = area.intersecao(&s.area());
     if area.vazio() {
+        return;
+    }
+    if pintar_imagem(s, area, origem, altura_area) {
         return;
     }
     // degrade da propria cor: mais escura em cima, mais clara embaixo

@@ -18,7 +18,7 @@ use crate::cpu;
 use crate::entrada::Botao;
 use crate::entrada::teclado::{KEY_HOME, KEY_LEFT, KEY_RIGHT, KEY_SPACE};
 use crate::gui::grafico::{Retangulo, Superficie};
-use crate::gui::janelas::{App, EventoApp};
+use crate::gui::janelas::{App, EventoApp, Pedido};
 use crate::midia::{self, Audio, Fonte, Reamostrador};
 use crate::web::imagem::{self, Imagem};
 
@@ -129,6 +129,7 @@ pub struct Visualizador {
     /// Zoom da imagem em porcento (0 = ajustar a janela).
     zoom: u32,
     placa: bool,
+    pedidos: Vec<Pedido>,
 }
 
 pub fn abrir(caminho: &str) -> Box<dyn App> {
@@ -150,6 +151,7 @@ impl Visualizador {
             descricao: String::new(),
             zoom: 0,
             placa: false,
+            pedidos: Vec::new(),
         };
         v.carregar();
         v
@@ -353,7 +355,7 @@ impl App for Visualizador {
             }
         } else if let Conteudo::Imagem(_) = self.conteudo {
             let z = if self.zoom == 0 { String::from("ajustada") } else { format!("{}%", self.zoom) };
-            s.texto(12, b.y + 28, &format!("zoom {z}   (+ e - mudam, 0 ajusta)"), TEXTO, 1);
+            s.texto(12, b.y + 28, &format!("zoom {z}   (+ e - mudam, 0 ajusta, P = papel de parede)"), TEXTO, 1);
         }
     }
 
@@ -382,6 +384,22 @@ impl App for Visualizador {
                 }
                 true
             }
+            // P: esta imagem vira o papel de parede (e fica gravado na config)
+            EventoApp::Caractere('p' | 'P') if matches!(self.conteudo, Conteudo::Imagem(_)) => {
+                self.descricao = match crate::gui::area::definir_imagem_papel(Some(&self.caminho)) {
+                    Ok(()) => {
+                        let mut cfg = crate::config::Config::carregar();
+                        cfg.definir("papel_imagem", &self.caminho);
+                        self.pedidos.push(Pedido::TemaMudou);
+                        match cfg.salvar() {
+                            Ok(()) => String::from("Papel de parede trocado (gravado na config)."),
+                            Err(e) => format!("Papel de parede trocado, mas não gravou: {e}"),
+                        }
+                    }
+                    Err(e) => format!("Não deu para usar de papel de parede: {e}"),
+                };
+                true
+            }
             EventoApp::Caractere(c @ ('+' | '=' | '-' | '0')) if matches!(self.conteudo, Conteudo::Imagem(_)) => {
                 let atual = if self.zoom == 0 { 100 } else { self.zoom };
                 self.zoom = match c {
@@ -397,6 +415,10 @@ impl App for Visualizador {
             }
             _ => false,
         }
+    }
+
+    fn pedidos(&mut self) -> Vec<Pedido> {
+        core::mem::take(&mut self.pedidos)
     }
 
     fn fechar(&mut self) {

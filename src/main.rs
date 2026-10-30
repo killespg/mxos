@@ -148,6 +148,15 @@ mod qemu {
         }
         diga(&mut terminal, format_args!("disco   : procurando..."));
         iniciar_disco(&mut terminal);
+        // TV box: `config video 1080p` desenha direto em 1920x1080 (a config
+        // mora no disco, entao o video e religado agora, antes da area de trabalho)
+        #[cfg(feature = "rk322x")]
+        if crate::config::Config::carregar().obter("video").is_some_and(|v| v.trim() == "1080p") {
+            match terminal.video_nativo() {
+                Ok(v) => diga(&mut terminal, format_args!("vídeo   : {}x{} nativo", v.largura, v.altura)),
+                Err(motivo) => diga(&mut terminal, format_args!("vídeo   : 1080p não deu ({motivo})")),
+            }
+        }
         // a frequencia escolhida mora na config, que esta no disco
         if let Some(linha) = crate::frequencia::aplicar_config() {
             diga(&mut terminal, format_args!("cpu     : {linha}"));
