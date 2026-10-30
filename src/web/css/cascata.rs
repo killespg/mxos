@@ -373,7 +373,7 @@ pub fn calcular(doc: &Documento, ind: &Indice, m: &Midia, estado: Estado) -> Est
     // cache de estilos: mesmo estilo do pai (o mesmo Rc) + mesma tag + as
     // mesmas regras casadas + mesmas dicas/style = o mesmo estilo final.
     // (pense em mil <li> de uma lista: um estilo so)
-    let mut cache: BTreeMap<(usize, Atomo, Vec<u64>, alloc::string::String), [Option<Rc<Estilo>>; 4]> = BTreeMap::new();
+    let mut cache: BTreeMap<(usize, Atomo, Vec<u64>, u64), [Option<Rc<Estilo>>; 4]> = BTreeMap::new();
 
     // ancestrais do elemento atual no filtro de Bloom: (id, tracos)
     let mut bloom = Bloom::default();
@@ -463,12 +463,15 @@ pub fn calcular(doc: &Documento, ind: &Indice, m: &Midia, estado: Estado) -> Est
         let dicas_v = dicas(el);
         let inline_v = inline(el);
         let chave_cache = if pai_id != RAIZ {
-            let mut extra = alloc::string::String::new();
+            // as dicas e o style= entram por um hash (antes: um texto com
+            // format! de cada declaracao, montado para cada elemento)
+            let mut extra = HASH_INICIO;
             for d in dicas_v.iter().chain(inline_v.iter()) {
-                extra.push_str(&d.nome);
-                extra.push(':');
-                extra.push_str(&alloc::format!("{:?}", d.valor));
-                extra.push(if d.importante { '!' } else { ';' });
+                hash_bytes(&mut extra, d.nome.as_bytes());
+                for t in &d.valor {
+                    hash_token(&mut extra, t);
+                }
+                hash_bytes(&mut extra, if d.importante { b"!" } else { b";" });
             }
             let mut regras = casados_chave(&candidatos, &casados);
             regras.sort_unstable();
@@ -564,6 +567,58 @@ pub fn calcular(doc: &Documento, ind: &Indice, m: &Midia, estado: Estado) -> Est
         est.por_no[id as usize] = Some(rc);
     }
     est
+}
+
+const HASH_INICIO: u64 = 0xCBF2_9CE4_8422_2325;
+
+/// FNV-1a de 64 bits.
+fn hash_bytes(h: &mut u64, b: &[u8]) {
+    for &x in b {
+        *h = (*h ^ x as u64).wrapping_mul(0x0100_0000_01B3);
+    }
+}
+
+/// Um token no hash (o tipo, o texto e os numeros pelos bits).
+fn hash_token(h: &mut u64, t: &Token) {
+    let (tipo, texto, numero): (u8, &str, f32) = match t {
+        Token::Ident(s) => (1, s, 0.0),
+        Token::Funcao(s) => (2, s, 0.0),
+        Token::Arroba(s) => (3, s, 0.0),
+        Token::Hash(s, v) => (4, s, *v as u8 as f32),
+        Token::Texto(s) => (5, s, 0.0),
+        Token::Url(s) => (6, s, 0.0),
+        Token::Delim(c) => (7, "", *c as u32 as f32),
+        Token::Numero(n, i) => (8, "", if *i { -*n - 0.5 } else { *n }),
+        Token::Porcentagem(n) => (9, "", *n),
+        Token::Dimensao(n, s) => (10, s, *n),
+        // o resto: so o tipo (Debug do enum, sem campos)
+        outro => (11, "", discriminante(outro)),
+    };
+    hash_bytes(h, &[tipo]);
+    hash_bytes(h, texto.as_bytes());
+    hash_bytes(h, &numero.to_bits().to_le_bytes());
+}
+
+/// Um numero diferente para cada token sem campos.
+fn discriminante(t: &Token) -> f32 {
+    match t {
+        Token::TextoRuim => 1.0,
+        Token::UrlRuim => 2.0,
+        Token::Espaco => 3.0,
+        Token::Cdo => 4.0,
+        Token::Cdc => 5.0,
+        Token::DoisPontos => 6.0,
+        Token::PontoEVirgula => 7.0,
+        Token::Virgula => 8.0,
+        Token::AbreColchete => 9.0,
+        Token::FechaColchete => 10.0,
+        Token::AbreParen => 11.0,
+        Token::FechaParen => 12.0,
+        Token::AbreChave => 13.0,
+        Token::FechaChave => 14.0,
+        // os com campos ja foram tratados em hash_token
+        Token::Ident(_) | Token::Funcao(_) | Token::Arroba(_) | Token::Hash(..) | Token::Texto(_) | Token::Url(_) | Token::Delim(_) | Token::Numero(..) | Token::Porcentagem(_) | Token::Dimensao(..) => 0.0,
+    }
 }
 
 /// Identifica o conjunto de regras casadas (para o cache de irmaos).
