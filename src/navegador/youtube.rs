@@ -282,13 +282,18 @@ fn cabeca(titulo: &str, busca: &str) -> String {
 }
 
 fn cartao(i: &Item) -> String {
-    let dur = if i.duracao.is_empty() { String::new() } else { format!("<span class=\"dur\">{}</span>", escapar(&i.duracao)) };
+    let dur = String::new();
+    let detalhes = match (i.duracao.is_empty(), i.detalhes.is_empty()) {
+        (true, _) => i.detalhes.clone(),
+        (false, true) => i.duracao.clone(),
+        (false, false) => format!("{} • {}", i.duracao, i.detalhes),
+    };
     format!(
         "<a class=\"card\" href=\"https://www.youtube.com/watch?v={id}\"><div class=\"mini\"><img src=\"https://i.ytimg.com/vi/{id}/mqdefault.jpg\" alt=\"\">{dur}</div>\
 <div><div class=\"t\">{}</div><div class=\"c\">{}</div><div class=\"d\">{}</div></div></a>",
         escapar(&i.titulo),
         escapar(&i.canal),
-        escapar(&i.detalhes),
+        escapar(&detalhes),
         id = i.id
     )
 }
@@ -352,7 +357,7 @@ pub fn pagina(r: &Rota) -> String {
             let desc: String = desc.chars().take(1500).collect();
             let mut s = cabeca(&format!("{titulo} - YouTube"), "");
             s += &format!(
-                "<div class=\"assistir\"><div id=\"{ID_VIDEO}\"></div><div class=\"vt\">{}</div><div class=\"canal\">{}</div><div class=\"d\">{}</div><div class=\"desc\">{}</div>\
+                "<div class=\"assistir\"><div id=\"{ID_VIDEO}\"></div><div class=\"d\" style=\"margin-top:6px\">Espaço ou clique no vídeo: pausa • F11: tela cheia (Esc sai)</div><div class=\"vt\">{}</div><div class=\"canal\">{}</div><div class=\"d\">{}</div><div class=\"desc\">{}</div>\
 <div class=\"titulo-sec\" style=\"margin-left:0\">A seguir</div><div class=\"lista\">",
                 escapar(&titulo),
                 escapar(&canal),

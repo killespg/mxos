@@ -26,6 +26,7 @@ pub mod tema;
 pub mod transferencia;
 pub mod widgets;
 
+use core::sync::atomic::Ordering;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::Write;
@@ -119,7 +120,15 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
         gerenciador.quadro();
         atender_x11(&mut gerenciador, &mut janelas_x, (largura as i32, altura as i32));
         crate::audio::dsp::bombear();
-        gerenciador.compor(&framebuffer);
+        // tela cheia (video): quem pediu desenha direto no framebuffer
+        if TELA_CHEIA.load(Ordering::Relaxed) {
+            JA_ESTAVA_CHEIA.store(true, Ordering::Relaxed);
+        } else {
+            if JA_ESTAVA_CHEIA.swap(false, Ordering::Relaxed) {
+                gerenciador.redesenhar_tudo();
+            }
+            gerenciador.compor(&framebuffer);
+        }
         // o tique de 100 Hz acorda; teclado e mouse sao lidos na volta.
         // Com processo pronto a CPU nao dorme: ele usa o tempo ate o tique.
         if processo::tem_prontos() {
@@ -128,6 +137,15 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
             smp::ocioso();
         }
     }
+}
+
+/// Um app pegou a tela inteira (video em tela cheia): as janelas param de
+/// ser compostas ate ele soltar.
+static TELA_CHEIA: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static JA_ESTAVA_CHEIA: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn definir_tela_cheia(ligar: bool) {
+    TELA_CHEIA.store(ligar, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Linha de estado do boot (serial e console da tela) com o que veio das

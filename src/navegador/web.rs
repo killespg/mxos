@@ -319,6 +319,33 @@ pub fn tique_video(p: &mut PaginaWeb) -> bool {
     false
 }
 
+/// A pagina tem video tocando?
+pub fn tem_video(p: &PaginaWeb) -> bool {
+    #[cfg(feature = "rk322x")]
+    return p.video.is_some();
+    #[cfg(not(feature = "rk322x"))]
+    {
+        let _ = p;
+        false
+    }
+}
+
+/// O quadro do video na tela inteira (tela cheia), com `limpar` pintando
+/// as faixas de preto antes.
+pub fn desenhar_video_tela_cheia(p: &PaginaWeb, limpar: bool) {
+    #[cfg(feature = "rk322x")]
+    if let (Some(v), Some(t)) = (&p.video, crate::excecao::tela()) {
+        use crate::video::rga;
+        let destino = rga::Imagem::xrgb(t.base(), t.passo(), t.largura(), t.altura());
+        if limpar {
+            rga::preencher(&destino, 0, 0, t.largura(), t.altura(), 0);
+        }
+        let toda = Retangulo::novo(0, 0, t.largura() as i32, t.altura() as i32);
+        v.desenhar_em(&destino, toda, toda);
+    }
+    let _ = (p, limpar);
+}
+
 /// Pausa/continua o video da pagina. false = nao tem video.
 pub fn pausar_video(p: &mut PaginaWeb) -> bool {
     #[cfg(feature = "rk322x")]

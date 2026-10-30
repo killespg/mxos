@@ -188,6 +188,13 @@ impl Filme {
     /// Como `desenhar`, mas so a parte dentro de `visivel` (o resto da
     /// area esta fora da tela: a origem e cortada na mesma proporcao).
     pub fn desenhar_recortado(&self, s: &mut Superficie, area: Retangulo, visivel: Retangulo) {
+        let (sl, sa) = (s.largura(), s.altura());
+        let destino = rga::Imagem::xrgb(s.pixels_mut().as_mut_ptr() as usize, sl * 4, sl, sa);
+        self.desenhar_em(&destino, area, visivel);
+    }
+
+    /// O quadro atual numa imagem XRGB qualquer (a janela ou a tela toda).
+    pub fn desenhar_em(&self, destino: &rga::Imagem, area: Retangulo, visivel: Retangulo) {
         let Some((q, _)) = &self.atual else { return };
         let (ql, qa) = (q.largura.max(2) as i64, q.altura.max(2) as i64);
         let (al, aa) = (area.largura as i64, area.altura as i64);
@@ -198,7 +205,8 @@ impl Filme {
         let x = area.x as i64 + (al - l) / 2;
         let y = area.y as i64 + (aa - a) / 2;
         // a parte visivel do retangulo do video, e o pedaco da origem que cai nela
-        let v = Retangulo::novo(x as i32, y as i32, l as i32, a as i32).intersecao(&visivel).intersecao(&s.area());
+        let limite = Retangulo::novo(0, 0, destino.largura as i32, destino.altura as i32);
+        let v = Retangulo::novo(x as i32, y as i32, l as i32, a as i32).intersecao(&visivel).intersecao(&limite);
         if v.vazio() || v.largura < 2 || v.altura < 2 {
             return;
         }
@@ -208,11 +216,9 @@ impl Filme {
         let sl_ = ((v.largura as i64 * ql / l) as usize & !1).max(2);
         let sa_ = ((v.altura as i64 * qa / a) as usize & !1).max(2);
         let origem = rga::Imagem { endereco: q.y, passo: q.passo, largura: q.x + q.largura, altura: q.y0 + q.altura, formato: rga::Formato::Nv12 { uv: q.uv, bt709: q.bt709 } };
-        let (sl, sa) = (s.largura(), s.altura());
-        let destino = rga::Imagem::xrgb(s.pixels_mut().as_mut_ptr() as usize, sl * 4, sl, sa);
         let sl_ = sl_.min(q.x + q.largura - sx);
         let sa_ = sa_.min(q.y0 + q.altura - sy);
-        rga::copiar(&origem, (sx, sy, sl_, sa_), &destino, (v.x as usize, v.y as usize, v.largura as usize, v.altura as usize));
+        rga::copiar(&origem, (sx, sy, sl_, sa_), destino, (v.x as usize, v.y as usize, v.largura as usize, v.altura as usize));
     }
 }
 

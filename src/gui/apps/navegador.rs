@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 use crate::config::Config;
 use crate::entrada::Botao;
 use crate::entrada::teclado::{
-    KEY_DELETE, KEY_DOWN, KEY_END, KEY_HOME, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, KEY_UP,
+    KEY_DELETE, KEY_DOWN, KEY_END, KEY_ESC, KEY_F11, KEY_HOME, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, KEY_UP,
 };
 use crate::gui::area;
 use crate::gui::grafico::{self, Cor, Retangulo, Superficie};
@@ -215,6 +215,8 @@ pub struct Navegador {
     /// Tema e rolagem do ultimo desenho, para saber o que mudou.
     tema_desenhado: Option<Tema>,
     rolagem_desenhada: i32,
+    /// O video da pagina esta na tela inteira.
+    tela_cheia: bool,
 }
 
 /// pagina_inicial das configuracoes (ou a do disco), ja normalizada.
@@ -324,6 +326,7 @@ impl Navegador {
             sujo: SUJO_TUDO,
             tema_desenhado: None,
             rolagem_desenhada: 0,
+            tela_cheia: false,
         };
         navegador.pedir(url, Destino::Nova, 0);
         navegador
@@ -368,6 +371,8 @@ impl Navegador {
         }
         let maximo = (pagina.altura - AREA_PAGINA.altura).max(0);
         self.rolagem = carga.rolagem.clamp(0, maximo);
+        // pagina nova: a tela cheia do video velho acaba
+        self.tela_cheia(false);
         self.pagina = Some(pagina);
         self.arrasto = None;
         self.atualizar_link();
@@ -578,6 +583,15 @@ impl Navegador {
     }
 
     fn apertar(&mut self, x: i32, y: i32) {
+        if self.tela_cheia {
+            return self.tela_cheia(false);
+        }
+        // clique no video: pausa/continua
+        if let Some(p) = &mut self.pagina {
+            if web::retangulo_video(p, AREA_PAGINA, self.rolagem).is_some_and(|r| r.contem(x, y)) && web::pausar_video(p) {
+                return;
+            }
+        }
         if let Some(c) = COMANDOS.iter().copied().find(|c| c.retangulo().contem(x, y)) {
             if self.habilitado(c) {
                 self.apertado = Some(c);
@@ -631,9 +645,39 @@ impl Navegador {
         }
     }
 
+    /// Liga/desliga o video da pagina na tela inteira.
+    fn tela_cheia(&mut self, ligar: bool) {
+        let ligar = ligar && self.pagina.as_ref().is_some_and(web::tem_video);
+        if ligar == self.tela_cheia {
+            return;
+        }
+        self.tela_cheia = ligar;
+        crate::gui::definir_tela_cheia(ligar);
+        if ligar {
+            if let Some(p) = &self.pagina {
+                web::desenhar_video_tela_cheia(p, true);
+            }
+        } else {
+            self.sujo = SUJO_TUDO;
+        }
+    }
+
     /// Teclas de rolagem e atalhos (com o endereco sem foco).
     fn tecla(&mut self, codigo: u16) {
         let tela = AREA_PAGINA.altura - PASSO_SETA;
+        // video na pagina: espaco pausa, F11 tela cheia, Esc sai dela
+        let com_video = self.pagina.as_ref().is_some_and(web::tem_video);
+        match codigo {
+            KEY_SPACE if com_video => {
+                if let Some(p) = &mut self.pagina {
+                    web::pausar_video(p);
+                }
+                return;
+            }
+            KEY_F11 if com_video => return self.tela_cheia(!self.tela_cheia),
+            KEY_ESC if self.tela_cheia => return self.tela_cheia(false),
+            _ => {}
+        }
         match codigo {
             KEY_UP => self.rolar(-PASSO_SETA),
             KEY_DOWN => self.rolar(PASSO_SETA),
@@ -687,7 +731,11 @@ impl Navegador {
         {
             let mudou = web::tique(pagina);
             if web::tique_video(pagina) {
-                self.sujo |= SUJO_VIDEO;
+                if self.tela_cheia {
+                    web::desenhar_video_tela_cheia(pagina, false);
+                } else {
+                    self.sujo |= SUJO_VIDEO;
+                }
             }
             let navegar = web::navegacao(pagina);
             if mudou {
@@ -858,5 +906,9 @@ impl App for Navegador {
 
     fn pedidos(&mut self) -> Vec<Pedido> {
         core::mem::take(&mut self.pedidos)
+    }
+
+    fn fechar(&mut self) {
+        self.tela_cheia(false);
     }
 }
