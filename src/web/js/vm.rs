@@ -112,6 +112,20 @@ pub trait Anfitriao {
     fn como_any(&mut self) -> &mut dyn core::any::Any;
 }
 
+/// Prazo de relogio de um script com limite (ms).
+const PRAZO_MS: f64 = 10_000.0;
+
+/// Onde esta o laco JS que mais roda (posicao no fonte e FNV do nome da
+/// funcao): o detector de travamento grava nos registradores da TV box.
+pub static JS_POS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+pub static JS_NOME: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+use core::sync::atomic::Ordering;
+
+/// FNV-1a do nome (para achar a funcao depois, no PC).
+pub fn hash_nome(s: &str) -> u32 {
+    s.bytes().fold(0x811C_9DC5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193))
+}
+
 pub struct Vm {
     pub heap: Heap,
     pub global: Ref,
@@ -128,6 +142,10 @@ pub struct Vm {
     pub passos: u64,
     /// Limite de passos (protege a box de laco infinito): 0 = sem.
     pub limite_passos: u64,
+    /// Hora (ms, do RELOGIO) da primeira volta de laco deste script: com
+    /// limite ligado, PRAZO_MS de relogio no maximo (40 milhoes de voltas
+    /// num Cortex-A7 passam de um minuto e congelam a box).
+    inicio_laco_ms: f64,
     pub ids: Ids,
     /// Perfil das nativas (id -> chamadas, ms com o que rodou dentro);
     /// ligado so para medir (precisa do RELOGIO).
@@ -163,6 +181,7 @@ impl Vm {
             nativas_ativas: 0,
             passos: 0,
             limite_passos: 0,
+            inicio_laco_ms: 0.0,
             ids: Ids::default(),
             perfil: None,
             nomes_nativas: Vec::new(),
@@ -1573,6 +1592,30 @@ impl Vm {
     }
 
     /// Executa ate o quadro `base` terminar (retorno, yield ou await).
+    /// Uma volta de laco (salto para tras): conta passos, limita por passos
+    /// e por relogio, coleta lixo de vez em quando e deixa no JS_POS/JS_NOME
+    /// onde o laco esta (o detector de travamento da TV box grava).
+    fn volta_de_laco(&mut self, proto: &Prototipo, ip: usize) -> R<()> {
+        self.passos += 1;
+        if self.limite_passos > 0 {
+            if self.passos > self.limite_passos {
+                return self.erro_faixa("script demorou demais");
+            }
+            if self.passos & 0x3FFF == 1 {
+                let agora = super::embutidos::agora(self);
+                if self.passos == 1 {
+                    self.inicio_laco_ms = agora;
+                } else if agora > 0.0 && agora - self.inicio_laco_ms > PRAZO_MS {
+                    return self.erro_faixa("script demorou demais (prazo de relógio)");
+                }
+                JS_POS.store(proto.linhas.get(ip).copied().unwrap_or(0), Ordering::Relaxed);
+                JS_NOME.store(hash_nome(&proto.nome), Ordering::Relaxed);
+            }
+        }
+        self.talvez_coletar();
+        Ok(())
+    }
+
     pub fn executar(&mut self, base: usize) -> R<Saida> {
         'quadro: loop {
             macro_rules! lancar {
@@ -1893,27 +1936,31 @@ impl Vm {
                     Op::Salto(a) => {
                         let a = *a as usize;
                         if a <= ip {
-                            // laco: passos e coleta de lixo
-                            self.passos += 1;
-                            if self.limite_passos > 0 && self.passos > self.limite_passos {
-                                lancar!(self.erro_faixa::<()>("script demorou demais").unwrap_err());
-                            }
-                            self.talvez_coletar();
+                            t!(self.volta_de_laco(&proto, ip));
                         }
                         q!().ip = a;
                     }
                     Op::SeFalso(a) => {
                         if !pop!().verdadeiro() {
+                            if (*a as usize) <= ip {
+                                t!(self.volta_de_laco(&proto, ip));
+                            }
                             q!().ip = *a as usize;
                         }
                     }
                     Op::SeVerdade(a) => {
                         if pop!().verdadeiro() {
+                            if (*a as usize) <= ip {
+                                t!(self.volta_de_laco(&proto, ip));
+                            }
                             q!().ip = *a as usize;
                         }
                     }
                     Op::SeFalsoMantem(a) => {
                         if !q!().pilha.last().is_some_and(|v| v.verdadeiro()) {
+                            if (*a as usize) <= ip {
+                                t!(self.volta_de_laco(&proto, ip));
+                            }
                             q!().ip = *a as usize;
                         } else {
                             q!().pilha.pop();
@@ -1921,6 +1968,9 @@ impl Vm {
                     }
                     Op::SeVerdadeMantem(a) => {
                         if q!().pilha.last().is_some_and(|v| v.verdadeiro()) {
+                            if (*a as usize) <= ip {
+                                t!(self.volta_de_laco(&proto, ip));
+                            }
                             q!().ip = *a as usize;
                         } else {
                             q!().pilha.pop();
@@ -1928,6 +1978,9 @@ impl Vm {
                     }
                     Op::SeNaoNuloMantem(a) => {
                         if q!().pilha.last().is_some_and(|v| !v.eh_nulo_ou_indef()) {
+                            if (*a as usize) <= ip {
+                                t!(self.volta_de_laco(&proto, ip));
+                            }
                             q!().ip = *a as usize;
                         } else {
                             q!().pilha.pop();
@@ -1935,6 +1988,9 @@ impl Vm {
                     }
                     Op::SeDefinidoMantem(a) => {
                         if q!().pilha.last().is_some_and(|v| !matches!(v, Valor::Indef)) {
+                            if (*a as usize) <= ip {
+                                t!(self.volta_de_laco(&proto, ip));
+                            }
                             q!().ip = *a as usize;
                         } else {
                             q!().pilha.pop();
@@ -1944,6 +2000,9 @@ impl Vm {
                         if q!().pilha.last().is_some_and(|v| v.eh_nulo_ou_indef()) {
                             q!().pilha.pop();
                             push!(Valor::Indef);
+                            if (*a as usize) <= ip {
+                                t!(self.volta_de_laco(&proto, ip));
+                            }
                             q!().ip = *a as usize;
                         }
                     }
@@ -1952,6 +2011,9 @@ impl Vm {
                         if q!().pilha[n - 2].eh_nulo_ou_indef() {
                             q!().pilha.truncate(n - 2);
                             push!(Valor::Indef);
+                            if (*a as usize) <= ip {
+                                t!(self.volta_de_laco(&proto, ip));
+                            }
                             q!().ip = *a as usize;
                         }
                     }

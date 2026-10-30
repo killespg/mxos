@@ -136,10 +136,15 @@ pub fn vigiar_travamento() {
     let agora = crate::timer::tiques_32();
     if ultimo != 0 && agora.wrapping_sub(ultimo) as u64 > TRAVADO_S * crate::timer::HZ {
         rastro(0xB0B0_0000, ULTIMO_PC_IRQ.load(Ordering::Relaxed));
-        // tres chamadores pela cadeia de frame pointers, em OS_REG5..7
-        // (0x110005dc, 0x5e0, 0x5e4)
+        // OS_REG5/6: o laco JS (posicao no fonte, FNV do nome da funcao);
+        // OS_REG7: o chamador pela cadeia de frame pointers
+        #[cfg(feature = "rk322x")]
+        unsafe {
+            core::ptr::write_volatile(0x1100_05DC as *mut u32, crate::web::js::vm::JS_POS.load(Ordering::Relaxed));
+            core::ptr::write_volatile(0x1100_05E0 as *mut u32, crate::web::js::vm::JS_NOME.load(Ordering::Relaxed));
+        }
         let mut fp = ULTIMO_FP_IRQ.load(Ordering::Relaxed) as usize;
-        for reg in [0x1100_05DCusize, 0x1100_05E0, 0x1100_05E4] {
+        for reg in [0x1100_05E4usize] {
             let ok = fp % 4 == 0 && crate::plataforma::na_ram(fp, fp + 8);
             let (anterior, retorno) = if ok {
                 unsafe { (core::ptr::read_volatile(fp as *const u32), core::ptr::read_volatile((fp + 4) as *const u32)) }
