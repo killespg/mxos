@@ -6,8 +6,11 @@
 //! So core + alloc: o mesmo codigo roda nos testes do PC.
 
 pub mod avi;
+pub mod h264;
+pub mod h264_cabac;
 pub mod mp3;
 pub mod mp3_tabelas;
+pub mod mp4;
 pub mod tracker;
 pub mod wav;
 
