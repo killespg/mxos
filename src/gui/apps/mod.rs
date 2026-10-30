@@ -25,6 +25,7 @@ pub mod drivers;
 pub mod editor;
 #[cfg(feature = "rk322x")]
 pub mod filme;
+pub mod janela_app;
 pub mod janela_x;
 pub mod linux;
 pub mod multiterminal;

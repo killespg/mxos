@@ -30,10 +30,21 @@ pub const FIM_USUARIO: usize = 0x0800_0000;
 /// A pagina 0 nunca e mapeada: ponteiro nulo da erro.
 pub const INICIO_USUARIO: usize = PAGINA;
 /// Cada tabela L3 cobre 2 MB.
+#[cfg(target_arch = "aarch64")]
 const BLOCO: usize = 2 * 1024 * 1024;
 
+#[cfg(target_arch = "aarch64")]
 #[repr(C, align(4096))]
 struct Tabela([u64; mmu::ENTRADAS_TABELA]);
+
+/// ARMv7: a tabela L1 (4096 entradas de 1 MB, alinhada em 16 KB) e as L2
+/// (256 paginas de 4 KB, alinhadas em 1 KB).
+#[cfg(target_arch = "arm")]
+#[repr(C, align(16384))]
+struct TabelaL1([u32; 4096]);
+#[cfg(target_arch = "arm")]
+#[repr(C, align(1024))]
+struct TabelaL2([u32; mmu::ENTRADAS_L2]);
 
 #[repr(C, align(4096))]
 pub struct Quadro(pub [u8; PAGINA]);
@@ -133,10 +144,18 @@ impl Permissao {
 }
 
 pub struct Espaco {
+    #[cfg(target_arch = "aarch64")]
     raiz: Box<Tabela>,
+    #[cfg(target_arch = "aarch64")]
     l2: Box<Tabela>,
     /// Tabelas L3 por indice na L2 (uma a cada 2 MB usados).
+    #[cfg(target_arch = "aarch64")]
     l3: BTreeMap<usize, Box<Tabela>>,
+    #[cfg(target_arch = "arm")]
+    l1: Box<TabelaL1>,
+    /// Tabelas L2 por indice na L1 (uma a cada 1 MB usado).
+    #[cfg(target_arch = "arm")]
+    l2: BTreeMap<usize, Box<TabelaL2>>,
     /// Paginas por numero (endereco / 4096).
     paginas: BTreeMap<usize, Pagina>,
     permissoes: BTreeMap<usize, Permissao>,
@@ -151,6 +170,7 @@ pub struct Espaco {
 pub struct Fora;
 
 impl Espaco {
+    #[cfg(target_arch = "aarch64")]
     pub fn novo(asid: u16) -> Espaco {
         let mut raiz = Box::new(Tabela(mmu::raiz_kernel()));
         let l2 = Box::new(Tabela(mmu::l2_kernel(0)));
@@ -158,14 +178,37 @@ impl Espaco {
         Espaco { raiz, l2, l3: BTreeMap::new(), paginas: BTreeMap::new(), permissoes: BTreeMap::new(), asid, brk_inicio: 0, brk: 0 }
     }
 
+    /// ARMv7: a L1 e copia da do kernel (o kernel continua mapeado, so
+    /// para PL1); a faixa dos programas ganha tabelas L2 conforme usa.
+    #[cfg(target_arch = "arm")]
+    pub fn novo(asid: u16) -> Espaco {
+        let mut l1: Box<TabelaL1> = unsafe { Box::new_zeroed().assume_init() };
+        l1.0 = mmu::tabela_kernel();
+        for e in &mut l1.0[INICIO_USUARIO >> 20..FIM_USUARIO.div_ceil(1 << 20)] {
+            *e = 0;
+        }
+        mmu::limpar_cache(&*l1 as *const TabelaL1 as usize, core::mem::size_of::<TabelaL1>());
+        Espaco { l1, l2: BTreeMap::new(), paginas: BTreeMap::new(), permissoes: BTreeMap::new(), asid, brk_inicio: 0, brk: 0 }
+    }
+
     /// Endereco da raiz (vai no TTBR0).
+    #[cfg(target_arch = "aarch64")]
     pub fn raiz(&self) -> u64 {
         &*self.raiz as *const Tabela as u64
     }
 
+    #[cfg(target_arch = "arm")]
+    pub fn raiz(&self) -> u64 {
+        &*self.l1 as *const TabelaL1 as u64
+    }
+
     /// Bytes de RAM que o programa usa (paginas e tabelas).
     pub fn bytes(&self) -> usize {
-        (self.paginas.len() + self.l3.len() + 2) * PAGINA
+        #[cfg(target_arch = "aarch64")]
+        let tabelas = (self.l3.len() + 2) * PAGINA;
+        #[cfg(target_arch = "arm")]
+        let tabelas = 16 * 1024 + self.l2.len() * 1024;
+        self.paginas.len() * PAGINA + tabelas
     }
 
     pub fn mapeada(&self, endereco: usize) -> bool {
@@ -186,7 +229,7 @@ impl Espaco {
         }
         let quadro: Box<Quadro> = unsafe { Box::new_zeroed().assume_init() };
         let pagina = Pagina { quadro: Rc::new(quadro), atributos: permissao.atributos(), compartilhada: false };
-        *self.entrada(endereco) = pagina.fisico() | pagina.atributos | mmu::DESCRITOR_PAGINA;
+        self.gravar_entrada(endereco, pagina.fisico() | pagina.atributos | mmu::DESCRITOR_PAGINA);
         self.paginas.insert(numero, pagina);
         self.permissoes.insert(numero, permissao);
         Ok(())
@@ -202,7 +245,7 @@ impl Espaco {
         for (k, quadro) in quadros.iter().enumerate() {
             let atual = endereco + k * PAGINA;
             let pagina = Pagina { quadro: quadro.clone(), atributos: permissao.atributos(), compartilhada: true };
-            *self.entrada(atual) = pagina.fisico() | pagina.atributos | mmu::DESCRITOR_PAGINA;
+            self.gravar_entrada(atual, pagina.fisico() | pagina.atributos | mmu::DESCRITOR_PAGINA);
             self.paginas.insert(atual / PAGINA, pagina);
             self.permissoes.insert(atual / PAGINA, permissao);
         }
@@ -226,7 +269,7 @@ impl Espaco {
                 mmu::sincronizar_codigo(quadro.0.as_ptr() as usize, PAGINA);
             }
             let pagina = Pagina { quadro: quadro.clone(), atributos: permissao.atributos_divididos(), compartilhada: false };
-            *self.entrada(atual) = pagina.fisico() | pagina.atributos | mmu::DESCRITOR_PAGINA;
+            self.gravar_entrada(atual, pagina.fisico() | pagina.atributos | mmu::DESCRITOR_PAGINA);
             self.paginas.insert(atual / PAGINA, pagina);
             self.permissoes.insert(atual / PAGINA, permissao);
         }
@@ -254,7 +297,7 @@ impl Espaco {
         let numero = endereco / PAGINA;
         if let Some(pagina) = self.paginas.remove(&numero) {
             self.permissoes.remove(&numero);
-            *self.entrada(endereco & !(PAGINA - 1)) = 0;
+            self.gravar_entrada(endereco & !(PAGINA - 1), 0);
             mmu::esquecer_asid(self.asid);
             // o quadro so volta ao heap depois que nenhum nucleo (outra
             // thread rodando) pode mais usar a traducao velha
@@ -274,7 +317,7 @@ impl Espaco {
         }
         pagina.atributos = atributos;
         let fisico = pagina.fisico();
-        *self.entrada(endereco & !(PAGINA - 1)) = fisico | atributos | mmu::DESCRITOR_PAGINA;
+        self.gravar_entrada(endereco & !(PAGINA - 1), fisico | atributos | mmu::DESCRITOR_PAGINA);
         mmu::esquecer_asid(self.asid);
     }
 
@@ -297,7 +340,7 @@ impl Espaco {
         if mudou || pagina.atributos != atributos {
             pagina.atributos = atributos;
             let valor = pagina.fisico() | atributos | mmu::DESCRITOR_PAGINA;
-            *self.entrada(numero * PAGINA) = valor;
+            self.gravar_entrada(numero * PAGINA, valor);
             mmu::esquecer_asid(self.asid);
         }
     }
@@ -317,12 +360,35 @@ impl Espaco {
     }
 
     /// A entrada L3 de `endereco` (cria a tabela L3 se precisar).
+    #[cfg(target_arch = "aarch64")]
     fn entrada(&mut self, endereco: usize) -> &mut u64 {
         let i2 = endereco / BLOCO;
         let l3 = self.l3.entry(i2).or_insert_with(|| Box::new(Tabela([0; mmu::ENTRADAS_TABELA])));
         let descritor = &**l3 as *const Tabela as u64 | mmu::DESCRITOR_TABELA;
         self.l2.0[i2] = descritor;
         &mut l3.0[endereco / PAGINA % mmu::ENTRADAS_TABELA]
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn gravar_entrada(&mut self, endereco: usize, valor: u64) {
+        *self.entrada(endereco) = valor;
+    }
+
+    /// ARMv7: grava a entrada L2 de `endereco` (cria a L2 e liga na L1 se
+    /// precisar). A MMU le as tabelas da RAM: o cache vai para la.
+    #[cfg(target_arch = "arm")]
+    fn gravar_entrada(&mut self, endereco: usize, valor: u64) {
+        let i1 = endereco >> 20;
+        let l2 = self.l2.entry(i1).or_insert_with(|| unsafe { Box::new_zeroed().assume_init() });
+        let base = &**l2 as *const TabelaL2 as usize;
+        let k = (endereco >> 12) & (mmu::ENTRADAS_L2 - 1);
+        l2.0[k] = valor as u32;
+        mmu::limpar_cache(&l2.0[k] as *const u32 as usize, 4);
+        let descritor = base as u32 | mmu::DESCRITOR_TABELA as u32;
+        if self.l1.0[i1] != descritor {
+            self.l1.0[i1] = descritor;
+            mmu::limpar_cache(&self.l1.0[i1] as *const u32 as usize, 4);
+        }
     }
 
     /// Le `destino.len()` bytes do programa a partir de `endereco`.
@@ -426,7 +492,7 @@ impl Espaco {
             if pagina.compartilhada {
                 // memoria compartilhada continua a mesma no filho
                 let copia = Pagina { quadro, atributos: pagina.atributos, compartilhada: true };
-                *novo.entrada(endereco) = copia.fisico() | copia.atributos | mmu::DESCRITOR_PAGINA;
+                novo.gravar_entrada(endereco, copia.fisico() | copia.atributos | mmu::DESCRITOR_PAGINA);
                 novo.paginas.insert(numero, copia);
                 novo.permissoes.insert(numero, permissao);
                 continue;
@@ -435,11 +501,11 @@ impl Espaco {
             if pagina.atributos != atributos {
                 pagina.atributos = atributos;
                 let valor = pagina.fisico() | atributos | mmu::DESCRITOR_PAGINA;
-                *self.entrada(endereco) = valor;
+                self.gravar_entrada(endereco, valor);
                 pai_mudou = true;
             }
             let copia = Pagina { quadro, atributos, compartilhada: false };
-            *novo.entrada(endereco) = copia.fisico() | atributos | mmu::DESCRITOR_PAGINA;
+            novo.gravar_entrada(endereco, copia.fisico() | atributos | mmu::DESCRITOR_PAGINA);
             novo.paginas.insert(numero, copia);
             novo.permissoes.insert(numero, permissao);
         }

@@ -109,6 +109,10 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
         crate::nas::atender();
         crate::depuracao::atender();
         medir(FASE_REDE, &mut t);
+        // janelas que os apps nativos criaram (processo/abi.rs)
+        for app in apps::janela_app::para_abrir() {
+            gerenciador.abrir(app, -1, -1);
+        }
         for url in crate::depuracao::paginas_para_abrir() {
             // arquivo de midia do disco abre no visualizador; o resto, no navegador
             if !url.contains("://") && apps::visualizador::eh_midia(&url) {

@@ -180,20 +180,32 @@ type R = Result<i64, i64>;
 /// Atende a chamada do processo `i` (que acabou de fazer SVC). Devolve
 /// true se algo mudou que o terminal precisa ver.
 pub fn atender(t: &mut Tabela, i: usize) -> bool {
-    let c = &t.processos[i].contexto;
-    let numero = c.x[8];
-    let a = [c.x[0], c.x[1], c.x[2], c.x[3], c.x[4], c.x[5]];
+    // apps do MXOS: a ABI propria (abi.rs), igual nas duas arquiteturas
+    if t.processos[i].mxos {
+        return super::abi::atender(t, i);
+    }
+    // ARMv7: a ABI do Linux ainda nao existe aqui
+    #[cfg(target_arch = "arm")]
+    {
+        use core::fmt::Write;
+        let pid = t.processos[i].pid;
+        let _ = writeln!(super::Saida(t), "\n[processo {pid}: programa de Linux ainda não roda no ARM de 32 bits]");
+        t.terminar(i, 31);
+        return true;
+    }
+    #[allow(unreachable_code)]
+    let (numero, a) = t.processos[i].contexto.chamada();
     t.processos[i].linux.na_chamada = None;
     let fim = despachar(t, i, numero, a);
     let Some(p) = t.processos.get_mut(i) else { return true };
     match fim {
         Fim::Valor(v) => {
-            p.contexto.x[0] = v as u64;
+            p.contexto.definir_retorno(v as u64);
             matches!(numero, 64 | 66)
         }
         Fim::Esperar(motivo) => {
             // volta para o SVC: quando acordar, repete a chamada
-            p.contexto.pc -= 4;
+            p.contexto.repetir_chamada();
             p.linux.na_chamada = Some(numero);
             if p.estado == Estado::Pronto {
                 p.estado = Estado::Esperando(motivo);

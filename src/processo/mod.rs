@@ -23,6 +23,7 @@
 //! Os programas sao de Linux aarch64 (chamadas.rs, elf.rs): estaticos,
 //! lidos do disco FAT32 pelo comando "executar".
 
+pub mod abi;
 pub mod arquivos;
 pub mod cache;
 pub mod chamadas;
@@ -66,6 +67,7 @@ const AMBIENTE: [&str; 7] = ["PATH=/bin:/usr/bin:/", "HOME=/", "TERM=vt100", "US
 // ---------------------------------------------------------------------
 // Contexto (o mesmo layout que o vetores.s usa)
 
+#[cfg(target_arch = "aarch64")]
 #[repr(C, align(16))]
 pub struct Contexto {
     pub x: [u64; 31],
@@ -81,6 +83,7 @@ pub struct Contexto {
     pub q: [u128; 32],
 }
 
+#[cfg(target_arch = "aarch64")]
 #[repr(C)]
 struct ContextoKernel {
     x: [u64; 12],
@@ -89,15 +92,168 @@ struct ContextoKernel {
     fpcr: u64,
 }
 
+#[cfg(target_arch = "aarch64")]
 const _: () = assert!(core::mem::offset_of!(Contexto, sp) == 248);
+#[cfg(target_arch = "aarch64")]
 const _: () = assert!(core::mem::offset_of!(Contexto, kernel) == 296);
+#[cfg(target_arch = "aarch64")]
 const _: () = assert!(core::mem::offset_of!(Contexto, q) == 320);
+#[cfg(target_arch = "aarch64")]
 const _: () = assert!(core::mem::offset_of!(ContextoKernel, fpcr) == 168);
 
+#[cfg(target_arch = "aarch64")]
 unsafe extern "C" {
     fn entrar_usuario(contexto: *mut Contexto, kernel: *mut ContextoKernel) -> u64;
 }
 
+/// ARMv7: o programa em modo usuario. O vetores_arm.s depende deste layout:
+/// r0-r14 (0), pc (60), cpsr (64), TLS do TPIDRURO (68), &ContextoKernel
+/// (72), status (76) e endereco (80) da falha, FPSCR (84), d0-d31 (88).
+/// Enquanto o programa roda, a pilha do modo SVC aponta para dentro deste
+/// Contexto: qualquer excecao vinda dele grava os registradores aqui.
+///
+/// Os campos de 64 bits do fim sao os do AArch64: so a ABI Linux os usa
+/// (fork, sinais), e ela ainda nao roda no ARMv7 (os apps do MXOS usam a
+/// ABI propria, abi.rs). Estao aqui para o codigo comum compilar.
+#[cfg(target_arch = "arm")]
+#[repr(C, align(8))]
+pub struct Contexto {
+    pub r: [u32; 15],
+    pub pc_arm: u32,
+    pub cpsr: u32,
+    pub tls: u32,
+    kernel: u32,
+    pub fsr: u32,
+    pub endereco_falha: u32,
+    pub fpscr: u32,
+    pub d: [u64; 32],
+    /// Por que o programa voltou (o que o entrar_usuario devolveu).
+    pub motivo: u32,
+    pub x: [u64; 31],
+    pub sp: u64,
+    pub pc: u64,
+    pub spsr: u64,
+    pub tpidr: u64,
+    pub fpcr: u64,
+    pub fpsr: u64,
+    pub esr: u64,
+    pub far: u64,
+    pub q: [u128; 32],
+}
+
+/// ARMv7: o que o kernel precisa de volta depois do programa: r4-r11 (0),
+/// sp (32), lr (36), d8-d15 (40), FPSCR (104).
+#[cfg(target_arch = "arm")]
+#[repr(C, align(8))]
+struct ContextoKernel {
+    r: [u32; 8],
+    sp: u32,
+    lr: u32,
+    d: [u64; 8],
+    fpscr: u32,
+}
+
+#[cfg(target_arch = "arm")]
+const _: () = {
+    assert!(core::mem::offset_of!(Contexto, pc_arm) == 60);
+    assert!(core::mem::offset_of!(Contexto, tls) == 68);
+    assert!(core::mem::offset_of!(Contexto, kernel) == 72);
+    assert!(core::mem::offset_of!(Contexto, fsr) == 76);
+    assert!(core::mem::offset_of!(Contexto, fpscr) == 84);
+    assert!(core::mem::offset_of!(Contexto, d) == 88);
+    assert!(core::mem::offset_of!(ContextoKernel, sp) == 32);
+    assert!(core::mem::offset_of!(ContextoKernel, d) == 40);
+    assert!(core::mem::offset_of!(ContextoKernel, fpscr) == 104);
+};
+
+#[cfg(target_arch = "arm")]
+unsafe extern "C" {
+    fn entrar_usuario(contexto: *mut Contexto, kernel: *mut ContextoKernel) -> u32;
+}
+
+/// Motivos do vetores_arm.s.
+#[cfg(target_arch = "arm")]
+mod motivo_arm {
+    pub const CHAMADA: u32 = 0;
+    pub const IRQ: u32 = 1;
+    pub const DADOS: u32 = 2;
+    pub const BUSCA: u32 = 3;
+    pub const INSTRUCAO: u32 = 4;
+}
+
+#[cfg(target_arch = "arm")]
+impl Contexto {
+    /// Programa novo em modo usuario (CPSR 0x10: ARM, IRQ liberada).
+    pub fn novo(entrada: usize, sp: usize) -> Box<Contexto> {
+        let mut c: Box<Contexto> = unsafe { Box::new_zeroed().assume_init() };
+        c.pc_arm = entrada as u32;
+        c.r[13] = sp as u32;
+        c.cpsr = 0x10;
+        c
+    }
+
+    pub fn copia(&self) -> Box<Contexto> {
+        let mut c: Box<Contexto> = unsafe { Box::new_zeroed().assume_init() };
+        c.r = self.r;
+        c.pc_arm = self.pc_arm;
+        c.cpsr = self.cpsr;
+        c.tls = self.tls;
+        c.fpscr = self.fpscr;
+        c.d = self.d;
+        c
+    }
+
+    /// Numero da chamada (r7) e os 6 argumentos (r0-r5).
+    pub fn chamada(&self) -> (u64, [u64; 6]) {
+        let r = &self.r;
+        (r[7] as u64, [r[0] as u64, r[1] as u64, r[2] as u64, r[3] as u64, r[4] as u64, r[5] as u64])
+    }
+
+    pub fn definir_retorno(&mut self, v: u64) {
+        self.r[0] = v as u32;
+    }
+
+    /// Valor de 64 bits: a parte de cima vai em r1.
+    pub fn definir_retorno64(&mut self, v: u64) {
+        self.r[0] = v as u32;
+        self.r[1] = (v >> 32) as u32;
+    }
+
+    /// Repete a chamada quando o processo voltar (SVC de 4 bytes, ARM).
+    pub fn repetir_chamada(&mut self) {
+        self.pc_arm = self.pc_arm.wrapping_sub(4);
+    }
+
+    pub fn pc_atual(&self) -> u64 {
+        self.pc_arm as u64
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+impl Contexto {
+    pub fn chamada(&self) -> (u64, [u64; 6]) {
+        let x = &self.x;
+        (x[8], [x[0], x[1], x[2], x[3], x[4], x[5]])
+    }
+
+    pub fn definir_retorno(&mut self, v: u64) {
+        self.x[0] = v;
+    }
+
+    pub fn definir_retorno64(&mut self, v: u64) {
+        self.x[0] = v;
+    }
+
+    pub fn repetir_chamada(&mut self) {
+        self.pc -= 4;
+    }
+
+    pub fn pc_atual(&self) -> u64 {
+        self.pc
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
 impl Contexto {
     /// Programa novo: comeca em `entrada` com a pilha em `sp`, em EL0
     /// com as interrupcoes liberadas (SPSR = 0).
@@ -208,6 +364,10 @@ pub struct Processo {
     pub tempo_cpu: u64,
     /// Estado das chamadas de sistema do Linux (arquivos, brk...).
     pub linux: chamadas::Linux,
+    /// App do MXOS (pacote .mxa): fala a ABI propria (abi.rs), nao a do Linux.
+    pub mxos: bool,
+    /// Estado da ABI do MXOS (janelas, arquivos, conexoes).
+    pub app: abi::EstadoApp,
     /// Caminho do programa (o /proc/self/exe).
     pub exe: String,
     /// Argumentos separados por 0 (o /proc/PID/cmdline).
@@ -388,6 +548,23 @@ fn liberar_registradores_el0() {
 
 /// O mesmo em cada nucleo (os registradores sao de cada um; smp.rs).
 pub fn configurar_el0() {
+    // ARMv7: VFP/NEON liberados para o modo usuario (CPACR cp10/cp11 = 11)
+    // e o contador de tempo legivel por ele (CNTKCTL.PL0VCTEN/PL0PCTEN)
+    #[cfg(target_arch = "arm")]
+    unsafe {
+        core::arch::asm!(
+            "mrc p15, 0, {t}, c1, c0, 2",
+            "orr {t}, {t}, #(0xF << 20)",
+            "mcr p15, 0, {t}, c1, c0, 2",
+            "isb",
+            "mrc p15, 0, {t}, c14, c1, 0",
+            "orr {t}, {t}, #3",
+            "mcr p15, 0, {t}, c14, c1, 0",
+            "isb",
+            t = out(reg) _,
+            options(nostack),
+        );
+    }
     #[cfg(target_arch = "aarch64")]
     unsafe {
         core::arch::asm!(
@@ -445,6 +622,8 @@ impl Tabela {
             espaco: Dividido::novo(espaco),
             tempo_cpu: 0,
             linux,
+            mxos: false,
+            app: abi::EstadoApp::default(),
             exe: String::new(),
             cmdline: Vec::new(),
             inicio: cpu::contador(),
@@ -459,6 +638,10 @@ impl Tabela {
     /// pai, entrega os filhos ao kernel e devolve a memoria.
     pub fn terminar(&mut self, i: usize, status: i32) {
         let (pid, tgid) = (self.processos[i].pid, self.processos[i].tgid);
+        // as janelas de um app nativo fecham junto
+        if self.processos[i].mxos {
+            crate::gui::apps::janela_app::processo_saiu(pid);
+        }
         if pid != tgid {
             // uma thread morreu por sinal: o processo inteiro vai junto
             if let Some(lider) = self.indice(tgid) {
@@ -708,11 +891,23 @@ pub fn tem_prontos() -> bool {
 
 /// Roda o processo ate ele voltar para o kernel. Devolve o motivo.
 fn fatia(p: &mut Processo) -> u64 {
+    #[cfg(target_arch = "aarch64")]
     let mut kernel = ContextoKernel { x: [0; 12], sp: 0, d: [0; 8], fpcr: 0 };
+    #[cfg(target_arch = "arm")]
+    let mut kernel = ContextoKernel { r: [0; 8], sp: 0, lr: 0, d: [0; 8], fpscr: 0 };
     cpu::desligar_interrupcoes();
     mmu::usar_espaco(p.espaco.raiz(), p.espaco.asid);
     let antes = cpu::contador();
+    #[cfg(target_arch = "aarch64")]
     let motivo = unsafe { entrar_usuario(&mut *p.contexto, &mut kernel) };
+    // ARMv7: o motivo fino (chamada, falha de dados...) fica no Contexto;
+    // para o laco, IRQ ou "sincrona" como no AArch64
+    #[cfg(target_arch = "arm")]
+    let motivo = {
+        let m = unsafe { entrar_usuario(&mut *p.contexto, &mut kernel) };
+        p.contexto.motivo = m;
+        if m == motivo_arm::IRQ { IRQ } else { SINCRONA }
+    };
     p.tempo_cpu += cpu::contador().wrapping_sub(antes);
     // as tabelas do processo podem sumir: o kernel volta para as dele
     mmu::usar_espaco_do_kernel();
@@ -721,7 +916,40 @@ fn fatia(p: &mut Processo) -> u64 {
     motivo
 }
 
+/// ARMv7: chamada de sistema, falha de pagina (copy-on-write) ou erro.
+#[cfg(target_arch = "arm")]
+fn tratar_excecao(t: &mut Tabela, i: usize) -> bool {
+    let c = &t.processos[i].contexto;
+    let (motivo, fsr, falha) = (c.motivo, c.fsr, c.endereco_falha as usize);
+    // status da falha: FS[3:0] e FS[4] (bit 10); WnR = bit 11
+    let status = (fsr & 0xF) | (fsr >> 6 & 0x10);
+    let escrita = fsr & (1 << 11) != 0;
+    match motivo {
+        motivo_arm::CHAMADA => return chamadas::atender(t, i),
+        // permissao de pagina (0b01111) numa escrita: pode ser o copy-on-write
+        motivo_arm::DADOS if escrita && status == 0b01111 => {
+            if t.processos[i].espaco.resolver_cow(falha) {
+                return false;
+            }
+        }
+        _ => {}
+    }
+    let p = &t.processos[i];
+    let (pid, nome, pc) = (p.pid, p.nome.clone(), p.contexto.pc_arm);
+    let texto = match motivo {
+        motivo_arm::DADOS => format!("falha de segmentação ao {} 0x{falha:x} (status 0x{status:x})", if escrita { "escrever" } else { "ler" }),
+        motivo_arm::BUSCA => format!("tentou executar 0x{falha:x}, que não é código dele"),
+        motivo_arm::INSTRUCAO => String::from("instrução desconhecida"),
+        m => format!("exceção {m}"),
+    };
+    let _ = writeln!(Saida(t), "\n[processo {pid} ({nome}) morreu: {texto}, no PC 0x{pc:x}]");
+    let sinal = if matches!(motivo, motivo_arm::DADOS | motivo_arm::BUSCA) { 11 } else { 4 };
+    t.terminar(i, sinal);
+    true
+}
+
 /// Excecao sincrona do programa: chamada de sistema ou erro.
+#[cfg(target_arch = "aarch64")]
 fn tratar_excecao(t: &mut Tabela, i: usize) -> bool {
     let esr = t.processos[i].contexto.esr;
     let classe = esr >> 26 & 0x3F;
@@ -1077,7 +1305,7 @@ pub fn criar_teste(modo: &str, primeiro_plano: bool) -> Result<u32, &'static str
         espaco.escrever_forcado(BASE_TESTE, codigo).map_err(|_| "sem memória")?;
         espaco.mapear_faixa(TOPO_PILHA - TAMANHO_PILHA, TOPO_PILHA, Permissao::Dados).map_err(|_| "sem memória")?;
         let mut contexto = Contexto::novo(BASE_TESTE, TOPO_PILHA);
-        contexto.x[0] = numero as u64;
+        contexto.definir_retorno(numero as u64);
         let pid = t.acrescentar(0, format!("teste-{modo}"), contexto, espaco);
         if primeiro_plano {
             t.primeiro_plano = Some(pid);

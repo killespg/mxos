@@ -5,9 +5,10 @@
 //!   - perifericos: device
 //!   - o resto: sem mapeamento (ponteiro nulo da erro)
 //!
-//! Sem permissao por pagina no kernel e sem processos por enquanto: a parte
-//! "de processos" da API (USUARIO_*, raiz_kernel...) existe so para o resto
-//! do kernel compilar igual nas duas arquiteturas.
+//! O kernel so e acessivel em PL1 (AP=01): os processos (modo usuario) nao
+//! enxergam nada dele. Cada processo tem a propria tabela L1, copia da do
+//! kernel, com tabelas L2 (paginas de 4 KB) na faixa dos programas; as
+//! paginas dele sao nao-globais (nG) e levam o ASID do processo.
 
 #![allow(dead_code)]
 
@@ -28,22 +29,38 @@ pub const MAIR_NORMAL: u8 = 0xFF;
 const TIPO_SECAO: u32 = 0b10;
 const B: u32 = 1 << 2;
 const C: u32 = 1 << 3;
-const AP_TOTAL: u32 = 0b11 << 10;
+/// So PL1 (o kernel): o modo usuario nao le nem escreve.
+const AP_KERNEL: u32 = 0b01 << 10;
 const TEX1: u32 = 1 << 12;
 const COMPARTILHADA: u32 = 1 << 16;
 const XN: u32 = 1 << 4;
 /// RAM: TEX=001, C=1, B=1 (write-back, write-allocate), compartilhavel.
-const RAM: u32 = TIPO_SECAO | AP_TOTAL | TEX1 | C | B | COMPARTILHADA;
+const RAM: u32 = TIPO_SECAO | AP_KERNEL | TEX1 | C | B | COMPARTILHADA;
 /// Periferico: device compartilhado (TEX=000, C=0, B=1), sem executar.
-const DISPOSITIVO: u32 = TIPO_SECAO | AP_TOTAL | B | XN;
+const DISPOSITIVO: u32 = TIPO_SECAO | AP_KERNEL | B | XN;
 
-// valores da API do AArch64 (usados so pelos processos, que ainda nao rodam aqui)
-pub const USUARIO_CODIGO: u64 = 0;
-pub const USUARIO_DADOS: u64 = 0;
-pub const USUARIO_LEITURA: u64 = 0;
-pub const USUARIO_TUDO: u64 = 0;
-pub const DESCRITOR_TABELA: u64 = 0;
-pub const DESCRITOR_PAGINA: u64 = 0;
+// pagina pequena (4 KB) do short-descriptor, nas tabelas L2 dos processos
+const P_XN: u64 = 1;
+const P_B: u64 = 1 << 2;
+const P_C: u64 = 1 << 3;
+/// AP[1:0] = 11: le e escreve em PL0 e PL1 (com AP[2] = 1: so le).
+const P_AP: u64 = 0b11 << 4;
+const P_TEX1: u64 = 1 << 6;
+const P_SO_LE: u64 = 1 << 9;
+const P_S: u64 = 1 << 10;
+const P_NG: u64 = 1 << 11;
+/// RAM normal write-back compartilhavel, do processo (nao global).
+const P_NORMAL: u64 = P_TEX1 | P_C | P_B | P_S | P_NG;
+pub const USUARIO_TUDO: u64 = P_NORMAL | P_AP;
+pub const USUARIO_DADOS: u64 = P_NORMAL | P_AP | P_XN;
+pub const USUARIO_CODIGO: u64 = P_NORMAL | P_AP | P_SO_LE;
+pub const USUARIO_LEITURA: u64 = P_NORMAL | P_AP | P_SO_LE | P_XN;
+/// Entrada L1 que aponta uma tabela L2 (coarse).
+pub const DESCRITOR_TABELA: u64 = 0b01;
+/// Entrada L2 de pagina pequena.
+pub const DESCRITOR_PAGINA: u64 = 0b10;
+/// Entradas de uma tabela L2 (1 MB em paginas de 4 KB).
+pub const ENTRADAS_L2: usize = 256;
 
 #[repr(C, align(16384))]
 struct Tabela([u32; 4096]);
@@ -177,8 +194,13 @@ pub fn traduzir(virtual_: u64) -> Option<Traducao> {
 }
 
 // ------------------------------------------------------------ processos
-// (ainda nao rodam no ARMv7: so para compilar)
 
+/// A tabela L1 do kernel (cada processo comeca com uma copia dela).
+pub fn tabela_kernel() -> [u32; 4096] {
+    unsafe { (*TABELA.0.get()).0 }
+}
+
+// so para o codigo comum compilar (o AArch64 usa; aqui e a tabela_kernel)
 pub fn raiz_kernel() -> [u64; ENTRADAS_TABELA] {
     [0; ENTRADAS_TABELA]
 }
@@ -187,10 +209,35 @@ pub fn l2_kernel(_indice: usize) -> [u64; ENTRADAS_TABELA] {
     [0; ENTRADAS_TABELA]
 }
 
-pub fn usar_espaco(_raiz: u64, _asid: u16) {}
+/// Liga a tabela L1 `raiz` com o ASID `asid`. Na troca o ASID passa pelo
+/// 0 (reservado) para nenhuma traducao velha cair no ASID novo.
+pub fn usar_espaco(raiz: u64, asid: u16) {
+    unsafe {
+        asm!(
+            "mcr p15, 0, {zero}, c13, c0, 1",
+            "isb",
+            "mcr p15, 0, {ttbr}, c2, c0, 0",
+            "isb",
+            "mcr p15, 0, {asid}, c13, c0, 1",
+            "isb",
+            zero = in(reg) 0usize,
+            ttbr = in(reg) raiz as usize | 0x4A,
+            asid = in(reg) asid as usize,
+            options(nostack),
+        )
+    };
+}
 
-pub fn usar_espaco_do_kernel() {}
+/// Volta para a tabela do kernel (as do processo podem sumir).
+pub fn usar_espaco_do_kernel() {
+    let raiz = RAIZ.load(Ordering::Relaxed);
+    if raiz == 0 {
+        return;
+    }
+    usar_espaco(raiz as u64, 0);
+}
 
-pub fn esquecer_asid(_asid: u16) {
-    unsafe { asm!("mcr p15, 0, {0}, c8, c3, 0", "dsb", "isb", in(reg) 0usize, options(nostack)) };
+/// Tira do TLB (de todos os nucleos) as traducoes do ASID.
+pub fn esquecer_asid(asid: u16) {
+    unsafe { asm!("dsb ishst", "mcr p15, 0, {0}, c8, c3, 2", "dsb ish", "isb", in(reg) asid as usize & 0xFF, options(nostack)) };
 }
