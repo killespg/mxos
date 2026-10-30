@@ -1,7 +1,7 @@
 @ ============================================================
 @  MXOS - vetores de excecao do ARMv7
 @  - IRQ: salva o que uma funcao pode estragar (r0-r3, r12, lr,
-@    d0-d7 e o FPSCR), chama tratar_irq (irq.rs) e volta.
+@    d0-d7, d16-d31 e o FPSCR), chama tratar_irq (irq.rs) e volta.
 @  - o resto e fatal: tratar_excecao_arm (excecao.rs) explica o
 @    erro na serial e na tela e para.
 @  Processos (EL0) ainda nao rodam no ARMv7: entrar_usuario so
@@ -32,11 +32,13 @@ irq_entrada:
     ldr     r0, =ULTIMO_FP_IRQ          @ e o frame pointer dela (r11): a pilha de chamadas
     str     r11, [r0]
     vpush   {d0-d7}
+    vpush   {d16-d31}                   @ tambem temporarios no AAPCS-VFP (d32)
     vmrs    r0, fpscr
     push    {r0, r1}                    @ r1 so mantem a pilha em 8 bytes
     bl      tratar_irq
     pop     {r0, r1}
     vmsr    fpscr, r0
+    vpop    {d16-d31}
     vpop    {d0-d7}
     pop     {r0-r3, r12, lr}
     movs    pc, lr                      @ volta, com o CPSR do SPSR
