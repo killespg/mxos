@@ -1,10 +1,17 @@
 //! Alocador de memoria (heap): o que faz `Vec`, `String` e `Box` funcionarem.
 //!
-//! Lista de blocos livres ordenada por endereco. Cada bloco livre guarda o
-//! proprio tamanho e o endereco do proximo nos primeiros 16 bytes dele mesmo.
-//!   - alocar: pega o primeiro bloco que cabe (first fit) e corta o que sobra
-//!   - liberar: devolve o bloco na posicao certa e junta com os vizinhos,
-//!     para a memoria nao virar picadinho
+//! Duas camadas:
+//!   - pedidos pequenos (ate 4 KB, alinhamento ate 16, a imensa maioria:
+//!     Vec, String, Box, Rc do JS, do CSS e do layout) vao para classes de
+//!     tamanho: cada classe tem a propria lista de livres, e alocar/liberar e
+//!     tirar/por na cabeca dela, em tempo constante. As classes se abastecem
+//!     em lotes de 64 KB da camada de baixo e nunca devolvem.
+//!   - o resto: lista de blocos livres ordenada por endereco. Cada bloco
+//!     livre guarda o proprio tamanho e o endereco do proximo nos primeiros
+//!     16 bytes dele mesmo. Alocar pega o primeiro que cabe (first fit);
+//!     liberar devolve no lugar certo e junta com os vizinhos.
+//! Antes era so a lista: depois de navegar ela tinha milhares de blocos, e
+//! cada alocacao a percorria (no Cortex-A7, centenas de us por malloc).
 //!
 //! A trava usa instrucoes atomicas, que no ARM so funcionam com a MMU ligada.
 
@@ -24,12 +31,41 @@ struct Livre {
     proximo: *mut Livre,
 }
 
+/// Tamanhos das classes (multiplos de 16, ate 4 KB).
+const CLASSES: [usize; 28] = [
+    16, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048,
+    2560, 3072, 3584, 4096,
+];
+const MAIOR_CLASSE: usize = 4096;
+/// Quanto cada classe pega da lista de baixo por vez.
+const LOTE: usize = 64 * 1024;
+
+/// A classe de um tamanho ja arredondado para 16 (o primeiro que cabe).
+fn classe(tamanho: usize) -> usize {
+    if tamanho <= 128 {
+        return tamanho / 16 - 1;
+    }
+    let mut k = 8;
+    while CLASSES[k] < tamanho {
+        k += 1;
+    }
+    k
+}
+
+struct No {
+    proximo: *mut No,
+}
+
 struct Estado {
     primeiro: *mut Livre,
     inicio: usize,
     total: usize,
     livre: usize,
     alocacoes: usize,
+    /// Cabeca da lista de livres de cada classe.
+    classes: [*mut No; CLASSES.len()],
+    /// O pedaco do lote ainda nunca usado de cada classe: [atual, fim).
+    lote: [(usize, usize); CLASSES.len()],
 }
 
 struct Heap {
@@ -42,7 +78,15 @@ unsafe impl Sync for Heap {}
 #[global_allocator]
 static HEAP: Heap = Heap {
     trava: AtomicBool::new(false),
-    estado: UnsafeCell::new(Estado { primeiro: null_mut(), inicio: 0, total: 0, livre: 0, alocacoes: 0 }),
+    estado: UnsafeCell::new(Estado {
+        primeiro: null_mut(),
+        inicio: 0,
+        total: 0,
+        livre: 0,
+        alocacoes: 0,
+        classes: [null_mut(); CLASSES.len()],
+        lote: [(0, 0); CLASSES.len()],
+    }),
 };
 
 impl Heap {
@@ -99,16 +143,75 @@ unsafe impl GlobalAlloc for Heap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let tamanho = tamanho_real(layout);
         let alinhamento = layout.align().max(ALINHAMENTO);
+        if tamanho <= MAIOR_CLASSE && alinhamento <= ALINHAMENTO {
+            return self.com(|estado| unsafe { estado.alocar_pequeno(classe(tamanho)) });
+        }
         self.com(|estado| unsafe { estado.alocar(tamanho, alinhamento) })
     }
 
     unsafe fn dealloc(&self, ponteiro: *mut u8, layout: Layout) {
         let tamanho = tamanho_real(layout);
+        if tamanho <= MAIOR_CLASSE && layout.align() <= ALINHAMENTO {
+            return self.com(|estado| unsafe { estado.liberar_pequeno(ponteiro, classe(tamanho)) });
+        }
         self.com(|estado| unsafe { estado.liberar(ponteiro as usize, tamanho) })
+    }
+
+    unsafe fn realloc(&self, ponteiro: *mut u8, layout: Layout, novo: usize) -> *mut u8 {
+        // mesma classe (Vec crescendo dentro da folga): nada a fazer
+        let (antes, depois) = (tamanho_real(layout), arredondar(novo.max(1), ALINHAMENTO));
+        if layout.align() <= ALINHAMENTO && antes <= MAIOR_CLASSE && depois <= MAIOR_CLASSE && classe(antes) == classe(depois) {
+            return ponteiro;
+        }
+        let nl = unsafe { Layout::from_size_align_unchecked(novo, layout.align()) };
+        let p = unsafe { self.alloc(nl) };
+        if !p.is_null() {
+            unsafe {
+                core::ptr::copy_nonoverlapping(ponteiro, p, layout.size().min(novo));
+                self.dealloc(ponteiro, layout);
+            }
+        }
+        p
     }
 }
 
 impl Estado {
+    /// Um bloco da classe `k`: da lista de livres, do lote ou de um lote novo.
+    unsafe fn alocar_pequeno(&mut self, k: usize) -> *mut u8 {
+        unsafe {
+            let cabeca = self.classes[k];
+            if !cabeca.is_null() {
+                self.classes[k] = (*cabeca).proximo;
+                self.alocacoes += 1;
+                return cabeca as *mut u8;
+            }
+            let t = CLASSES[k];
+            let (mut atual, mut fim) = self.lote[k];
+            if atual + t > fim {
+                let novo = self.alocar(LOTE, ALINHAMENTO);
+                if novo.is_null() {
+                    // sem lote inteiro: so este bloco, direto da lista
+                    return self.alocar(t, ALINHAMENTO);
+                }
+                // o alocar contou o lote como uma alocacao; os blocos contam
+                self.alocacoes -= 1;
+                (atual, fim) = (novo as usize, novo as usize + LOTE);
+            }
+            self.lote[k] = (atual + t, fim);
+            self.alocacoes += 1;
+            atual as *mut u8
+        }
+    }
+
+    unsafe fn liberar_pequeno(&mut self, ponteiro: *mut u8, k: usize) {
+        unsafe {
+            let no = ponteiro as *mut No;
+            (*no).proximo = self.classes[k];
+            self.classes[k] = no;
+            self.alocacoes -= 1;
+        }
+    }
+
     unsafe fn alocar(&mut self, tamanho: usize, alinhamento: usize) -> *mut u8 {
         unsafe {
             let mut anterior: *mut Livre = null_mut();
