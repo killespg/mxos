@@ -295,7 +295,16 @@ fn abrir_video(p: &mut PaginaWeb, id: &str) {
         use crate::gui::apps::filme::{Filme, OrigemDash};
         let r = youtube::fluxo(id).and_then(|f| match f {
             youtube::Fluxo::Progressivo { url, tamanho } => Filme::de_fonte(alloc::boxed::Box::new(youtube::FonteRede::nova(url, tamanho))),
-            youtube::Fluxo::Dash { url, fim_indice, .. } => Filme::de_origem(alloc::boxed::Box::new(OrigemDash::abrir(&url, fim_indice)?)),
+            youtube::Fluxo::Dash { url, fim_indice, audio, .. } => {
+                let mut f = Filme::de_origem(alloc::boxed::Box::new(OrigemDash::abrir(&url, fim_indice, false)?))?;
+                // o som e opcional: sem ele o video toca pelo relogio
+                if let Some((u, fim)) = audio {
+                    if let Err(e) = f.ligar_som(&u, fim) {
+                        f.erro = Some(e);
+                    }
+                }
+                Ok(f)
+            }
         });
         match r {
             Ok(f) => p.video = Some(alloc::boxed::Box::new(f)),

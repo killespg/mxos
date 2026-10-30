@@ -382,7 +382,7 @@ pub enum Fluxo {
     Progressivo { url: String, tamanho: usize },
     /// MP4 fragmentado so de video (DASH): ate o byte `fim_indice` vem o
     /// init e o indice dos segmentos.
-    Dash { url: String, fim_indice: u64, altura: u32 },
+    Dash { url: String, fim_indice: u64, altura: u32, audio: Option<(String, u64)> },
 }
 
 /// Formatos H.264 em ordem de preferencia para a qualidade pedida
@@ -437,7 +437,13 @@ pub fn fluxo(id: &str) -> Result<Fluxo, &'static str> {
         let Some(f) = adaptativos.iter().find(|f| itag(f) == quero) else { continue };
         let (Some(url), Some(fim)) = (f.campo("url").and_then(Json::texto), numero(f.campo("indexRange").and_then(|r| r.campo("end")))) else { continue };
         let altura = numero(f.campo("height")).unwrap_or(0) as u32;
-        return Ok(Fluxo::Dash { url: String::from(url), fim_indice: fim, altura });
+        // o som: AAC-LC 128k (formato 140)
+        let audio = adaptativos.iter().find(|f| itag(f) == 140).and_then(|f| {
+            let u = f.campo("url").and_then(Json::texto)?;
+            let fim = numero(f.campo("indexRange").and_then(|r| r.campo("end")))?;
+            Some((String::from(u), fim))
+        });
+        return Ok(Fluxo::Dash { url: String::from(url), fim_indice: fim, altura, audio });
     }
     Err("o vídeo não tem formato H.264 que a box toque")
 }

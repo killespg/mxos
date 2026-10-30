@@ -38,6 +38,8 @@ static mut BUF: [u32; ANEL] = [0; ANEL];
 static CABECA: AtomicUsize = AtomicUsize::new(0);
 static CAUDA: AtomicUsize = AtomicUsize::new(0);
 static LIGADO: AtomicBool = AtomicBool::new(false);
+/// Pausado: a IRQ manda silencio e o anel fica parado.
+static PAUSADO: AtomicBool = AtomicBool::new(false);
 /// Quadros que ja sairam pela FIFO (o relogio do som) e vezes que o anel
 /// esvaziou com o som tocando.
 static TOCADOS: AtomicU32 = AtomicU32::new(0);
@@ -65,6 +67,33 @@ pub fn ligado() -> bool {
     LIGADO.load(Ordering::Relaxed)
 }
 
+/// GPLL em kHz (o U-Boot deixa 600 MHz; o Android usa 1200).
+pub fn gpll_khz() -> u32 {
+    let (c0, c1) = unsafe { (read_volatile((CRU + 0x24) as *const u32), read_volatile((CRU + 0x28) as *const u32)) };
+    let (fb, pd1) = (c0 & 0xFFF, (c0 >> 12 & 7).max(1));
+    let (refdiv, pd2) = ((c1 & 0x3F).max(1), (c1 >> 6 & 7).max(1));
+    24_000 * fb / (refdiv * pd1 * pd2)
+}
+
+/// Fracao (numerador, denominador) que leva o GPLL a 12,288 MHz.
+fn fracao_mclk() -> (u32, u32) {
+    let (mut n, mut d) = (12_288u64, gpll_khz().max(1) as u64);
+    let mdc = {
+        let (mut a, mut b) = (n, d);
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a
+    };
+    n /= mdc;
+    d /= mdc;
+    while d > 0xFFFF || n > 0xFFFF {
+        n = (n + 1) / 2;
+        d = (d + 1) / 2;
+    }
+    (n as u32, d as u32)
+}
+
 /// Relogio TMDS em kHz pela resolucao que o HDMI esta mandando.
 fn tmds_khz() -> u32 {
     let linhas = (hdmi(0x1006) as u32) << 8 | hdmi(0x1005) as u32;
@@ -83,10 +112,12 @@ pub fn iniciar() -> bool {
     if ligado() {
         return true;
     }
-    // MCLK: i2s0_src = GPLL/1, i2s0_pre = fracionario 32/3125; portoes
+    // MCLK: i2s0_src = GPLL/1, i2s0_pre = fracionario (32/3125 com o GPLL
+    // de 1200 MHz do Android; calculado pelo GPLL de verdade); portoes
     // (GATE0 bits 3..5) e hclk_i2s0 (GATE8 bit 7)
     cru(0x068, 1 << 15 | 3 << 8 | 0x7F, 1 << 15 | 1 << 8);
-    unsafe { write_volatile((CRU + 0x064) as *mut u32, 0x0020_0C35) };
+    let (num, den) = fracao_mclk();
+    unsafe { write_volatile((CRU + 0x064) as *mut u32, num << 16 | den) };
     cru(0x0D0, 7 << 3, 0);
     cru(0x0F0, 1 << 7, 0);
     crate::cpu::barreira();
@@ -157,8 +188,11 @@ pub fn atender() {
     let mut cauda = CAUDA.load(Ordering::Relaxed);
     let buf = &raw const BUF;
     let mut faltou = false;
+    let pausado = PAUSADO.load(Ordering::Relaxed);
     for _ in nivel..32 {
-        let v = if cauda != cabeca {
+        let v = if pausado {
+            0
+        } else if cauda != cabeca {
             let v = unsafe { (*buf)[cauda & (ANEL - 1)] };
             cauda = cauda.wrapping_add(1);
             v
@@ -208,6 +242,10 @@ pub fn escrever(amostras: &[i16]) -> usize {
     n
 }
 
+pub fn pausar(sim: bool) {
+    PAUSADO.store(sim, Ordering::Relaxed);
+}
+
 /// Joga fora o que esta na fila (pulo, troca de video).
 pub fn esvaziar() {
     CABECA.store(CAUDA.load(Ordering::Acquire), Ordering::Release);
@@ -216,7 +254,7 @@ pub fn esvaziar() {
 /// Para o "som" do shell e o INFO.
 pub fn relatorio() -> alloc::string::String {
     alloc::format!(
-        "hdmi som {}: {} quadros tocados, {} na fila, {} faltas, {} irqs, fifo {}, tmds {} kHz, HDMI conf0 {:02x} n {:02x}{:02x} modo {:02x}",
+        "hdmi som {}: {} quadros tocados, {} na fila, {} faltas, {} irqs, fifo {}, tmds {} kHz, gpll {} kHz, HDMI conf0 {:02x} n {:02x}{:02x} modo {:02x}",
         if ligado() { "ligado" } else { "desligado" },
         tocados(),
         na_fila(),
@@ -224,6 +262,7 @@ pub fn relatorio() -> alloc::string::String {
         IRQS.load(Ordering::Relaxed),
         i2s(FIFOLR) & 0x3F,
         tmds_khz(),
+        gpll_khz(),
         hdmi(0x3100),
         hdmi(0x3201),
         hdmi(0x3200),

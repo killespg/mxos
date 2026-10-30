@@ -16,6 +16,7 @@ use core::cmp::Reverse;
 use super::visualizador::FonteDisco;
 use crate::gui::grafico::{Retangulo, Superficie};
 use crate::midia::Fonte;
+use crate::midia::aac::{self, Aac};
 use crate::midia::mp4::{self, Amostra, Mp4, Segmento};
 use crate::rede::fluxo::Baixador;
 use crate::video::rga;
@@ -93,13 +94,14 @@ pub struct OrigemDash {
 const SEGMENTOS_NA_FRENTE: usize = 2;
 
 impl OrigemDash {
-    /// `fim_indice`: o ultimo byte do sidx (indexRange.end da API).
-    pub fn abrir(url: &str, fim_indice: u64) -> Result<OrigemDash, &'static str> {
+    /// `fim_indice`: o ultimo byte do sidx (indexRange.end da API). `audio`:
+    /// a trilha de som em vez da de video (config = o esds).
+    pub fn abrir(url: &str, fim_indice: u64, audio: bool) -> Result<OrigemDash, &'static str> {
         let mut dl = Baixador::novo(url)?;
         let init = dl.baixar(0, fim_indice)?;
         let mut f = init.clone();
         let mp4 = Mp4::abrir(&mut f)?;
-        let v = mp4.video().ok_or("o fluxo não tem vídeo")?;
+        let v = if audio { mp4.audio().ok_or("o fluxo não tem som")? } else { mp4.video().ok_or("o fluxo não tem vídeo")? };
         let padrao = mp4::padroes(mp4::moov_de(&init).ok_or("init sem moov")?);
         let segs = mp4::indice(&init, 0);
         if segs.is_empty() {
@@ -151,7 +153,101 @@ impl Origem for OrigemDash {
     }
 }
 
+/// O som do filme: AAC decodificado, convertido para 48 kHz e posto no
+/// anel do HDMI. Os quadros que ja sairam pelo HDMI sao o relogio.
+struct Som {
+    origem: OrigemDash,
+    aac: Aac,
+    /// Estereo na taxa do AAC, ainda nao convertido.
+    entrada: VecDeque<[i16; 2]>,
+    /// Posicao (16.16) entre entrada[0] e entrada[1].
+    fase: u32,
+    passo: u32,
+    /// Tempo (us) da primeira amostra e o contador do HDMI naquela hora.
+    inicio_us: Option<i64>,
+    tocados_inicio: u32,
+    acabou: bool,
+}
+
+impl Som {
+    fn abrir(url: &str, fim: u64) -> Result<Som, &'static str> {
+        let origem = OrigemDash::abrir(url, fim, true)?;
+        let asc = aac::asc_do_esds(origem.config()).ok_or("som sem configuração AAC")?;
+        let aac = Aac::novo(asc)?;
+        if !crate::audio::hdmi::iniciar() {
+            return Err("o som pelo HDMI não ligou");
+        }
+        crate::audio::hdmi::esvaziar();
+        let passo = ((aac.taxa as u64) << 16) / crate::audio::hdmi::TAXA as u64;
+        Ok(Som { origem, aac, entrada: VecDeque::new(), fase: 0, passo: passo as u32, inicio_us: None, tocados_inicio: 0, acabou: false })
+    }
+
+    /// Baixa, decodifica e enche o anel do HDMI (sem esperar).
+    fn alimentar(&mut self) -> Result<(), &'static str> {
+        use crate::audio::hdmi;
+        self.origem.andar()?;
+        let mut saida: Vec<i16> = Vec::new();
+        while hdmi::espaco() > 2048 && !self.acabou {
+            // entrada suficiente para 1024 quadros de saida
+            while self.entrada.len() < 1200 {
+                match self.origem.proxima()? {
+                    Proxima::Amostra(b, t) => {
+                        let mut pcm = Vec::new();
+                        if self.aac.decodificar(&b, &mut pcm).is_err() {
+                            pcm = alloc::vec![0; 2048];
+                        }
+                        if self.inicio_us.is_none() {
+                            self.inicio_us = Some(t * 1_000_000 / self.origem.escala() as i64);
+                            self.tocados_inicio = hdmi::tocados().wrapping_add(hdmi::na_fila() as u32);
+                        }
+                        self.entrada.extend(pcm.chunks_exact(2).map(|c| [c[0], c[1]]));
+                    }
+                    Proxima::Esperando => break,
+                    Proxima::Fim => {
+                        self.acabou = true;
+                        break;
+                    }
+                }
+            }
+            if self.entrada.len() < 2 {
+                break;
+            }
+            // interpolacao linear para 48 kHz
+            saida.clear();
+            let quantos = (hdmi::espaco() - 1).min(4096);
+            while saida.len() / 2 < quantos && self.entrada.len() >= 2 {
+                let (a, b) = (self.entrada[0], self.entrada[1]);
+                let f = self.fase as i32;
+                for c in 0..2 {
+                    saida.push((a[c] as i32 + ((b[c] as i32 - a[c] as i32) * f >> 16)) as i16);
+                }
+                self.fase += self.passo;
+                while self.fase >= 1 << 16 && self.entrada.len() >= 2 {
+                    self.fase -= 1 << 16;
+                    self.entrada.pop_front();
+                }
+            }
+            if saida.is_empty() {
+                break;
+            }
+            hdmi::escrever(&saida);
+        }
+        Ok(())
+    }
+
+    /// Tempo do som que esta saindo agora (us), se ja comecou.
+    fn agora_us(&self) -> Option<i64> {
+        let ini = self.inicio_us?;
+        let tocados = crate::audio::hdmi::tocados().wrapping_sub(self.tocados_inicio) as i32;
+        if tocados <= 0 {
+            return None;
+        }
+        Some(ini + tocados as i64 * 1_000_000 / crate::audio::hdmi::TAXA as i64)
+    }
+}
+
 pub struct Filme {
+    som: Option<Som>,
     origem: Box<dyn Origem>,
     escala: u64,
     dec: Decodificador,
@@ -208,6 +304,7 @@ impl Filme {
         let dec = Decodificador::novo(origem.config())?;
         let (largura, altura) = dec.tamanho();
         Ok(Filme {
+            som: None,
             escala: origem.escala(),
             duracao_ms: origem.duracao_ms(),
             origem,
@@ -225,6 +322,12 @@ impl Filme {
             largura,
             altura,
         })
+    }
+
+    /// Liga o som (DASH AAC): o relogio do video passa a ser o do som.
+    pub fn ligar_som(&mut self, url: &str, fim_indice: u64) -> Result<(), &'static str> {
+        self.som = Some(Som::abrir(url, fim_indice)?);
+        Ok(())
     }
 
     pub fn descricao(&self) -> String {
@@ -256,6 +359,9 @@ impl Filme {
         match self.pausado_em.take() {
             Some(p) => self.inicio += (agora_us() - p) as i64,
             None => self.pausado_em = Some(agora_us()),
+        }
+        if self.som.is_some() {
+            crate::audio::hdmi::pausar(self.pausado_em.is_some());
         }
     }
 
@@ -299,6 +405,13 @@ impl Filme {
         if let Err(e) = self.origem.andar() {
             self.erro = Some(e);
         }
+        if let Some(s) = &mut self.som {
+            if let Err(e) = s.alimentar() {
+                // sem som daqui em diante; o video segue pelo relogio
+                self.erro = Some(e);
+                self.som = None;
+            }
+        }
         let agora_real = agora_us();
         // esperando a rede no tique anterior: o video nao andou nesse tempo
         if self.esperando {
@@ -309,7 +422,20 @@ impl Filme {
         if self.pausado_em.is_some() {
             return false;
         }
-        let agora = (agora_real as i64 - self.inicio) * self.escala as i64 / 1_000_000;
+        let mut agora = (agora_real as i64 - self.inicio) * self.escala as i64 / 1_000_000;
+        // com som, o relogio e o som (o que ja saiu pelo HDMI); antes de ele
+        // comecar, o video fica no primeiro quadro
+        if let Some(s) = &self.som {
+            match s.agora_us() {
+                Some(us) => {
+                    agora = us * self.escala as i64 / 1_000_000;
+                    // o relogio de parede acompanha (se o som sumir, segue dali)
+                    self.inicio = agora_real as i64 - us;
+                }
+                None if self.atual.is_some() => agora = i64::MIN,
+                None => {}
+            }
+        }
         let mut mudou = false;
         loop {
             if self.seguinte.is_none() {
@@ -388,6 +514,10 @@ impl Filme {
 
 impl Drop for Filme {
     fn drop(&mut self) {
+        if self.som.is_some() {
+            crate::audio::hdmi::pausar(false);
+            crate::audio::hdmi::esvaziar();
+        }
         if let Some((q, _)) = self.atual.take() {
             self.dec.soltar(&q);
         }

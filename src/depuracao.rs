@@ -165,7 +165,8 @@ fn comando(c: &mut Cliente, linha: &str) {
                 use core::sync::atomic::Ordering::Relaxed;
                 use crate::gui::apps::filme as f;
                 s + &format!("video {} ms, {} quadros, {} esperas
-", f::POSICAO_MS.load(Relaxed), f::MOSTRADOS.load(Relaxed), f::ESPERAS.load(Relaxed))
+", f::POSICAO_MS.load(Relaxed), f::MOSTRADOS.load(Relaxed), f::ESPERAS.load(Relaxed)) + &crate::audio::hdmi::relatorio() + "
+"
             };
             texto(c, &s);
         }

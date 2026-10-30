@@ -46,9 +46,11 @@ fn cru(r: usize, mascara: u32, valor: u32) {
 /// Liga relogios (300 MHz do GPLL) e solta os resets. true = o ID bate.
 pub fn ligar() -> bool {
     // divisores: aclk_rkvdec_pre e sclk_vdec_cabac (CLKSEL28) e
-    // sclk_vdec_core (CLKSEL34), mux 1 = GPLL de 1200 MHz, /4
-    cru(0x0B4, 0xDFDF, 1 << 14 | 3 << 8 | 1 << 6 | 3);
-    cru(0x0CC, 0x7F00, 1 << 13 | 3 << 8);
+    // sclk_vdec_core (CLKSEL34), mux 1 = GPLL, para ~300 MHz (o U-Boot
+    // deixa o GPLL em 600 MHz, o Android em 1200)
+    let div = crate::audio::hdmi::gpll_khz().div_ceil(300_000).clamp(1, 32) - 1;
+    cru(0x0B4, 0xDFDF, 1 << 14 | div << 8 | 1 << 6 | div);
+    cru(0x0CC, 0x7F00, 1 << 13 | div << 8);
     // portoes (1 = desligado): pre-relogios (GATE3 2..4, GATE4 5) e
     // aclk/hclk do bloco e dos NOCs (GATE15 2, 3, 6, 7)
     cru(0x0DC, 0x1C, 0);
