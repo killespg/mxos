@@ -256,6 +256,17 @@ unsafe impl Sync for Global {}
 
 static REDE: Global = Global { trava: AtomicBool::new(false), pilha: UnsafeCell::new(None) };
 
+/// Por que a rede nao ligou da ultima vez (o comando `ip` mostra).
+struct UltimoErro(UnsafeCell<Option<ErroRede>>);
+
+unsafe impl Sync for UltimoErro {}
+
+static ULTIMO_ERRO: UltimoErro = UltimoErro(UnsafeCell::new(None));
+
+pub fn ultimo_erro() -> Option<ErroRede> {
+    unsafe { *ULTIMO_ERRO.0.get() }
+}
+
 const OCUPADA: ErroRede = ErroRede::Protocolo("rede ocupada (chamada dentro dela mesma)");
 
 /// Roda `acao` com a trava pega sobre o Option da pilha.
@@ -304,6 +315,12 @@ fn esperar<T>(limite_ms: u64, mut passo: impl FnMut(&mut Pilha) -> Option<T>) ->
 /// Liga o virtio-net e pega a configuracao por DHCP (uns 3 s no maximo).
 /// Se o DHCP falhar a placa e desligada e a rede fica desligada.
 pub fn iniciar() -> Result<InfoRede, ErroRede> {
+    let r = iniciar_de_fato();
+    unsafe { *ULTIMO_ERRO.0.get() = r.err() };
+    r
+}
+
+fn iniciar_de_fato() -> Result<InfoRede, ErroRede> {
     if let Ok(info) = info_ou_erro() {
         return Ok(info); // ja estava ligada
     }
@@ -317,7 +334,7 @@ pub fn iniciar() -> Result<InfoRede, ErroRede> {
         if let Ok(Some(pilha)) = com_global(|global| global.take()) {
             pilha.nic.encerrar();
         }
-        return Err(e);
+        return Err(if e == ErroRede::TempoEsgotado { ErroRede::Protocolo("o cabo tem link, mas o roteador não respondeu ao DHCP") } else { e });
     }
     // a hora certa para os certificados do HTTPS (sem NTP fica a do RTC)
     let _ = ntp::acertar();

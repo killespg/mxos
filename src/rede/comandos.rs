@@ -21,6 +21,13 @@ macro_rules! diga {
 pub fn comando(nome: &str, args: &str, saida: &mut dyn Write) -> bool {
     let args = args.trim();
     match nome {
+        "ip" if args == "ligar" => {
+            diga!(saida, "ligando a rede (até uns 10 s)...");
+            match super::iniciar() {
+                Ok(_) => mostrar_ip(saida),
+                Err(e) => diga!(saida, "Rede: {}", e.descricao()),
+            }
+        }
         "ip" => mostrar_ip(saida),
         "ping" => comando_ping(args, saida),
         "dns" => comando_dns(args, saida),
@@ -32,10 +39,12 @@ pub fn comando(nome: &str, args: &str, saida: &mut dyn Write) -> bool {
 
 fn mostrar_ip(saida: &mut dyn Write) {
     let Some(i) = info() else {
-        diga!(saida, "Rede: {}", ErroRede::SemRede.descricao());
+        let motivo = super::ultimo_erro().unwrap_or(ErroRede::SemRede);
+        diga!(saida, "Rede: {}", motivo.descricao());
+        diga!(saida, "  (ip ligar tenta de novo)");
         return;
     };
-    diga!(saida, "Rede: virtio-net  MAC {}", Mac(i.mac));
+    diga!(saida, "Rede: MAC {}", Mac(i.mac));
     diga!(saida, "  IP       {}", Ip(i.ip));
     diga!(saida, "  máscara  {}", Ip(i.mascara));
     diga!(saida, "  gateway  {}", Ip(i.gateway));

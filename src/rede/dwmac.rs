@@ -269,7 +269,7 @@ mod plataforma {
 
 impl Dwmac {
     pub fn iniciar() -> Result<Dwmac, ErroRede> {
-        plataforma::preparar().map_err(|_| ErroRede::SemRede)?;
+        plataforma::preparar().map_err(ErroRede::Protocolo)?;
         // o MAC que o U-Boot programou (antes do reset apagar)
         let (alto, baixo) = (ler(MAC_ALTO), ler(MAC_BAIXO));
         let mut mac = [baixo as u8, (baixo >> 8) as u8, (baixo >> 16) as u8, (baixo >> 24) as u8, alto as u8, (alto >> 8) as u8];
@@ -287,13 +287,19 @@ impl Dwmac {
             esperar_us(10);
         }
         if ler(DMA_BUS) & 1 != 0 {
-            return Err(ErroRede::SemRede);
+            return Err(ErroRede::Protocolo("o DMA da placa de rede não saiu do reset (relógio do MAC desligado?)"));
+        }
+        // o PHY responde no MDIO? (0 ou 0xFFFF = ninguem do outro lado)
+        let id = mdio_ler(PHY, 2);
+        if id == 0 || id == 0xFFFF {
+            return Err(ErroRede::Protocolo("o PHY da porta de rede não responde (MDIO)"));
         }
         plataforma::ajustar_phy();
-        // PHY: reinicia a negociacao e espera o link (ate 3 s)
+        // PHY: reinicia a negociacao e espera o link (ate 8 s: depois de um
+        // reset do PHY a negociacao passa facil de 3 s)
         mdio_escrever(PHY, 0, 1 << 12 | 1 << 9);
         let mut link = false;
-        for _ in 0..300 {
+        for _ in 0..800 {
             if mdio_ler(PHY, 1) & (1 << 2) != 0 {
                 link = true;
                 break;
@@ -301,7 +307,7 @@ impl Dwmac {
             esperar_us(10_000);
         }
         if !link {
-            return Err(ErroRede::SemRede);
+            return Err(ErroRede::Protocolo("sem link no cabo de rede (cabo desligado, ou o PHY não negociou)"));
         }
         let parceiro = mdio_ler(PHY, 5);
         let cem = parceiro & (1 << 8 | 1 << 7) != 0;
