@@ -59,3 +59,24 @@ fn sites_reais() {
         println!("{nome:10} altura {h:6}px  html {:6.1} css {:6.1} imagens {:7.1} layout {:6.1} pintura {:6.1} ms", t[0], t[1], t[2], t[3], t[4]);
     }
 }
+
+/// Um site so, na largura da janela do navegador da box:
+/// SITE=https://... LARGURA=768 cargo test --release --test render um_site -- --nocapture
+#[test]
+fn um_site() {
+    let Ok(url) = std::env::var("SITE") else { return };
+    let largura = std::env::var("LARGURA").ok().and_then(|l| l.parse().ok()).unwrap_or(768);
+    let (tipo, bytes) = teste_web::rede::pagina(&url).expect("baixar");
+    let (h, t) = renderizar("um_site", &bytes, Some(&tipo), &url, largura, 3000);
+    println!("altura {h}px, tempos {:?} ms", t);
+}
+
+/// A arvore de caixas de SITE (PROF niveis) em target/saidas/arvore.txt.
+#[test]
+fn arvore_de_um_site() {
+    let Ok(url) = std::env::var("SITE") else { return };
+    let largura = std::env::var("LARGURA").ok().and_then(|l| l.parse().ok()).unwrap_or(768);
+    let prof = std::env::var("PROF").ok().and_then(|l| l.parse().ok()).unwrap_or(12);
+    let pag = teste_web::render::montar(&url, largura);
+    std::fs::write(teste_web::png::pasta().join("arvore.txt"), teste_web::render::despejar(&pag, prof)).unwrap();
+}

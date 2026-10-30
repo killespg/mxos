@@ -57,6 +57,15 @@ pub struct Pintor<'a> {
     pub rolagem: Fixo,
 }
 
+/// Caixa posicionada pintada depois, na ordem do z-index.
+struct Adiado {
+    z: i32,
+    k: u32,
+    dy: Fixo,
+    /// O recorte dos ancestrais com overflow, se vale para ela.
+    recorte: Option<Ret>,
+}
+
 impl Pintor<'_> {
     pub fn pintar(&mut self) {
         self.contexto(0, 255, 0);
@@ -64,23 +73,31 @@ impl Pintor<'_> {
 
     /// Pinta `k` como raiz de um contexto de empilhamento.
     fn contexto(&mut self, k: u32, opacidade: u8, dy: Fixo) {
-        let mut adiados: Vec<(i32, u32, Fixo)> = Vec::new();
+        let mut adiados: Vec<Adiado> = Vec::new();
         self.caixa(k, opacidade, dy, &mut adiados, true);
-        adiados.sort_by_key(|x| x.0);
-        for (_, a, dy2) in adiados {
-            let op = mul_op(opacidade, self.arv.caixas[a as usize].estilo.opacidade);
+        adiados.sort_by_key(|x| x.z);
+        for d in adiados {
+            let op = mul_op(opacidade, self.arv.caixas[d.k as usize].estilo.opacidade);
             let salvo = self.q.recorte;
-            self.contexto(a, op, dy2);
+            if let Some(r) = d.recorte {
+                self.q.recorte = self.q.recorte.intersecao(&r);
+            }
+            self.contexto(d.k, op, d.dy);
             self.q.recorte = salvo;
         }
     }
 
-    fn caixa(&mut self, k: u32, opacidade: u8, dy: Fixo, adiados: &mut Vec<(i32, u32, Fixo)>, raiz: bool) {
+    fn caixa(&mut self, k: u32, opacidade: u8, dy: Fixo, adiados: &mut Vec<Adiado>, raiz: bool) {
         let c = &self.arv.caixas[k as usize];
         let e = c.estilo.clone();
         let dy = if e.posicao == Posicao::Fixa { 0 } else { dy };
         if !raiz && e.posicao != Posicao::Estatica {
-            adiados.push((e.z.unwrap_or(0), k, dy));
+            // relative e sticky continuam presos ao overflow dos ancestrais
+            // (o indice da Wikipedia, de itens relative, vazava por cima do
+            // artigo); absolute e fixed podem ter o bloco de conter fora
+            // deles, entao ficam com o recorte do contexto
+            let recorte = matches!(e.posicao, Posicao::Relativa | Posicao::Grudada).then_some(self.q.recorte);
+            adiados.push(Adiado { z: e.z.unwrap_or(0), k, dy, recorte });
             return;
         }
         let op = if raiz { opacidade } else { mul_op(opacidade, e.opacidade) };
