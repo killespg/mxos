@@ -28,6 +28,8 @@ pub fn comando(nome: &str, args: &str, saida: &mut dyn Write) -> bool {
                 Err(e) => diga!(saida, "Rede: {}", e.descricao()),
             }
         }
+        #[cfg(any(feature = "mxq", feature = "rk322x"))]
+        "ip" if args == "diag" => diga!(saida, "{}", super::dwmac::diagnostico()),
         "ip" => mostrar_ip(saida),
         "ping" => comando_ping(args, saida),
         "dns" => comando_dns(args, saida),

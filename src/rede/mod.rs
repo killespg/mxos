@@ -39,7 +39,7 @@ mod udp;
 mod ntp;
 pub mod tls;
 #[cfg(any(feature = "mxq", feature = "rk322x"))]
-mod dwmac;
+pub mod dwmac;
 mod virtio_net;
 
 /// Uma placa de rede: virtio-net (QEMU) ou o Ethernet da Amlogic (box).

@@ -52,7 +52,12 @@ const DONO: u32 = 1 << 31;
 const DESCRITORES: usize = 32;
 const BUFFER: usize = 1536;
 /// Palavras puladas depois de cada descritor (16 bytes + 48 = 64, uma linha).
-const DSL: u32 = 12;
+/// Descritores encadeados (TCH/RCH: o 4o campo aponta o proximo), como o
+/// Android da box usa com DSL 0: nao depende da largura do barramento da
+/// GMAC (o DSL conta em palavras dele) e cada descritor fica sozinho na
+/// sua linha de cache.
+const TX_ENCADEADO: u32 = 1 << 20;
+const RX_ENCADEADO: u32 = 1 << 14;
 
 #[repr(C, align(64))]
 #[derive(Clone, Copy, Default)]
@@ -208,7 +213,8 @@ mod plataforma {
         if erro > ALVO_HZ / 50 {
             return Err("nenhum PLL dá 50 MHz para a rede");
         }
-        por(CRU + CLKSEL5, 1 << 7 | 1 << 5 | 0x1F, mux << 7 | (div - 1));
+        // bits 9:8 = 3 como o Android da box deixa (rede funcionando)
+        por(CRU + CLKSEL5, 3 << 8 | 1 << 7 | 1 << 5 | 0x1F, 3 << 8 | mux << 7 | (div - 1));
         por(CRU + CLKSEL29, 1 << 12 | 3 << 8, 0);
         // abre os relogios (bit 1 = desligado)
         por(CRU + GATE1, 1 << 7, 0);
@@ -265,6 +271,25 @@ mod plataforma {
     }
     pub fn depois_do_link(_cem: bool) {}
     pub fn ajustar_phy() {}
+}
+
+/// Contadores e estado do hardware (comando `ip diag`): pacotes que
+/// sairam e chegaram de verdade, erros e onde o DMA esta.
+pub fn diagnostico() -> alloc::string::String {
+    alloc::format!(
+        "MAC config 0x{:08x}  DMA bus 0x{:08x} modo 0x{:08x} status 0x{:08x}\n\
+         saiu: {} quadros   chegou: {} quadros ({} com CRC errado)\n\
+         descritor atual TX 0x{:08x}  RX 0x{:08x}",
+        ler(MAC_CONFIG),
+        ler(DMA_BUS),
+        ler(DMA_MODO),
+        ler(DMA_STATUS),
+        ler(0x0118),
+        ler(0x0180),
+        ler(0x0194),
+        ler(0x1048),
+        ler(0x104C),
+    )
 }
 
 impl Dwmac {
@@ -324,10 +349,11 @@ impl Dwmac {
             proximo_tx: 0,
         };
         for k in 0..DESCRITORES {
-            let fim = if k == DESCRITORES - 1 { 1 << 15 } else { 0 }; // RER
-            placa.rx[k] = Descritor { d0: DONO, d1: fim | BUFFER as u32, buffer: placa.buffers_rx[k].0.as_ptr() as u32, ..Default::default() };
-            let fim_tx = if k == DESCRITORES - 1 { 1 << 21 } else { 0 }; // TER
-            placa.tx[k] = Descritor { d0: fim_tx, buffer: placa.buffers_tx[k].0.as_ptr() as u32, ..Default::default() };
+            let seguinte = (k + 1) % DESCRITORES;
+            let prox_rx = &placa.rx[seguinte] as *const Descritor as u32;
+            let prox_tx = &placa.tx[seguinte] as *const Descritor as u32;
+            placa.rx[k] = Descritor { d0: DONO, d1: RX_ENCADEADO | BUFFER as u32, buffer: placa.buffers_rx[k].0.as_ptr() as u32, proximo: prox_rx, ..Default::default() };
+            placa.tx[k] = Descritor { d0: TX_ENCADEADO, buffer: placa.buffers_tx[k].0.as_ptr() as u32, proximo: prox_tx, ..Default::default() };
             mmu::limpar_cache(placa.buffers_rx[k].0.as_ptr() as usize, BUFFER);
         }
         limpar(&*placa.rx);
@@ -338,8 +364,8 @@ impl Dwmac {
         escrever(DMA_RX_LISTA, &*placa.rx as *const _ as usize as u32);
         escrever(DMA_TX_LISTA, &*placa.tx as *const _ as usize as u32);
         escrever(DMA_IRQ, 0);
-        // rajada de 8; descritores "enhanced" de 4 palavras + DSL pulando o resto da linha
-        escrever(DMA_BUS, 8 << 8 | DSL << 2);
+        // rajada de 8, descritores encadeados (DSL 0, igual ao Android)
+        escrever(DMA_BUS, 8 << 8);
         escrever(DMA_MODO, 1 << 25 | 1 << 21 | 1 << 13 | 1 << 1); // RSF, TSF, ST, SR
         let velocidade = if cem { 1 << 14 } else { 0 };
         let duplo = if duplex { 1 << 11 } else { 0 };
@@ -369,7 +395,7 @@ impl Placa for Dwmac {
             mmu::limpar_cache(self.buffers_rx[k].0.as_ptr() as usize, BUFFER);
             destino[..n].copy_from_slice(&self.buffers_rx[k].0[..n]);
         }
-        // devolve o descritor para a placa
+        // devolve o descritor para a placa (o d1 com RCH e o tamanho fica)
         self.rx[k].d0 = DONO;
         limpar(&self.rx[k]);
         escrever(DMA_RX_POLL, 1);
@@ -393,10 +419,9 @@ impl Placa for Dwmac {
         }
         let n = n.max(60);
         mmu::limpar_cache(self.buffers_tx[k].0.as_ptr() as usize, BUFFER);
-        let fim = if k == DESCRITORES - 1 { 1 << 21 } else { 0 };
         self.tx[k].d1 = n as u32;
-        // dono, primeiro e ultimo pedaco do quadro
-        self.tx[k].d0 = DONO | 1 << 29 | 1 << 28 | fim;
+        // dono, primeiro e ultimo pedaco do quadro, encadeado
+        self.tx[k].d0 = DONO | 1 << 29 | 1 << 28 | TX_ENCADEADO;
         limpar(&self.tx[k]);
         escrever(DMA_TX_POLL, 1);
         let _ = ler(DMA_STATUS);
