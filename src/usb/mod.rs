@@ -143,6 +143,22 @@ unsafe impl Sync for Global {}
 
 static USB: Global = Global(UnsafeCell::new(None));
 
+/// O que o USB achou no boot, linha a linha (comando `usb`).
+struct Relatorio(UnsafeCell<Vec<String>>);
+
+unsafe impl Sync for Relatorio {}
+
+static RELATORIO: Relatorio = Relatorio(UnsafeCell::new(Vec::new()));
+
+fn anotar(linha: String) {
+    unsafe { (*RELATORIO.0.get()).push(linha) };
+}
+
+/// Controladores, portas e o que cada uma tem (ou por que falhou).
+pub fn relatorio() -> Vec<String> {
+    unsafe { (*RELATORIO.0.get()).clone() }
+}
+
 fn usb() -> Option<&'static mut Usb> {
     unsafe { (*USB.0.get()).as_mut() }
 }
@@ -171,11 +187,15 @@ pub fn iniciar() -> Result<String, &'static str> {
         for &(e, _) in &HOSTS_RK {
             match ehci::Ehci::iniciar(e) {
                 Ok(hc) => {
+                    anotar(alloc::format!("EHCI 0x{e:08x} (USB 2.0): ligado"));
                     u.hcs.push(Box::new(hc));
                     let k = u.hcs.len() - 1;
                     ligar_portas(&mut u, k);
                 }
-                Err(_) => erros += 1,
+                Err(motivo) => {
+                    anotar(alloc::format!("EHCI 0x{e:08x}: {motivo}"));
+                    erros += 1
+                }
             }
         }
         pausa_ms(100);
@@ -183,11 +203,15 @@ pub fn iniciar() -> Result<String, &'static str> {
             // enderecos diferentes em cada OHCI so para o log ficar claro
             match ohci::Ohci::iniciar(o, 1 + 20 * k as u8) {
                 Ok(hc) => {
+                    anotar(alloc::format!("OHCI 0x{o:08x} (USB 1.1): ligado"));
                     u.hcs.push(Box::new(hc));
                     let k = u.hcs.len() - 1;
                     ligar_portas(&mut u, k);
                 }
-                Err(_) => erros += 1,
+                Err(motivo) => {
+                    anotar(alloc::format!("OHCI 0x{o:08x}: {motivo}"));
+                    erros += 1
+                }
             }
         }
         if u.hcs.is_empty() {
@@ -202,16 +226,21 @@ pub fn iniciar() -> Result<String, &'static str> {
 fn ligar_portas(u: &mut Usb, hc: usize) {
     for porta in 1..=u.hcs[hc].portas() {
         if let Some((slot, velocidade)) = u.hcs[hc].ligar_porta(porta) {
-            let _ = configurar(u, hc, slot, velocidade, porta);
+            match configurar(u, hc, slot, velocidade, porta) {
+                Ok(achado) => anotar(alloc::format!("  porta {porta}: {achado}")),
+                Err(motivo) => anotar(alloc::format!("  porta {porta}: erro ({motivo})")),
+            }
         }
     }
 }
 
 /// Le os descritores, escolhe a configuracao e liga as interfaces que o
 /// MXOS conhece.
-fn configurar(u: &mut Usb, hc: usize, slot: u8, velocidade: u8, porta: u8) -> Result<(), &'static str> {
+fn configurar(u: &mut Usb, hc: usize, slot: u8, velocidade: u8, porta: u8) -> Result<String, &'static str> {
     let mut d = vec![0u8; 18];
     u.hcs[hc].controle(slot, 0x80, 6, 0x0100, 0, &mut d)?;
+    let (vid, pid) = (u16::from_le_bytes([d[8], d[9]]), u16::from_le_bytes([d[10], d[11]]));
+    let mut achados: Vec<String> = Vec::new();
     // o pacote maximo do endpoint 0 de verdade (full speed pode ser 8 a 64)
     u.hcs[hc].ajustar_ep0(slot, d[7] as u16)?;
     let mut c = vec![0u8; 9];
@@ -262,8 +291,10 @@ fn configurar(u: &mut Usb, hc: usize, slot: u8, velocidade: u8, porta: u8) -> Re
                         u.hcs[hc].pedir(slot, &ep, 8)?;
                         if proto == 1 {
                             u.teclados.push(Teclado { hc, slot, ep, anterior: [0; 8] });
+                            achados.push(String::from("teclado"));
                         } else {
                             u.mouses.push(Mouse { hc, slot, ep, botoes: 0 });
+                            achados.push(String::from("mouse"));
                         }
                     }
                 }
@@ -275,18 +306,27 @@ fn configurar(u: &mut Usb, hc: usize, slot: u8, velocidade: u8, porta: u8) -> Re
                         let ep_out = u.hcs[hc].abrir_endpoint(slot, velocidade, o.1, 2, o.3, 0)?;
                         let nome = if u.discos.is_empty() { String::from("usb") } else { alloc::format!("usb{}", u.discos.len()) };
                         let mut disco = Armazenamento { hc, slot, entrada: ep_in, saida: ep_out, setores: 0, tag: 1, nome };
-                        if preparar_disco(&mut *u.hcs[hc], &mut disco).is_ok() {
-                            u.discos.push(Some(disco));
+                        match preparar_disco(&mut *u.hcs[hc], &mut disco) {
+                            Ok(()) => {
+                                achados.push(alloc::format!("pendrive {} MB", disco.setores * 512 >> 20));
+                                u.discos.push(Some(disco));
+                            }
+                            Err(e) => achados.push(alloc::format!("pendrive com erro ({})", e.descricao())),
                         }
+                    } else {
+                        achados.push(String::from("pendrive sem endpoints bulk"));
                     }
                 }
-                _ => {}
+                (8, s, p) => achados.push(alloc::format!("armazenamento de tipo nao suportado ({s:02x}/{p:02x})")),
+                (9, ..) => achados.push(String::from("hub USB (ainda nao suportado: ligue direto na box)")),
+                (c, ..) => achados.push(alloc::format!("classe {c:02x} sem driver")),
             }
         }
         k += tamanho;
     }
     let _ = porta;
-    Ok(())
+    let tipo = if achados.is_empty() { String::from("nada reconhecido") } else { achados.join(", ") };
+    Ok(alloc::format!("{vid:04x}:{pid:04x} {} — {tipo}", ["?", "full speed", "low speed", "high speed"].get(velocidade as usize).unwrap_or(&"super speed")))
 }
 
 // ---------------------------------------------------------------------

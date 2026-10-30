@@ -354,6 +354,17 @@ impl Shell {
             "uptime" => self.uptime(),
             "config" => self.config(argumentos),
             "cpu" => self.frequencia(argumentos),
+            #[cfg(any(feature = "mxq", feature = "rk322x"))]
+            "usb" => {
+                let linhas = crate::usb::relatorio();
+                if linhas.is_empty() {
+                    diga!(self, "usb: nada encontrado no boot");
+                }
+                for l in linhas {
+                    diga!(self, "{l}");
+                }
+                diga!(self, "(o USB e lido so no boot: pendrive ligado depois nao aparece)");
+            }
             "nas" => match argumentos.trim() {
                 "parar" => {
                     crate::nas::parar();
