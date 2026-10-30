@@ -38,9 +38,10 @@ fn janela() -> Result<usize, &'static str> {
 /// (largura, altura) da janela que o U-Boot ligou.
 pub fn descobrir() -> Result<(usize, usize), &'static str> {
     let j = janela()?;
-    // a area que aparece na tela (DSP_INFO), senao a da imagem (ACT_INFO)
-    let info = match ler(j + DSP_INFO) {
-        0 => ler(j + ACT_INFO),
+    // o tamanho da imagem (ACT_INFO): o VOP do U-Boot amplia para a TV
+    // (1280x720 -> 1920x1080 na box) e o escalador continua configurado
+    let info = match ler(j + ACT_INFO) {
+        0 => ler(j + DSP_INFO),
         v => v,
     };
     let largura = (info & 0x1FFF) as usize + 1;
@@ -66,7 +67,9 @@ pub fn tomar_posse() -> Result<(Tela, usize), &'static str> {
     tela.limpar(super::tela::PRETO);
     // formato ARGB8888 (0 nos bits 1-3), passo em palavras, endereco novo;
     // a imagem tem o tamanho da tela
-    let ctrl = ler(j + CTRL0) & !(0x7 << 1);
+    // formato ARGB8888 e sem o espelho vertical (bit 22) e a troca de
+    // vermelho com azul (bit 12) que o U-Boot usa para mostrar o BMP
+    let ctrl = ler(j + CTRL0) & !(0x7 << 1) & !(1 << 22) & !(1 << 12);
     escrever(j + VIR, largura as u32);
     escrever(j + ACT_INFO, ((altura as u32 - 1) << 16) | (largura as u32 - 1));
     escrever(j + YRGB_MST, base as u32);

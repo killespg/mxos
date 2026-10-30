@@ -7,6 +7,8 @@
 @  os vetores, prepara as pilhas, zera o BSS e chama kernel_main.
 @ ============================================================
 
+.equ DIAGNOSTICO_VOP, 0
+
 .section .text.boot, "ax"
 .arm
 .arch_extension virt
@@ -28,14 +30,31 @@ _start:
 @ e o que esta de fato no HDMI. Faixa n = 64 KB a partir de base + n * 256 KB.
 @ Caches e MMU desligados: a escrita vai direto para a memoria do VOP.
 .macro faixa n
+    @ e o numero da etapa no GRF_OS_REG1 (sobrevive a um reset quente:
+    @ o Android le depois com devmem 0x110005cc)
+    ldr     r0, =0x110005cc
+    mov     r1, #\n
+    str     r1, [r0]
     ldr     r0, =0x20050040
     ldr     r0, [r0]
-    add     r0, r0, #(\n * 0x40000)
+    ldr     r1, =0x110005d4             @ OS_REG2: o endereco que o VOP mostra
+    str     r0, [r1]
+    @ so pinta se for RAM (0x60000000 a 0x9F000000): o VOP pode estar com
+    @ outro endereco, e 64 KB escritos em registradores reiniciam a placa
+    cmp     r0, #0x61000000
+    blo     92f
+    cmp     r0, #0x9F000000
+    bhs     92f
+    bic     r0, r0, #3                  @ o U-Boot deixa o logo desalinhado
+    @ o logo do U-Boot e um BMP de baixo para cima com o VOP espelhado: as
+    @ linhas de baixo da tela ficam ABAIXO do endereco na memoria
+    sub     r0, r0, #(\n * 0x40000)
     mvn     r1, #0
     mov     r2, #0x10000
 91: str     r1, [r0], #4
     subs    r2, r2, #4
     bgt     91b
+92:
 .endm
 
 comeco:
@@ -43,7 +62,44 @@ comeco:
     mrc     p15, 0, r4, c0, c0, 5       @ MPIDR: qual nucleo
     ands    r4, r4, #3
     bne     estacionar
+
+.if DIAGNOSTICO_VOP
+    @ diagnostico de uma passada: guarda o VOP como o U-Boot deixou nos
+    @ GRF_OS_REG livres e reinicia; o Android le com devmem 0x110005cc...
+    ldr     r0, =0x20050000
+    ldr     r2, =0x11000000
+    ldr     r1, [r0, #0x30]             @ WIN0_CTRL0 (baixo) | WIN1_CTRL0 (alto)
+    ldr     r3, [r0, #0x70]
+    bic     r1, r1, #0xFF000000
+    bic     r1, r1, #0x00FF0000
+    orr     r1, r1, r3, lsl #16
+    str     r1, [r2, #0x5cc]
+    ldr     r1, [r0, #0x40]             @ WIN0_YRGB_MST
+    str     r1, [r2, #0x5d4]
+    ldr     r1, [r0, #0x3c]             @ WIN0_VIR
+    str     r1, [r2, #0x5dc]
+    ldr     r1, [r0, #0x48]             @ WIN0_ACT_INFO
+    str     r1, [r2, #0x5e0]
+    ldr     r1, [r0, #0x4c]             @ WIN0_DSP_INFO
+    str     r1, [r2, #0x5e4]
+    ldr     r0, =0x110e01f0             @ CRU_GLB_SRST_FST
+    ldr     r1, =0xfdb9
+    str     r1, [r0]
+1:  b       1b
+.endif
     faixa   1
+
+    @ watchdog da RK322x (0x110A0000, livre: o Android nao usa): ~28 s
+    @ (TORR 15 = 2^31 ciclos do pclk). O Rust alimenta a cada linha do boot
+    @ e no laco principal; se o boot travar, a placa reinicia quente e o
+    @ rastro no GRF_OS_REG1 continua la para o Android ler.
+    ldr     r0, =0x110A0000
+    mov     r1, #0xFF
+    str     r1, [r0, #0x04]             @ TORR (inicial e normal)
+    mov     r1, #0x76
+    str     r1, [r0, #0x0C]             @ CRR: reinicia a contagem
+    mov     r1, #0x01
+    str     r1, [r0]                    @ CR: liga, modo reset
 
     @ ---- HYP -> SVC (o U-Boot pode entregar em HYP) ----
     mrs     r0, cpsr

@@ -127,6 +127,9 @@ impl Fila {
     }
 }
 
+/// A serial respondeu ate agora (ver Uart::enviar).
+static SERIAL_VIVA: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
 pub struct Uart;
 
 impl Uart {
@@ -143,8 +146,20 @@ impl Uart {
         unsafe { write_volatile((regs::BASE + offset) as *mut u32, valor) }
     }
 
+    /// Espera a FIFO com prazo: na TV box a UART2 e do FIQ debugger do
+    /// firmware (desligada no device tree) e pode nunca liberar. Estourou o
+    /// prazo uma vez, a serial e dada como morta e o resto do boot segue.
     pub fn enviar(&mut self, byte: u8) {
+        if !SERIAL_VIVA.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut voltas = 0u32;
         while (self.ler(regs::STATUS) ^ regs::INVERTER) & regs::TX_CHEIO != 0 {
+            voltas += 1;
+            if voltas > 200_000 {
+                SERIAL_VIVA.store(false, Ordering::Relaxed);
+                return;
+            }
             spin_loop();
         }
         self.escrever(regs::TX, byte as u32);

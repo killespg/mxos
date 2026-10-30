@@ -144,9 +144,10 @@ pub fn frequencia_timer() -> u64 {
     if v == 0 { 24_000_000 } else { v as u64 }
 }
 
+/// CNTPCT (contador fisico): o timer da TV box e o fisico (timer.rs).
 pub fn contador() -> u64 {
     let (baixo, alto): (u32, u32);
-    unsafe { asm!("isb", "mrrc p15, 1, {0}, {1}, c14", out(reg) baixo, out(reg) alto, options(nomem, nostack, preserves_flags)) };
+    unsafe { asm!("isb", "mrrc p15, 0, {0}, {1}, c14", out(reg) baixo, out(reg) alto, options(nomem, nostack, preserves_flags)) };
     (alto as u64) << 32 | baixo as u64
 }
 

@@ -77,16 +77,19 @@ pub extern "C" fn kernel_main(el_boot: u64) -> ! {
     mmu::ligar();
     etapa(format_args!("mmu     : ligada"));
     // o heap pula o framebuffer do U-Boot enquanto o console de boot o usa
-    let (inicio_heap, fim_heap) = (mapa::kernel().fim, plataforma::RAM_FIM);
-    match console_boot::faixa() {
-        Some((fb, fim_fb)) if fb > inicio_heap && fim_fb < fim_heap => {
-            heap::iniciar(inicio_heap, fb);
-            heap::acrescentar(fim_fb, fim_heap);
+    let fb = console_boot::faixa();
+    let mut primeiro = true;
+    let pedacos = core::iter::once((mapa::kernel().fim, plataforma::RAM_FIM)).chain(plataforma::RAM_EXTRA.iter().copied());
+    for (inicio, fim) in pedacos {
+        let partes = match fb {
+            Some((a, b)) if a > inicio && b < fim => [(inicio, a), (b, fim)],
+            _ => [(inicio, fim), (fim, fim)],
+        };
+        for (a, b) in partes {
+            if b > a {
+                if core::mem::take(&mut primeiro) { heap::iniciar(a, b) } else { heap::acrescentar(a, b) }
+            }
         }
-        _ => heap::iniciar(inicio_heap, fim_heap),
-    }
-    for &(inicio, fim) in plataforma::RAM_EXTRA {
-        heap::acrescentar(inicio, fim);
     }
     etapa(format_args!("heap    : {} MB livres", heap::estatisticas().livre >> 20));
     etapa(format_args!("irq     : ligando GIC e timer ({} Hz no contador)", cpu::frequencia_timer()));
@@ -204,6 +207,8 @@ mod qemu {
 fn panic(info: &PanicInfo) -> ! {
     let mut console = uart::Uart::new();
     let _ = writeln!(console, "\n*** PÂNICO no kernel: {info}");
+    let linha = info.location().map_or(0, |l| l.line());
+    console_boot::rastro(0xDEAD_0000 | (linha & 0xFFFF), 0);
     let _ = writeln!(console_boot::Erro, "\n*** PÂNICO no kernel: {info}");
     // com a area de trabalho ligada o erro tambem aparece na tela
     excecao::tela_de_erro("PÂNICO NO KERNEL", |painel| write!(painel, "{info}"));

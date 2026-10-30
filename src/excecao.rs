@@ -83,6 +83,7 @@ extern "C" fn tratar_excecao(tipo: u64, esr: u64, elr: u64, far: u64) -> ! {
     let _ = descrever(&mut console, tipo, esr, elr, far);
     let _ = writeln!(console, "Sistema parado.");
     // TV box sem video do MXOS ainda: o relatorio no console de boot
+    crate::console_boot::rastro(0xE000_0000 | (tipo as u32 & 0xFF) << 16 | (esr >> 26) as u32 & 0x3F, elr as u32);
     let mut tela = crate::console_boot::Erro;
     let _ = writeln!(tela, "\n*** EXCEÇÃO DA CPU ***");
     let _ = descrever(&mut tela, tipo, esr, elr, far);

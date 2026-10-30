@@ -42,8 +42,12 @@ pub fn iniciar(console: &mut Uart) {
     cpu::ligar_erros_assincronos(); // erro no GIC/serial aparece na tela
     gic::iniciar();
     gic::habilitar(IRQ_TIMER, false);
-    gic::habilitar(IRQ_SERIAL, IRQ_SERIAL_BORDA);
-    console.ligar_interrupcao_rx();
+    // TV box: a UART2 e do firmware e ninguem liga cabo serial; uma
+    // interrupcao presa nela travaria tudo. Nas outras, entrada pela serial.
+    if !cfg!(feature = "rk322x") {
+        gic::habilitar(IRQ_SERIAL, IRQ_SERIAL_BORDA);
+        console.ligar_interrupcao_rx();
+    }
     timer::iniciar();
     INICIO.store(cpu::contador(), Ordering::Relaxed);
     cpu::ligar_interrupcoes();

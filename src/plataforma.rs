@@ -52,12 +52,15 @@ mod atual {
 mod atual {
     pub const NOME: &str = "TV box Rockchip RK322x (Cortex-A7)";
     /// RAM a partir de 0x60000000 (1 GB). O kernel fica em 0x60200000; o
-    /// heap comeca depois dele.
+    /// heap comeca depois dele. 0x68400000-0x684FFFFF e do firmware seguro
+    /// (OP-TEE): fora da MMU e do heap, senao qualquer acesso (ate a leitura
+    /// adiantada do cache) da erro de barramento. Mapa tirado do /proc/iomem
+    /// do Android da box.
     pub const RAM_INICIO: usize = 0x6000_0000;
-    pub const RAM_FIM: usize = 0x9FE0_0000;
+    pub const RAM_FIM: usize = 0x6840_0000;
     /// GRF, UART, CRU, USB, GMAC, VOP, GIC...
     pub const DISPOSITIVOS: &[(usize, usize)] = &[(0x1000_0000, 0x4000_0000)];
-    pub const RAM_EXTRA: &[(usize, usize)] = &[];
+    pub const RAM_EXTRA: &[(usize, usize)] = &[(0x6850_0000, 0x9FE0_0000)];
     pub const GIC_DISTRIBUIDOR: usize = 0x3201_1000;
     pub const GIC_CPU: usize = 0x3201_2000;
     /// UART2 (a do console) = SPI 57.
@@ -90,4 +93,15 @@ pub fn acertar_rtc(segundos_agora: u64) {
 }
 
 /// Timer virtual do ARM (PPI 11), o mesmo numero nas duas maquinas.
+#[cfg(not(feature = "rk322x"))]
 pub const IRQ_TIMER: u32 = 27;
+/// TV box: timer fisico nao seguro (PPI 14), o unico que o device tree da
+/// box declara e o que o Linux dela usa (o virtual depende de um
+/// deslocamento que so o firmware seguro acerta).
+#[cfg(feature = "rk322x")]
+pub const IRQ_TIMER: u32 = 30;
+
+/// O intervalo [inicio, fim) esta inteiro dentro de um pedaco de RAM?
+pub fn na_ram(inicio: usize, fim: usize) -> bool {
+    core::iter::once(&(RAM_INICIO, RAM_FIM)).chain(RAM_EXTRA).any(|&(a, b)| inicio >= a && fim <= b)
+}

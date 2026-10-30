@@ -15,13 +15,19 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::fonte::{MONO, MONO_ALTURA, MONO_BASE, MONO_LARGURA};
 
 static LIGADO: AtomicBool = AtomicBool::new(false);
+/// Endereco da linha 0 da tela (o YRGB_MST do VOP).
 static BASE: AtomicUsize = AtomicUsize::new(0);
+/// Espelhado na vertical: a linha y fica y passos ABAIXO da base na
+/// memoria (o U-Boot da box mostra o BMP do logo direto, de baixo para cima).
+static ESPELHO: AtomicBool = AtomicBool::new(false);
 static PASSO: AtomicUsize = AtomicUsize::new(0);
 static LARGURA: AtomicUsize = AtomicUsize::new(0);
 static ALTURA: AtomicUsize = AtomicUsize::new(0);
 /// Bytes por pixel: 4 (XRGB), 3 (RGB) ou 2 (RGB565).
 static BPP: AtomicUsize = AtomicUsize::new(0);
 static COLUNA: AtomicUsize = AtomicUsize::new(0);
+/// Quantas vezes algo foi escrito (vai para o registrador de rastro).
+static ESCRITAS: AtomicUsize = AtomicUsize::new(0);
 static LINHA: AtomicUsize = AtomicUsize::new(0);
 
 const MARGEM: usize = 8;
@@ -29,7 +35,7 @@ const COR: u32 = 0x00D0_D0D0;
 const COR_ERRO: u32 = 0x00FF_6060;
 
 #[cfg(feature = "rk322x")]
-fn janela_do_uboot() -> Option<(usize, usize, usize, usize, usize)> {
+fn janela_do_uboot() -> Option<(usize, usize, usize, usize, usize, bool)> {
     use core::ptr::read_volatile;
     const VOP: usize = 0x2005_0000;
     let ler = |r: usize| unsafe { read_volatile((VOP + r) as *const u32) };
@@ -49,32 +55,91 @@ fn janela_do_uboot() -> Option<(usize, usize, usize, usize, usize)> {
         let base = ler(janela + 0x10) as usize;
         let act = ler(janela + 0x18);
         let (largura, altura) = ((act & 0x1FFF) as usize + 1, (act >> 16 & 0x1FFF) as usize + 1);
-        let sane = (320..=4096).contains(&largura) && (200..=2304).contains(&altura) && passo >= largura * bpp;
-        let na_ram = base >= crate::plataforma::RAM_INICIO && base + passo * altura <= crate::plataforma::RAM_FIM;
-        if sane && na_ram {
-            return Some((base, passo, largura, altura, bpp));
+        // o U-Boot da box deixa o logo num endereco impar (0x9dea2136): com a
+        // MMU desligada, escrita desalinhada e falha (e o U-Boot reinicia)
+        let sane = (320..=4096).contains(&largura)
+            && (200..=2304).contains(&altura)
+            && passo >= largura * bpp
+            && base % match bpp { 4 => 4, 2 => 2, _ => 1 } == 0;
+        // Medido na box (2026-10-29): MST 0x9dea2136, passo 3840, 1280x720,
+        // RGB888 = 0x9dc00000 (logo.bmp) + 54 (cabecalho do BMP) + 719
+        // linhas: a imagem esta de baixo para cima e o VOP espelha. Quando
+        // para cima nao cabe na RAM e para baixo cabe, e espelho.
+        let reto = crate::plataforma::na_ram(base, base + passo * altura);
+        let espelho = !reto && base >= (altura - 1) * passo
+            && crate::plataforma::na_ram(base - (altura - 1) * passo, base + passo);
+        if sane && (reto || espelho) {
+            return Some((base, passo, largura, altura, bpp, espelho));
         }
     }
     None
 }
 
 #[cfg(not(feature = "rk322x"))]
-fn janela_do_uboot() -> Option<(usize, usize, usize, usize, usize)> {
+fn janela_do_uboot() -> Option<(usize, usize, usize, usize, usize, bool)> {
     None
+}
+
+/// Rastro para depois de um reset quente: GRF_OS_REG1 e OS_REG2 da RK322x
+/// (o U-Boot so mexe no OS_REG0, a marca de boot). Ler no Android com
+/// `busybox devmem 0x110005cc 32` e `0x110005d4`. 1 a 3 = etapas do
+/// boot_arm.s; 0x100 + n = n-esima escrita no console; 0xDEAD0000 + linha =
+/// panico; 0xE0000000 + tipo = excecao (OS_REG2 = instrucao que falhou).
+pub fn rastro(valor: u32, endereco: u32) {
+    alimentar();
+    #[cfg(feature = "rk322x")]
+    unsafe {
+        core::ptr::write_volatile(0x1100_05CC as *mut u32, valor);
+        if endereco != 0 {
+            core::ptr::write_volatile(0x1100_05D4 as *mut u32, endereco);
+        }
+    }
+    let _ = (valor, endereco);
+}
+
+/// Alimenta o watchdog que o boot_arm.s ligou (~28 s): cada linha do boot e
+/// cada volta do laco principal. Travou, a placa reinicia sozinha.
+pub fn alimentar() {
+    #[cfg(feature = "rk322x")]
+    unsafe {
+        core::ptr::write_volatile(0x110A_000C as *mut u32, 0x76);
+    }
 }
 
 /// Primeira coisa do kernel_main: acha o framebuffer do U-Boot e limpa.
 pub fn iniciar() -> bool {
-    let Some((base, passo, largura, altura, bpp)) = janela_do_uboot() else { return false };
+    let Some((base, passo, largura, altura, bpp, espelho)) = janela_do_uboot() else { return false };
     BASE.store(base, Ordering::Relaxed);
     PASSO.store(passo, Ordering::Relaxed);
     LARGURA.store(largura, Ordering::Relaxed);
     ALTURA.store(altura, Ordering::Relaxed);
     BPP.store(bpp, Ordering::Relaxed);
-    unsafe { core::ptr::write_bytes(base as *mut u8, 0, passo * altura) };
-    crate::mmu::limpar_cache(base, passo * altura);
+    ESPELHO.store(espelho, Ordering::Relaxed);
+    let (inicio, fim) = memoria();
+    unsafe { core::ptr::write_bytes(inicio as *mut u8, 0, fim - inicio) };
+    crate::mmu::limpar_cache(inicio, fim - inicio);
     LIGADO.store(true, Ordering::Release);
     true
+}
+
+/// Endereco do comeco da linha `y` da tela.
+fn linha_tela(y: usize) -> usize {
+    let (base, passo) = (BASE.load(Ordering::Relaxed), PASSO.load(Ordering::Relaxed));
+    if ESPELHO.load(Ordering::Relaxed) { base - y * passo } else { base + y * passo }
+}
+
+/// [inicio, fim) da memoria da imagem inteira.
+fn memoria() -> (usize, usize) {
+    let (passo, altura) = (PASSO.load(Ordering::Relaxed), ALTURA.load(Ordering::Relaxed));
+    let (a, b) = (linha_tela(0), linha_tela(altura - 1));
+    (a.min(b), a.max(b) + passo)
+}
+
+/// Limpa do cache as linhas de pixel [y, y + n) da tela.
+fn mandar_linhas(y: usize, n: usize) {
+    let passo = PASSO.load(Ordering::Relaxed);
+    let (a, b) = (linha_tela(y), linha_tela(y + n - 1));
+    crate::mmu::limpar_cache(a.min(b), a.max(b) - a.min(b) + passo);
 }
 
 /// O video de verdade assumiu (o VOP aponta para outro lugar).
@@ -90,10 +155,7 @@ pub fn ligado() -> bool {
 /// Memoria do framebuffer do U-Boot, que o heap nao pode usar enquanto o
 /// console estiver ligado.
 pub fn faixa() -> Option<(usize, usize)> {
-    ligado().then(|| {
-        let base = BASE.load(Ordering::Relaxed);
-        (base, base + PASSO.load(Ordering::Relaxed) * ALTURA.load(Ordering::Relaxed))
-    })
+    ligado().then(memoria)
 }
 
 fn pixel(endereco: usize, bpp: usize, cor: u32) {
@@ -121,14 +183,16 @@ fn misturar(cor: u32, alfa: u8) -> u32 {
 }
 
 fn limpar_linha(linha: usize) {
-    let (base, passo) = (BASE.load(Ordering::Relaxed), PASSO.load(Ordering::Relaxed));
-    let inicio = base + (MARGEM + linha * MONO_ALTURA as usize) * passo;
-    unsafe { core::ptr::write_bytes(inicio as *mut u8, 0, passo * MONO_ALTURA as usize) };
-    crate::mmu::limpar_cache(inicio, passo * MONO_ALTURA as usize);
+    let largura = LARGURA.load(Ordering::Relaxed) * BPP.load(Ordering::Relaxed);
+    let y0 = MARGEM + linha * MONO_ALTURA as usize;
+    for y in y0..y0 + MONO_ALTURA as usize {
+        unsafe { core::ptr::write_bytes(linha_tela(y) as *mut u8, 0, largura) };
+    }
+    mandar_linhas(y0, MONO_ALTURA as usize);
 }
 
 fn caractere(c: char, coluna: usize, linha: usize, cor: u32) {
-    let (base, passo, bpp) = (BASE.load(Ordering::Relaxed), PASSO.load(Ordering::Relaxed), BPP.load(Ordering::Relaxed));
+    let bpp = BPP.load(Ordering::Relaxed);
     let g = MONO.glifo(c);
     let x0 = (MARGEM + coluna * MONO_LARGURA as usize) as i32 + g.dx;
     let y0 = (MARGEM + linha * MONO_ALTURA as usize) as i32 + MONO_BASE - g.dy;
@@ -137,7 +201,7 @@ fn caractere(c: char, coluna: usize, linha: usize, cor: u32) {
             let a = g.alfa(x, y);
             let (px, py) = (x0 + x, y0 + y);
             if a != 0 && px >= 0 && py >= 0 {
-                pixel(base + py as usize * passo + px as usize * bpp, bpp, misturar(cor, a));
+                pixel(linha_tela(py as usize) + px as usize * bpp, bpp, misturar(cor, a));
             }
         }
     }
@@ -145,10 +209,8 @@ fn caractere(c: char, coluna: usize, linha: usize, cor: u32) {
 
 fn nova_linha() {
     let linhas = (ALTURA.load(Ordering::Relaxed) - 2 * MARGEM) / MONO_ALTURA as usize;
-    let (base, passo) = (BASE.load(Ordering::Relaxed), PASSO.load(Ordering::Relaxed));
     let linha = LINHA.load(Ordering::Relaxed);
-    let topo = base + (MARGEM + linha * MONO_ALTURA as usize) * passo;
-    crate::mmu::limpar_cache(topo, passo * MONO_ALTURA as usize);
+    mandar_linhas(MARGEM + linha * MONO_ALTURA as usize, MONO_ALTURA as usize);
     // tela cheia: volta para cima, apagando sempre a linha seguinte
     let proxima = (linha + 1) % linhas.max(1);
     limpar_linha(proxima);
@@ -158,6 +220,10 @@ fn nova_linha() {
 }
 
 fn escrever_com(texto: &str, cor: u32) {
+    let n = ESCRITAS.fetch_add(1, Ordering::Relaxed) + 1;
+    if cor == COR {
+        rastro(0x100 + n as u32, 0);
+    }
     if !ligado() {
         return;
     }
@@ -177,9 +243,7 @@ fn escrever_com(texto: &str, cor: u32) {
         }
     }
     // a linha atual tambem tem de chegar a memoria para o VOP ver
-    let (base, passo) = (BASE.load(Ordering::Relaxed), PASSO.load(Ordering::Relaxed));
-    let topo = base + (MARGEM + LINHA.load(Ordering::Relaxed) * MONO_ALTURA as usize) * passo;
-    crate::mmu::limpar_cache(topo, passo * MONO_ALTURA as usize);
+    mandar_linhas(MARGEM + LINHA.load(Ordering::Relaxed) * MONO_ALTURA as usize, MONO_ALTURA as usize);
 }
 
 pub fn escrever(texto: &str) {

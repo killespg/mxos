@@ -45,30 +45,32 @@ fn escrever_controle(valor: u64) {
     unsafe { asm!("msr cntv_ctl_el0, {}", "isb", in(reg) valor, options(nostack, preserves_flags)) }
 }
 
-// ARMv7: os mesmos registradores do timer virtual pelo CP15
+// ARMv7 (TV box): o timer FISICO nao seguro pelo CP15 (CNTP_CVAL/CNTP_CTL),
+// o do device tree da box; o virtual depende do CNTVOFF, que so o firmware
+// seguro acerta.
 #[cfg(target_arch = "arm")]
 fn escrever_alvo(valor: u64) {
     let (baixo, alto) = (valor as u32, (valor >> 32) as u32);
-    unsafe { asm!("mcrr p15, 3, {0}, {1}, c14", "isb", in(reg) baixo, in(reg) alto, options(nostack, preserves_flags)) }
+    unsafe { asm!("mcrr p15, 2, {0}, {1}, c14", "isb", in(reg) baixo, in(reg) alto, options(nostack, preserves_flags)) }
 }
 
 #[cfg(target_arch = "arm")]
 fn ler_alvo() -> u64 {
     let (baixo, alto): (u32, u32);
-    unsafe { asm!("mrrc p15, 3, {0}, {1}, c14", out(reg) baixo, out(reg) alto, options(nomem, nostack, preserves_flags)) };
+    unsafe { asm!("mrrc p15, 2, {0}, {1}, c14", out(reg) baixo, out(reg) alto, options(nomem, nostack, preserves_flags)) };
     (alto as u64) << 32 | baixo as u64
 }
 
 #[cfg(target_arch = "arm")]
 fn ler_controle() -> u64 {
     let valor: u32;
-    unsafe { asm!("mrc p15, 0, {0}, c14, c3, 1", out(reg) valor, options(nomem, nostack, preserves_flags)) };
+    unsafe { asm!("mrc p15, 0, {0}, c14, c2, 1", out(reg) valor, options(nomem, nostack, preserves_flags)) };
     valor as u64
 }
 
 #[cfg(target_arch = "arm")]
 fn escrever_controle(valor: u64) {
-    unsafe { asm!("mcr p15, 0, {0}, c14, c3, 1", "isb", in(reg) valor as u32, options(nostack, preserves_flags)) }
+    unsafe { asm!("mcr p15, 0, {0}, c14, c2, 1", "isb", in(reg) valor as u32, options(nostack, preserves_flags)) }
 }
 
 /// Liga o timer: primeiro tique daqui a um periodo.
