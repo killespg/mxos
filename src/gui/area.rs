@@ -58,8 +58,27 @@ const LADO_ICONE_ATALHO: i32 = 42;
 const COR_NOME_ATALHO: Cor = 0x00FF_FFFF;
 const SOMBRA_NOME_ATALHO: Cor = 0x0010_1418;
 
-/// Cria um app novo (entrada do menu iniciar ou atalho).
-pub type Criador = fn() -> Box<dyn App>;
+/// Cria um app novo (entrada do menu iniciar ou atalho): um app do
+/// sistema ou um pacote instalado (pacotes.rs), que roda como processo e
+/// abre a propria janela.
+#[derive(Clone)]
+pub enum Criador {
+    Sistema(fn() -> Box<dyn App>),
+    Pacote(String),
+}
+
+impl Criador {
+    /// O app para abrir numa janela (None: o pacote abriu sozinho).
+    pub fn criar(&self) -> Option<Box<dyn App>> {
+        match self {
+            Criador::Sistema(f) => Some(f()),
+            Criador::Pacote(id) => match crate::pacotes::abrir(id, "") {
+                Ok(_) => None,
+                Err(e) => Some(super::apps::aviso::criar("Não abriu", &e)),
+            },
+        }
+    }
+}
 
 /// Clareia cada canal de `cor` em `quanto` (satura em 255).
 pub fn clarear(cor: Cor, quanto: u32) -> Cor {
@@ -578,7 +597,7 @@ fn desenhar_logo(s: &mut Superficie, r: Retangulo, cor: Cor, t: &Tema) {
 
 /// Uma entrada do menu iniciar.
 struct ItemMenu {
-    nome: &'static str,
+    nome: String,
     icone: Option<Icone>,
     criar: Criador,
 }
@@ -601,8 +620,8 @@ impl MenuIniciar {
     }
 
     /// Entrada nova no fim do menu (sem icone: um quadradinho no lugar).
-    pub fn adicionar(&mut self, nome: &'static str, icone: Option<Icone>, criar: Criador) {
-        self.itens.push(ItemMenu { nome, icone, criar });
+    pub fn adicionar(&mut self, nome: &str, icone: Option<Icone>, criar: Criador) {
+        self.itens.push(ItemMenu { nome: String::from(nome), icone, criar });
         self.superficie = None; // o tamanho mudou
         self.sujo = true;
     }
@@ -658,9 +677,21 @@ impl MenuIniciar {
         true
     }
 
+    /// Troca as entradas dos pacotes instalados (nome, icone, id) pelas de
+    /// `pacotes`, no fim do menu.
+    pub fn trocar_pacotes(&mut self, pacotes: Vec<(String, Icone, String)>) {
+        self.itens.retain(|i| !matches!(i.criar, Criador::Pacote(_)));
+        for (nome, icone, id) in pacotes {
+            self.itens.push(ItemMenu { nome, icone: Some(icone), criar: Criador::Pacote(id) });
+        }
+        self.superficie = None;
+        self.sujo = true;
+        self.destacado = None;
+    }
+
     /// O app do item em (x, y), se houver.
     pub fn item_em(&self, x: i32, y: i32) -> Option<Criador> {
-        self.indice_em(x, y).map(|i| self.itens[i].criar)
+        self.indice_em(x, y).map(|i| self.itens[i].criar.clone())
     }
 
     /// Refaz o desenho se mudou. Devolve true se refez.
@@ -707,7 +738,7 @@ impl MenuIniciar {
                 // sem icone: um quadradinho no lugar
                 None => s.retangulo(Retangulo::novo(linha.x + 10, y + (ALTURA_ITEM - 8) / 2, 8, 8), if destacado { frente } else { t.destaque }),
             }
-            let nome = fonte::encurtar(item.nome, linha.largura - 38, &INTER);
+            let nome = fonte::encurtar(&item.nome, linha.largura - 38, &INTER);
             widgets::texto_na_faixa(s, linha.x + 38, linha, &nome, frente, &INTER);
         }
         s.contorno(area, t.borda, 1);
@@ -727,7 +758,7 @@ impl MenuIniciar {
 /// Um icone da area de trabalho e o desenho pronto da celula dele (com o
 /// papel de parede embaixo, para nao precisar de transparencia).
 struct Atalho {
-    nome: &'static str,
+    nome: String,
     icone: Icone,
     criar: Criador,
     desenho: Superficie,
@@ -751,9 +782,9 @@ impl Atalhos {
     }
 
     /// Acrescenta um atalho no fim da coluna. Devolve a celula dele.
-    pub fn adicionar(&mut self, nome: &'static str, icone: Icone, criar: Criador) -> Retangulo {
+    pub fn adicionar(&mut self, nome: &str, icone: Icone, criar: Criador) -> Retangulo {
         let desenho = Superficie::nova(LARGURA_ATALHO as usize, ALTURA_ATALHO as usize, 0);
-        self.itens.push(Atalho { nome, icone, criar, desenho, sujo: true });
+        self.itens.push(Atalho { nome: String::from(nome), icone, criar, desenho, sujo: true });
         self.retangulo(self.itens.len() - 1)
     }
 
@@ -820,12 +851,12 @@ impl Atalhos {
     /// o app para abrir.
     pub fn clicar(&mut self, i: usize) -> Option<Criador> {
         let duplo = self.duplo.apertar(i);
-        self.itens.get(i).filter(|_| duplo).map(|a| a.criar)
+        self.itens.get(i).filter(|_| duplo).map(|a| a.criar.clone())
     }
 
     /// Os apps dos atalhos escolhidos (Enter na area de trabalho abre todos).
     pub fn criadores_escolhidos(&self) -> Vec<Criador> {
-        (0..self.itens.len()).filter(|&i| self.escolhido(i)).map(|i| self.itens[i].criar).collect()
+        (0..self.itens.len()).filter(|&i| self.escolhido(i)).map(|i| self.itens[i].criar.clone()).collect()
     }
 
     /// Tudo precisa ser redesenhado (trocou o tema ou o papel de parede).
@@ -872,7 +903,7 @@ fn desenhar_atalho(a: &mut Atalho, r: Retangulo, escolhido: bool, sob: bool, alt
     let lado = LADO_ICONE_ATALHO;
     super::icones::icone_app(s, (LARGURA_ATALHO - lado) / 2, TOPO_ICONE_ATALHO, a.icone, lado);
     let _ = ESCALA_ATALHO;
-    let nome = fonte::encurtar(a.nome, LARGURA_ATALHO - 8, &INTER);
+    let nome = fonte::encurtar(&a.nome, LARGURA_ATALHO - 8, &INTER);
     let x = (LARGURA_ATALHO - INTER.largura(&nome)) / 2;
     let base = TOPO_ICONE_ATALHO + lado + 5 + INTER.ascendente;
     s.texto_com(x + 1, base + 1, &nome, SOMBRA_NOME_ATALHO, &INTER);

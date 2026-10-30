@@ -363,3 +363,85 @@ pub fn montar_pilha(
     espaco.escrever(sp, &bytes).map_err(|_| "pilha pequena demais")?;
     Ok(sp)
 }
+
+// ---------------------------------------------------------- apps do MXOS
+
+/// Maquina do ELF que esta arquitetura roda (40 = ARM, 183 = AArch64) e a
+/// classe (1 = 32 bits, 2 = 64 bits).
+#[cfg(target_arch = "arm")]
+const APP_MAQUINA: (u16, u8) = (40, 1);
+#[cfg(target_arch = "aarch64")]
+const APP_MAQUINA: (u16, u8) = (183, 2);
+
+/// Os PT_LOAD de um ELF de 32 ou 64 bits.
+fn segmentos_app(d: &[u8], classe: u8) -> Option<Vec<Segmento>> {
+    let (phoff, phentsize, phnum) = if classe == 1 {
+        (u32_em(d, 28)? as usize, u16_em(d, 42)? as usize, u16_em(d, 44)? as usize)
+    } else {
+        (u64_em(d, 32)?, u16_em(d, 54)? as usize, u16_em(d, 56)? as usize)
+    };
+    if phnum > 64 || phentsize < if classe == 1 { 32 } else { 56 } {
+        return None;
+    }
+    (0..phnum)
+        .map(|i| {
+            let b = phoff.checked_add(i * phentsize)?;
+            Some(if classe == 1 {
+                Segmento {
+                    tipo: u32_em(d, b)?,
+                    offset: u32_em(d, b + 4)? as usize,
+                    vaddr: u32_em(d, b + 8)? as usize,
+                    filesz: u32_em(d, b + 16)? as usize,
+                    memsz: u32_em(d, b + 20)? as usize,
+                    flags: u32_em(d, b + 24)?,
+                }
+            } else {
+                Segmento {
+                    tipo: u32_em(d, b)?,
+                    flags: u32_em(d, b + 4)?,
+                    offset: u64_em(d, b + 8)?,
+                    vaddr: u64_em(d, b + 16)?,
+                    filesz: u64_em(d, b + 32)?,
+                    memsz: u64_em(d, b + 40)?,
+                }
+            })
+        })
+        .collect()
+}
+
+/// Carrega o programa de um app (ELF estatico desta arquitetura, feito com
+/// o sdk/). Devolve (entrada, fim do ultimo segmento).
+pub fn carregar_app(d: &[u8], espaco: &mut Espaco) -> Result<(usize, usize), &'static str> {
+    if d.len() < 52 || &d[..4] != b"\x7fELF" {
+        return Err("não é um programa ELF");
+    }
+    let (maquina, classe) = APP_MAQUINA;
+    if d[4] != classe || d[5] != 1 || u16_em(d, 18) != Some(maquina) {
+        return Err("programa de outra arquitetura (o pacote não tem a versão desta máquina)");
+    }
+    if u16_em(d, 16) != Some(2) {
+        return Err("o app tem de ser um executável estático");
+    }
+    let segs = segmentos_app(d, classe).ok_or("cabeçalhos do ELF quebrados")?;
+    if segs.iter().any(|s| s.tipo == PT_INTERP) {
+        return Err("o app tem de ser estático (sem interpretador)");
+    }
+    let mut fim = 0;
+    for s in segs.iter().filter(|s| s.tipo == PT_LOAD && s.memsz > 0) {
+        if s.filesz > s.memsz || s.offset.checked_add(s.filesz).is_none_or(|f| f > d.len()) {
+            return Err("segmento do ELF passa do fim do arquivo");
+        }
+        let permissao = match (s.flags & PF_W != 0, s.flags & PF_X != 0) {
+            (true, true) => Permissao::Tudo,
+            (true, false) => Permissao::Dados,
+            (false, true) => Permissao::Codigo,
+            (false, false) => Permissao::Leitura,
+        };
+        let ultimo = s.vaddr.checked_add(s.memsz).ok_or("endereço inválido")?;
+        espaco.mapear_faixa(s.vaddr, ultimo, permissao).map_err(|_| "o app quer memória fora da área dele")?;
+        espaco.escrever_forcado(s.vaddr, &d[s.offset..s.offset + s.filesz]).map_err(|_| "não deu para copiar o app")?;
+        fim = fim.max(ultimo);
+    }
+    let entrada = if classe == 1 { u32_em(d, 24).unwrap_or(0) as usize } else { u64_em(d, 24).unwrap_or(0) };
+    Ok((entrada, fim))
+}

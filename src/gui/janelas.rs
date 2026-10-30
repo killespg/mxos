@@ -96,6 +96,8 @@ pub enum Pedido {
     DefinirLayout(Layout),
     /// O tema ou a aparencia mudaram: redesenha tudo.
     TemaMudou,
+    /// Um pacote foi instalado ou removido (Loja): refaz o menu.
+    PacotesMudaram,
 }
 
 /// Fotografia de uma janela (gerenciador de tarefas, comando "tarefas").
@@ -903,6 +905,7 @@ impl Gerenciador {
                 self.abrir_em_cascata(apps::abrir_arquivo(&caminho));
             }
             Pedido::TemaMudou => self.redesenhar_tudo(),
+            Pedido::PacotesMudaram => self.atualizar_pacotes(),
             externo @ Pedido::DefinirLayout(_) => self.externos.push(externo),
         }
     }
@@ -1008,8 +1011,8 @@ impl Gerenciador {
             // no papel de parede: comeca a selecao em area
             self.selecao = Some(Selecao { inicio: (x, y), r: Retangulo::default() });
         }
-        if let Some(criar) = alvo.and_then(|i| self.atalhos.clicar(i)) {
-            self.abrir_em_cascata(criar());
+        if let Some(app) = alvo.and_then(|i| self.atalhos.clicar(i)).and_then(|c| c.criar()) {
+            self.abrir_em_cascata(app);
         }
     }
 
@@ -1142,8 +1145,8 @@ impl Gerenciador {
         let no_iniciar = self.barra.alvo_em(x, y) == Some(AlvoBarra::Iniciar);
         let criar = self.menu.item_em(x, y);
         self.fechar_menu();
-        if let Some(criar) = criar {
-            self.abrir_em_cascata(criar());
+        if let Some(app) = criar.and_then(|c| c.criar()) {
+            self.abrir_em_cascata(app);
         }
         dentro || no_iniciar
     }
@@ -1290,8 +1293,8 @@ impl Gerenciador {
                 self.enviar(id, e);
             }
             None if e == EventoApp::Caractere(ENTER as char) && tema::aparencia().icones => {
-                for criar in self.atalhos.criadores_escolhidos() {
-                    self.abrir_em_cascata(criar());
+                for app in self.atalhos.criadores_escolhidos().iter().filter_map(Criador::criar) {
+                    self.abrir_em_cascata(app);
                 }
             }
             None => {}
@@ -1497,25 +1500,34 @@ impl Gerenciador {
 
     /// Entrada nova no menu iniciar (sem icone).
     #[allow(dead_code)] // os apps do MXOS entram com icone (registrar_app)
-    pub fn registrar_no_menu(&mut self, nome: &'static str, criar: Criador) {
-        self.registrar_menu(nome, None, criar);
+    pub fn registrar_no_menu(&mut self, nome: &'static str, criar: fn() -> Box<dyn App>) {
+        self.registrar_menu(nome, None, Criador::Sistema(criar));
     }
 
     /// Entrada nova no menu iniciar, com o icone na frente do nome.
-    pub fn registrar_app(&mut self, nome: &'static str, icone: Icone, criar: Criador) {
-        self.registrar_menu(nome, Some(icone), criar);
+    pub fn registrar_app(&mut self, nome: &'static str, icone: Icone, criar: fn() -> Box<dyn App>) {
+        self.registrar_menu(nome, Some(icone), Criador::Sistema(criar));
     }
 
-    fn registrar_menu(&mut self, nome: &'static str, icone: Option<Icone>, criar: Criador) {
+    fn registrar_menu(&mut self, nome: &str, icone: Option<Icone>, criar: Criador) {
         self.menu.adicionar(nome, icone, criar);
         if self.menu.aberto() {
             self.fechar_menu(); // o tamanho mudou: fecha para nao sobrar lixo
         }
     }
 
+    /// Poe no menu iniciar os apps instalados (pacotes .mxa).
+    pub fn atualizar_pacotes(&mut self) {
+        let lista = crate::pacotes::instalados().into_iter().map(|m| (m.nome.clone(), crate::pacotes::icone(&m.icone), m.id)).collect();
+        self.menu.trocar_pacotes(lista);
+        if self.menu.aberto() {
+            self.fechar_menu();
+        }
+    }
+
     /// Atalho novo na coluna de icones da area de trabalho.
-    pub fn registrar_atalho(&mut self, nome: &'static str, icone: Icone, criar: Criador) {
-        let celula = self.atalhos.adicionar(nome, icone, criar);
+    pub fn registrar_atalho(&mut self, nome: &'static str, icone: Icone, criar: fn() -> Box<dyn App>) {
+        let celula = self.atalhos.adicionar(nome, icone, Criador::Sistema(criar));
         self.sujar(celula);
     }
 

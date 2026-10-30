@@ -18,6 +18,7 @@
 pub mod arquivos;
 pub mod arvore;
 pub mod atualizar;
+pub mod aviso;
 pub mod calculadora;
 pub mod chip8;
 pub mod configuracoes;
@@ -28,6 +29,7 @@ pub mod filme;
 pub mod janela_app;
 pub mod janela_x;
 pub mod linux;
+pub mod loja;
 pub mod multiterminal;
 pub mod navegador;
 pub mod pintura;
@@ -61,6 +63,7 @@ pub fn registrar_apps_basicos(g: &mut Gerenciador) {
     g.registrar_app("Pintura", Icone::Pincel, criar_pintura);
     g.registrar_app("CHIP-8", Icone::Monitor, chip8::criar);
     g.registrar_app("Quiosque", Icone::Monitor, quiosque::criar);
+    g.registrar_app("Loja", Icone::Casa, loja::criar);
     g.registrar_app("Atualizar o sistema", Icone::Engrenagem, atualizar::criar);
     g.registrar_app("Sobre o MXOS", Icone::Info, criar_sobre);
 }
@@ -73,6 +76,7 @@ pub fn registrar_atalhos(g: &mut Gerenciador) {
         g.registrar_atalho("NetSurf", Icone::Navegador, linux::criar_netsurf);
     }
     g.registrar_atalho(terminal::TITULO, Icone::Terminal, terminal::criar);
+    g.registrar_atalho("Loja", Icone::Casa, loja::criar);
     g.registrar_atalho("Tarefas", Icone::Tarefas, tarefas::criar);
     g.registrar_atalho("Configurações", Icone::Engrenagem, configuracoes::criar);
 }
@@ -81,6 +85,9 @@ pub fn registrar_atalhos(g: &mut Gerenciador) {
 /// navegador, o resto no editor de texto.
 pub fn abrir_arquivo(caminho: &str) -> Box<dyn App> {
     let minusculo = caminho.to_ascii_lowercase();
+    if minusculo.ends_with(".mxa") {
+        return loja::abrir_arquivo(caminho);
+    }
     if minusculo.ends_with(".ch8") || minusculo.ends_with(".c8") {
         return chip8::abrir(caminho);
     }

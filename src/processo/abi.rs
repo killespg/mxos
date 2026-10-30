@@ -46,6 +46,9 @@ pub const HTTP_LER: u64 = 21;
 pub const SOM: u64 = 22;
 pub const ARGUMENTOS: u64 = 23;
 pub const TELA: u64 = 24;
+pub const TEMA: u64 = 25;
+pub const COPIAR: u64 = 26;
+pub const COLAR: u64 = 27;
 
 pub const ERRO_INVALIDO: i64 = -1;
 pub const ERRO_NAO_EXISTE: i64 = -2;
@@ -107,7 +110,7 @@ fn ler(t: &Tabela, i: usize, ptr: u64, n: u64, limite: usize) -> Result<Vec<u8>,
 }
 
 fn texto(t: &Tabela, i: usize, ptr: u64, n: u64) -> Result<String, i64> {
-    String::from_utf8(ler(t, i, ptr, n, 4096)?).map_err(|_| ERRO_INVALIDO)
+    String::from_utf8(ler(t, i, ptr, n, 1 << 20)?).map_err(|_| ERRO_INVALIDO)
 }
 
 fn escrever(t: &mut Tabela, i: usize, ptr: u64, dados: &[u8]) -> Result<(), i64> {
@@ -251,18 +254,19 @@ fn despachar(t: &mut Tabela, i: usize, numero: u64, a: [u64; 6]) -> Fim {
             Ok(0)
         }
         HTTP_PEDIR => http_pedir(t, i, a),
-        HTTP_ESTADO => match t.processos[i].app.http.get(&(a[0] as u32)) {
-            None => Err(ERRO_INVALIDO),
-            Some(p) => match &p.resposta {
-                None => Ok(0),
-                Some(Ok((status, corpo))) => {
-                    // status nos 16 bits de baixo, tamanho em cima (ate 2 GB)
-                    let _ = status;
-                    Ok(corpo.len() as i64)
-                }
-                Some(Err(_)) => Err(ERRO_REDE),
-            },
-        },
+        // 0 = ainda baixando; pronto = bit 62 | status << 32 | tamanho;
+        // negativo = erro (sempre 64 bits: r0 e r1 no ARMv7)
+        HTTP_ESTADO => {
+            let v = match t.processos[i].app.http.get(&(a[0] as u32)) {
+                None => ERRO_INVALIDO as u64,
+                Some(p) => match &p.resposta {
+                    None => 0,
+                    Some(Ok((status, corpo))) => 1 << 62 | (*status as u64 & 0x3FFF_FFFF) << 32 | corpo.len() as u64 & 0xFFFF_FFFF,
+                    Some(Err(_)) => ERRO_REDE as u64,
+                },
+            };
+            return Fim::Valor64(v);
+        }
         HTTP_LER => {
             let id = a[0] as u32;
             let Some(p) = t.processos[i].app.http.get_mut(&id) else { return Fim::Valor(ERRO_INVALIDO) };
@@ -290,6 +294,24 @@ fn despachar(t: &mut Tabela, i: usize, numero: u64, a: [u64; 6]) -> Fim {
         TELA => {
             let (l, h) = crate::gui::tema::tamanho_da_tela();
             return Fim::Valor64((l as u64) | (h as u64) << 32);
+        }
+        TEMA => {
+            // o nome do tema da area de trabalho ("Grafite", ...)
+            let nome = crate::gui::tema::nome_atual().unwrap_or("");
+            let n = (a[1] as usize).min(nome.len());
+            escrever(t, i, a[0], &nome.as_bytes()[..n]).map(|_| nome.len() as i64)
+        }
+        COPIAR => match texto(t, i, a[0], a[1].min(1 << 20)) {
+            Ok(s) => {
+                crate::gui::transferencia::copiar(&s);
+                Ok(0)
+            }
+            Err(e) => Err(e),
+        },
+        COLAR => {
+            let s = crate::gui::transferencia::texto();
+            let n = (a[1] as usize).min(s.len());
+            escrever(t, i, a[0], &s.as_bytes()[..n]).map(|_| s.len() as i64)
         }
         _ => Err(ERRO_DESCONHECIDA),
     };

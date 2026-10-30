@@ -8,7 +8,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::arquivos::{juntar, nome_do_caminho, normalizar};
+use crate::gui::barra::{juntar, nome_do_caminho, normalizar};
 use crate::armazenamento;
 use crate::gui::grafico::{self, Retangulo, Superficie};
 use crate::gui::tema::Tema;

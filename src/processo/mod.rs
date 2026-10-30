@@ -1147,6 +1147,30 @@ pub fn executar(comando: &str, argumentos: &[&str], primeiro_plano: bool) -> Res
     })
 }
 
+/// Abre um app do MXOS: o programa `caminho` (ELF estatico desta
+/// arquitetura, do pacote .mxa instalado) como processo com a ABI do MXOS
+/// (abi.rs). `argumentos` chega ao app pela chamada ARGUMENTOS.
+pub fn abrir_app(nome: &str, caminho: &str, argumentos: &str) -> Result<u32, String> {
+    let dados = armazenamento::ler(caminho).map_err(|e| format!("{caminho}: {}", e.descricao()))?;
+    liberar_registradores_el0();
+    com(|t| {
+        let asid = t.asid_para_novo().ok_or_else(|| String::from("processos demais"))?;
+        let mut espaco = Espaco::novo(asid);
+        let (entrada, fim) = elf::carregar_app(&dados, &mut espaco).map_err(|e| format!("{caminho}: {e}"))?;
+        espaco.mapear_faixa(TOPO_PILHA - TAMANHO_PILHA, TOPO_PILHA, Permissao::Dados).map_err(|_| String::from("sem memória para a pilha"))?;
+        espaco.brk_inicio = fim.next_multiple_of(PAGINA);
+        espaco.brk = espaco.brk_inicio;
+        let contexto = Contexto::novo(entrada, TOPO_PILHA - 16);
+        let pid = t.acrescentar(0, String::from(nome), contexto, espaco);
+        let i = t.processos.len() - 1;
+        let p = &mut t.processos[i];
+        p.mxos = true;
+        p.exe = String::from(caminho);
+        p.app.argumentos = argumentos.as_bytes().to_vec();
+        Ok(pid)
+    })
+}
+
 /// Explica um errno do executar.
 fn motivo_de_erro(errno: i64, caminho: &str) -> String {
     match errno {

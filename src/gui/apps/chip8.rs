@@ -15,7 +15,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::arquivos::nome_do_caminho;
+use crate::gui::barra::nome_do_caminho;
 use crate::audio::dsp;
 use crate::chip8::{self, Chip8};
 use crate::cpu;

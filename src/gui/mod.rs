@@ -19,6 +19,7 @@
 pub mod apps;
 pub mod realce;
 pub mod area;
+pub mod barra;
 pub mod cursor;
 pub mod grafico;
 pub mod icones;
@@ -71,6 +72,7 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
     apps::registrar_apps_basicos(&mut gerenciador);
     gerenciador.registrar_app(terminal::TITULO, Icone::Terminal, terminal::criar);
     apps::registrar_atalhos(&mut gerenciador);
+    gerenciador.atualizar_pacotes();
     // programas de Linux com janela falam X11 em /tmp/.X11-unix/X0
     x11::iniciar(largura, altura);
     // os outros nucleos rodam processos; daqui em diante o nucleo 0 tem a

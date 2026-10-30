@@ -33,7 +33,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::arquivos::{
+use crate::gui::barra::{
     ALTURA_BARRA, ALTURA_ESTADO, BotaoBarra, ESPACO, MARGEM, acao_em, barra_estado, botoes_dialogo, contagem, cor_barra,
     desenhar_aviso, desenhar_botao, evento_campo, largura_botao, nome_do_caminho, normalizar, pai_do_caminho,
     pintar_barra, tamanho_texto,

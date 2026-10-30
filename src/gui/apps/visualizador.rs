@@ -11,7 +11,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::arquivos::nome_do_caminho;
+use crate::gui::barra::nome_do_caminho;
 use crate::armazenamento::{self, Abertura};
 use crate::audio::dsp;
 use crate::cpu;

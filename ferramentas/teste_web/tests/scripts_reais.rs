@@ -109,3 +109,11 @@ fn relogio() -> f64 {
     static INICIO: OnceLock<Instant> = OnceLock::new();
     INICIO.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
 }
+
+/// Os scripts de um site so: SITE=https://... cargo test --test scripts_reais um_site -- --nocapture
+#[test]
+fn um_site() {
+    if let Ok(u) = std::env::var("SITE") {
+        rodar("site", &u);
+    }
+}

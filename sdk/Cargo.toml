@@ -1,0 +1,11 @@
+[package]
+name = "mxos"
+version = "0.1.0"
+edition = "2024"
+description = "Kit de desenvolvimento dos apps nativos do MXOS (pacotes .mxa)"
+license-file = "LICENCA.md"
+
+[lib]
+path = "src/lib.rs"
+test = false
+bench = false

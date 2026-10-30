@@ -50,3 +50,63 @@ pub fn fontes() -> web::fonte::Fontes {
     f
 }
 pub mod render;
+
+// ------------------------------------------------ pacotes .mxa (pacotes.rs)
+
+#[allow(dead_code)]
+#[path = "../../../src/pacotes.rs"]
+pub mod pacotes;
+
+/// So o que o pacotes.rs usa do disco: sem disco nenhum.
+pub mod armazenamento {
+    use alloc::vec::Vec;
+
+    #[derive(Debug)]
+    pub struct Erro;
+
+    impl Erro {
+        pub fn descricao(&self) -> &'static str {
+            "sem disco no teste"
+        }
+    }
+
+    pub struct ItemPasta {
+        pub nome: alloc::string::String,
+        pub pasta: bool,
+    }
+
+    pub fn montado() -> bool {
+        false
+    }
+    pub fn ler(_: &str) -> Result<Vec<u8>, Erro> {
+        Err(Erro)
+    }
+    pub fn escrever(_: &str, _: &[u8]) -> Result<(), Erro> {
+        Err(Erro)
+    }
+    pub fn listar(_: &str) -> Result<Vec<ItemPasta>, Erro> {
+        Err(Erro)
+    }
+    pub fn criar_pasta(_: &str) -> Result<(), Erro> {
+        Err(Erro)
+    }
+    pub fn apagar(_: &str) -> Result<(), Erro> {
+        Err(Erro)
+    }
+}
+
+pub mod gui {
+    pub mod widgets {
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        pub enum Icone {
+            Pasta, Arquivo, Texto, Html, Disco, Rede, Terminal, Navegador, Engrenagem, Tarefas, Chip, Pincel,
+            Calculadora, Info, Teclado, Monitor, Som,
+        }
+    }
+}
+
+pub mod processo {
+    pub fn abrir_app(_: &str, _: &str, _: &str) -> Result<u32, alloc::string::String> {
+        Err(alloc::string::String::from("sem processos no teste"))
+    }
+}
