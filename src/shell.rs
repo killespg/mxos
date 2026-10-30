@@ -98,6 +98,18 @@ impl Shell {
         Shell::montar(Terminal::so_console(console), el_boot, psci)
     }
 
+    /// Shell da depuracao remota: a saida fica no Terminal::captura.
+    pub fn remoto() -> Shell {
+        let el_boot = EL_BOOT.load(Ordering::Relaxed) as u64;
+        let psci = if cfg!(any(feature = "mxq", feature = "rk322x")) || el_boot >= 2 { Via::Smc } else { Via::Hvc };
+        Shell::montar(Terminal::captura(), el_boot, psci)
+    }
+
+    /// Roda uma linha de comando (a depuracao remota).
+    pub fn rodar_linha(&mut self, linha: &str) {
+        self.executar(linha.trim());
+    }
+
     fn montar(terminal: Terminal, el_boot: u64, psci: Via) -> Shell {
         Shell {
             console: terminal,
@@ -847,6 +859,7 @@ impl Shell {
 fn processar_fundo() {
     crate::rede::processar();
     crate::nas::atender();
+    crate::depuracao::atender();
 }
 
 

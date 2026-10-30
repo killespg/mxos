@@ -14,6 +14,7 @@ mod chip8;
 mod config;
 mod console_boot;
 mod cpu;
+mod depuracao;
 mod cripto;
 mod drivers;
 mod entrada;

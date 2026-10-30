@@ -222,6 +222,11 @@ fn pagina_inicial() -> String {
     motor::normalizar_url(url)
 }
 
+/// O navegador ja nesta pagina (a depuracao remota usa).
+pub fn abrir_em(url: &str) -> Box<dyn App> {
+    Box::new(Navegador::novo(&motor::normalizar_url(url)))
+}
+
 /// Para o menu iniciar: abre a pagina inicial.
 pub fn criar() -> Box<dyn App> {
     Box::new(Navegador::novo(&pagina_inicial()))

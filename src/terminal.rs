@@ -32,11 +32,23 @@ pub struct Terminal {
     /// false = so o console (shells extras do terminal com abas: a serial
     /// fica com o shell principal).
     com_serial: bool,
+    /// Some = tudo que se escreve vai para ca (o shell da depuracao remota).
+    captura: Option<alloc::string::String>,
 }
 
 impl Terminal {
     pub const fn new() -> Self {
-        Terminal { serial: Uart::new(), tela: None, video: None, framebuffer: None, motivo: "ainda não foi ligado", com_serial: true }
+        Terminal { serial: Uart::new(), tela: None, video: None, framebuffer: None, motivo: "ainda não foi ligado", com_serial: true, captura: None }
+    }
+
+    /// Terminal que so junta o texto (ver tirar_captura).
+    pub fn captura() -> Self {
+        Terminal { com_serial: false, captura: Some(alloc::string::String::new()), ..Terminal::new() }
+    }
+
+    /// O texto juntado ate agora (e esvazia).
+    pub fn tirar_captura(&mut self) -> alloc::string::String {
+        self.captura.as_mut().map(core::mem::take).unwrap_or_default()
     }
 
     /// Terminal so de tela, com este console (um painel do terminal com abas).
@@ -49,6 +61,7 @@ impl Terminal {
             framebuffer: None,
             motivo: "painel do terminal",
             com_serial: false,
+            captura: None,
         }
     }
 
@@ -126,6 +139,10 @@ impl Terminal {
 
 impl fmt::Write for Terminal {
     fn write_str(&mut self, texto: &str) -> fmt::Result {
+        if let Some(c) = &mut self.captura {
+            c.push_str(texto);
+            return Ok(());
+        }
         if self.com_serial {
             self.serial.write_str(texto)?;
         }

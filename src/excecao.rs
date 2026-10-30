@@ -170,6 +170,14 @@ pub fn registrar_tela(tela: Tela) {
     TELA_DE_ERRO.pronta.store(true, Ordering::Release);
 }
 
+/// O framebuffer da GUI, se ela ja registrou (a depuracao remota le a tela).
+pub fn tela() -> Option<Tela> {
+    if !TELA_DE_ERRO.pronta.load(Ordering::Acquire) {
+        return None;
+    }
+    unsafe { *TELA_DE_ERRO.tela.get() }
+}
+
 /// Desenha a tela de erro com o `titulo` e o que `detalhes` escrever
 /// (uma linha por '\n'; linhas longas quebram). Sem framebuffer
 /// registrado (modo serial, TV box) nao faz nada.

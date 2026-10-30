@@ -99,6 +99,10 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
         atender_externos(&mut gerenciador, &mut entrada);
         rede::processar();
         crate::nas::atender();
+        crate::depuracao::atender();
+        for url in crate::depuracao::paginas_para_abrir() {
+            gerenciador.abrir(apps::navegador::abrir_em(&url), 40, 30);
+        }
         if timer::tiques() >= proximo_tique {
             proximo_tique = timer::tiques() + TIQUES_POR_TIQUE_APP;
             gerenciador.tique();
