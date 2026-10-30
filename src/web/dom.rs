@@ -200,8 +200,24 @@ impl Documento {
         n.proximo = NENHUM;
     }
 
+    /// `filho` e `pai` ou um ancestral dele? (por o no dentro de si mesmo
+    /// faria um ciclo na arvore: o DOM recusa com HierarchyRequestError)
+    fn contem(&self, filho: Id, pai: Id) -> bool {
+        let mut x = pai;
+        while x != NENHUM {
+            if x == filho {
+                return true;
+            }
+            x = self.nos[x as usize].pai;
+        }
+        false
+    }
+
     /// Poe `filho` no fim de `pai`.
     pub fn anexar(&mut self, pai: Id, filho: Id) {
+        if self.contem(filho, pai) {
+            return;
+        }
         self.soltar(filho);
         let ultimo = self.nos[pai as usize].ultimo;
         {
@@ -219,9 +235,19 @@ impl Documento {
     }
 
     /// Poe `filho` antes de `referencia` (NENHUM = no fim).
-    pub fn inserir_antes(&mut self, pai: Id, filho: Id, referencia: Id) {
+    pub fn inserir_antes(&mut self, pai: Id, filho: Id, mut referencia: Id) {
+        // antes de si mesmo = antes do proximo (como no DOM). Sem isso o
+        // B.prepend(p) do example.com, com p ja primeiro filho, ligava p a
+        // ele mesmo e quem descia a arvore rodava para sempre
+        if referencia == filho {
+            referencia = self.nos[filho as usize].proximo;
+        }
         if referencia == NENHUM {
             return self.anexar(pai, filho);
+        }
+        // referencia de outro pai (NotFoundError no DOM) ou ciclo: recusa
+        if self.nos[referencia as usize].pai != pai || self.contem(filho, pai) {
+            return;
         }
         self.soltar(filho);
         let ant = self.nos[referencia as usize].anterior;

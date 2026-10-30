@@ -236,3 +236,17 @@ fn modulos_es() {
     caso(&mut s, "t", "classico");
     assert_eq!(pedidos.len(), 3, "{pedidos:?}");
 }
+
+/// O script do example.com faz B.prepend(p) com p ja primeiro filho: antes
+/// isso ligava p a ele mesmo e quem descia a arvore travava (a box parava).
+#[test]
+fn prepend_do_primeiro_filho_nao_faz_ciclo() {
+    let (doc, mut s) = pagina("<!DOCTYPE html><html><body><p id=a>um</p><p id=b>dois</p><div id=c><i id=d></i></div></body></html>");
+    caso(&mut s, "var B=document.body,a=document.getElementById('a');B.prepend(a);B.children.length", "3");
+    caso(&mut s, "B.firstElementChild.id + B.children[1].id", "ab");
+    caso(&mut s, "a.before(a); a.after(a); B.insertBefore(a, a); B.children[0].id", "a");
+    // por um ancestral dentro do descendente: recusado, arvore intacta
+    caso(&mut s, "var c=document.getElementById('c'),d=document.getElementById('d');try{d.appendChild(c)}catch(e){};d.parentNode.id", "c");
+    let d = doc.borrow();
+    assert!(d.descendentes(0).count() < 50, "ciclo na arvore");
+}
