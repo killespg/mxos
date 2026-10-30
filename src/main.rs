@@ -227,7 +227,11 @@ fn panic(info: &PanicInfo) -> ! {
     let mut console = uart::Uart::new();
     let _ = writeln!(console, "\n*** PÂNICO no kernel: {info}");
     let linha = info.location().map_or(0, |l| l.line());
-    console_boot::rastro(0xDEAD_0000 | (linha & 0xFFFF), 0);
+    // OS_REG2: FNV-1a de 32 bits do caminho do arquivo (o Android le e
+    // ferramentas/arquivo_do_panico.py diz qual e)
+    let arquivo = info.location().map_or("", |l| l.file());
+    let hash = arquivo.bytes().fold(0x811C_9DC5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+    console_boot::rastro(0xDEAD_0000 | (linha & 0xFFFF), hash);
     let _ = writeln!(console_boot::Erro, "\n*** PÂNICO no kernel: {info}");
     // com a area de trabalho ligada o erro tambem aparece na tela
     excecao::tela_de_erro("PÂNICO NO KERNEL", |painel| write!(painel, "{info}"));
