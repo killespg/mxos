@@ -23,11 +23,25 @@ _start:
     .word   0                           @ 0x28: comeco
     .word   __bss_start - _start        @ 0x2C: fim (tamanho do arquivo)
 
+@ Sinal de vida antes do Rust: uma faixa branca no logo que o U-Boot da
+@ RK322x deixa na tela (uboot_logo=0x02000000@0x9dc00000 na linha de
+@ comando dele). Faixa n = 32 KB a partir de 0x9dc00000 + n * 128 KB.
+@ Caches e MMU desligados: a escrita vai direto para a memoria do VOP.
+.macro faixa n
+    ldr     r0, =(0x9dc00000 + \n * 0x20000)
+    mvn     r1, #0
+    mov     r2, #0x8000
+91: str     r1, [r0], #4
+    subs    r2, r2, #4
+    bgt     91b
+.endm
+
 comeco:
     cpsid   aif
     mrc     p15, 0, r4, c0, c0, 5       @ MPIDR: qual nucleo
     ands    r4, r4, #3
     bne     estacionar
+    faixa   1
 
     @ ---- HYP -> SVC (o U-Boot pode entregar em HYP) ----
     mrs     r0, cpsr
@@ -48,6 +62,7 @@ em_svc:
     bic     r0, r0, #0x4                @ C
     mcr     p15, 0, r0, c1, c0, 0
     isb
+    faixa   2
 
     @ ---- copia para o endereco certo, se veio parar em outro ----
     adr     r0, _start                  @ onde estamos
@@ -105,6 +120,7 @@ no_lugar:
     strlo   r2, [r0], #4
     blo     2b
 
+    faixa   3
     mov     r0, #1                      @ kernel_main(el_boot = 1)
     mov     r1, #0
     bl      kernel_main
