@@ -126,6 +126,33 @@ pub fn hash_nome(s: &str) -> u32 {
     s.bytes().fold(0x811C_9DC5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193))
 }
 
+/// O caso rapido de um operador binario com dois numeros (None = precisa
+/// do caminho geral: instanceof, in).
+#[inline(always)]
+fn bin_numeros(op: Bin, x: f64, y: f64) -> Option<Valor> {
+    Some(match op {
+        Bin::Soma => Valor::Num(x + y),
+        Bin::Sub => Valor::Num(x - y),
+        Bin::Mul => Valor::Num(x * y),
+        Bin::Div => Valor::Num(x / y),
+        Bin::Resto => Valor::Num(if y == 0.0 { f64::NAN } else { x % y }),
+        Bin::Menor => Valor::Bool(x < y),
+        Bin::Maior => Valor::Bool(x > y),
+        Bin::MenorIgual => Valor::Bool(x <= y),
+        Bin::MaiorIgual => Valor::Bool(x >= y),
+        Bin::Estrito | Bin::Igual => Valor::Bool(x == y),
+        Bin::NaoEstrito | Bin::Diferente => Valor::Bool(x != y),
+        Bin::E => Valor::Num((para_i32(x) & para_i32(y)) as f64),
+        Bin::Ou => Valor::Num((para_i32(x) | para_i32(y)) as f64),
+        Bin::Xor => Valor::Num((para_i32(x) ^ para_i32(y)) as f64),
+        Bin::Esq => Valor::Num(para_i32(x).wrapping_shl(para_u32(y) & 31) as f64),
+        Bin::Dir => Valor::Num((para_i32(x) >> (para_u32(y) & 31)) as f64),
+        Bin::DirSemSinal => Valor::Num((para_u32(x) >> (para_u32(y) & 31)) as f64),
+        Bin::Pot => Valor::Num(potencia(x, y)),
+        _ => return None,
+    })
+}
+
 pub struct Vm {
     pub heap: Heap,
     pub global: Ref,
@@ -1513,6 +1540,16 @@ impl Vm {
     }
 
     fn binario(&mut self, op: Bin, a: Valor, b: Valor) -> R<Valor> {
+        if let (Valor::Num(x), Valor::Num(y)) = (&a, &b) {
+            if let Some(v) = bin_numeros(op, *x, *y) {
+                return Ok(v);
+            }
+        }
+        self.binario_lento(op, a, b)
+    }
+
+    #[allow(dead_code)]
+    fn binario_velho(&mut self, op: Bin, a: Valor, b: Valor) -> R<Valor> {
         // caminho rapido: dois numeros
         if let (Valor::Num(x), Valor::Num(y)) = (&a, &b) {
             let (x, y) = (*x, *y);
@@ -1673,6 +1710,53 @@ impl Vm {
                     Op::Dup => {
                         let v = q!().pilha.last().cloned().unwrap_or_default();
                         push!(v);
+                    }
+                    // super-instrucoes (bytecode::fundir)
+                    Op::GuardaLocalDescarta(k) => {
+                        let v = pop!();
+                        q!().locais[*k as usize] = v;
+                        q!().ip = ip + 3;
+                    }
+                    Op::IncLocal(k) => {
+                        let slot = &mut q!().locais[*k as usize];
+                        if let Valor::Num(n) = slot {
+                            *n += 1.0;
+                            q!().ip = ip + 7;
+                        } else {
+                            let v = slot.clone();
+                            push!(v);
+                        }
+                    }
+                    Op::CompLocalNum(k, op, c, alvo) => {
+                        if let Valor::Num(x) = q!().locais[*k as usize] {
+                            let sim = matches!(bin_numeros(*op, x, *c), Some(Valor::Bool(true)));
+                            q!().ip = if sim { ip + 4 } else { *alvo as usize };
+                        } else {
+                            let v = q!().locais[*k as usize].clone();
+                            push!(v);
+                        }
+                    }
+                    Op::BinNum(op, c) => {
+                        let r = match q!().pilha.last() {
+                            Some(Valor::Num(x)) => bin_numeros(*op, *x, *c),
+                            _ => None,
+                        };
+                        match r {
+                            Some(v) => {
+                                if let Some(topo) = q!().pilha.last_mut() {
+                                    *topo = v;
+                                }
+                                q!().ip = ip + 2;
+                            }
+                            None => push!(Valor::Num(*c)),
+                        }
+                    }
+                    Op::Locais2(a, b) => {
+                        let va = q!().locais[*a as usize].clone();
+                        let vb = q!().locais[*b as usize].clone();
+                        push!(va);
+                        push!(vb);
+                        q!().ip = ip + 2;
                     }
                     Op::Dup2 => {
                         let n = q!().pilha.len();

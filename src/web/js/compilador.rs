@@ -557,9 +557,11 @@ impl FuncC {
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn prototipo(self, nome: Rc<str>, n_params: u16, amb: u16, metodo: bool, derivado: bool, classe: bool, estrito: bool, usa_args: bool, fonte: (Rc<str>, u32, u32)) -> Prototipo {
+        let mut codigo = self.codigo;
+        super::bytecode::fundir(&mut codigo);
         Prototipo {
             nome,
-            codigo: self.codigo,
+            codigo,
             textos: self.textos,
             filhos: self.filhos,
             n_locais: self.n_locais,

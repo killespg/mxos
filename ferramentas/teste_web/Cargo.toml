@@ -11,3 +11,6 @@ publish = false
 
 # pacote independente: nao faz parte do kernel
 [workspace]
+
+[profile.release]
+debug = "line-tables-only"

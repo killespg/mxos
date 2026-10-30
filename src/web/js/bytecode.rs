@@ -156,6 +156,56 @@ pub enum Op {
     /// Nome da funcao no topo (para funcoes anonimas atribuidas)
     NomeFuncao(Chave),
     Debug,
+    // ---- super-instrucoes (ver `fundir`): ficam no lugar da primeira de
+    // uma sequencia comum, que continua inteira logo depois. No caso rapido
+    // (numeros) fazem a sequencia toda e pulam o resto; senao fazem so o que
+    // a primeira faria, e o resto roda normal. Um salto para o meio da
+    // sequencia cai nas instrucoes originais: nada muda de sentido.
+    /// Dup, GuardaLocal(k), Pop (`x = ...;` como comando)
+    GuardaLocalDescarta(u16),
+    /// CarregaLocal(i), ParaNumero, Dup, Num(1), Bin(Soma), GuardaLocal(i), Pop (`i++;`)
+    IncLocal(u16),
+    /// CarregaLocal(i), Num(c), Bin(op), SeFalso(alvo) (`i < c` num laco)
+    CompLocalNum(u16, Bin, f64, u32),
+    /// Num(c), Bin(op)
+    BinNum(Bin, f64),
+    /// CarregaLocal(a), CarregaLocal(b)
+    Locais2(u16, u16),
+}
+
+/// Troca as sequencias mais comuns por super-instrucoes (no lugar da
+/// primeira; as originais ficam). Corta pela metade as instrucoes de um
+/// laco tipico: no interpretador o que pesa e o despacho de cada uma.
+pub fn fundir(c: &mut [Op]) {
+    let mut i = 0;
+    while i < c.len() {
+        let n = match &c[i..] {
+            [Op::CarregaLocal(a), Op::ParaNumero, Op::Dup, Op::Num(um), Op::Bin(Bin::Soma), Op::GuardaLocal(b), Op::Pop, ..] if a == b && *um == 1.0 => {
+                c[i] = Op::IncLocal(*a);
+                7
+            }
+            [Op::CarregaLocal(a), Op::Num(v), Op::Bin(op), Op::SeFalso(alvo), ..]
+                if matches!(op, Bin::Menor | Bin::Maior | Bin::MenorIgual | Bin::MaiorIgual | Bin::Estrito | Bin::NaoEstrito) =>
+            {
+                c[i] = Op::CompLocalNum(*a, *op, *v, *alvo);
+                4
+            }
+            [Op::Dup, Op::GuardaLocal(k), Op::Pop, ..] => {
+                c[i] = Op::GuardaLocalDescarta(*k);
+                3
+            }
+            [Op::Num(v), Op::Bin(op), ..] if !matches!(op, Bin::InstanceOf | Bin::Em) => {
+                c[i] = Op::BinNum(*op, *v);
+                2
+            }
+            [Op::CarregaLocal(a), Op::CarregaLocal(b), ..] => {
+                c[i] = Op::Locais2(*a, *b);
+                2
+            }
+            _ => 1,
+        };
+        i += n;
+    }
 }
 
 #[derive(Debug)]

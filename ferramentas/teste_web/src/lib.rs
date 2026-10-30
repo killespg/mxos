@@ -26,6 +26,7 @@ pub mod chip8;
 
 pub mod rede;
 pub mod png;
+pub mod perfil;
 
 /// As fontes do MXOS (as mesmas do pendrive).
 pub fn fontes() -> web::fonte::Fontes {
