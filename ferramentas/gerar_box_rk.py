@@ -111,21 +111,33 @@ TAGS_END = 0x60088000
 PAGINA = 2048
 
 
-def nova(kernel, saida):
+def sha_rockchip(cab, kernel, ramdisk, second):
+    """O id que o U-Boot legado da Rockchip confere (desmontado do uboot.img
+    da box, funcao em 0x6000da58): SHA-1 de cada parte seguida do tamanho e,
+    diferente do mkbootimg do Android, tambem dos campos do cabecalho de
+    0x20 a 0x240 (tags, pagina, versoes, nome, linha de comando). Se nao
+    bater e a secure boot estiver ligada, ele trava no logo."""
+    h = hashlib.sha1()
+    for b in (kernel, ramdisk, second):
+        h.update(b)
+        h.update(struct.pack("<I", len(b)))
+    h.update(bytes(cab[0x20:0x240]))
+    return h.digest()
+
+
+def nova(kernel, saida, ramdisk_caminho=None):
     k = pathlib.Path(kernel).read_bytes()
     if struct.unpack_from("<I", k, 0x24)[0] != 0x016F2818:
         raise SystemExit("o kernel não tem o cabeçalho de zImage (gere com: binario)")
     # o bootrk le um ramdisk: uma pagina de zeros que o MXOS ignora
-    ramdisk, second = bytes(PAGINA), b""
-    h = hashlib.sha1()
-    for b in (k, ramdisk, second):
-        h.update(b)
-        h.update(struct.pack("<I", len(b)))
+    # (um ramdisk de verdade so para testar o caminho com o kernel do Android)
+    ramdisk = pathlib.Path(ramdisk_caminho).read_bytes() if ramdisk_caminho else bytes(PAGINA)
+    second = b""
     cab = bytearray(PAGINA)
     cab[0:8] = b"ANDROID!"
     struct.pack_into("<10I", cab, 8, len(k), KERNEL_END, len(ramdisk), RAMDISK_END, 0, 0, TAGS_END, PAGINA, 0, 0)
     cab[48:52] = b"MXOS"
-    cab[576:596] = h.digest()
+    cab[576:596] = sha_rockchip(cab, k, ramdisk, second)
     out = bytearray(cab)
     for b in (k, ramdisk):
         out += b + bytes(alinhar(len(b), PAGINA) - len(b))
@@ -138,8 +150,8 @@ def nova(kernel, saida):
 def main():
     if len(sys.argv) >= 2 and sys.argv[1] == "binario":
         binario(sys.argv[3] if len(sys.argv) > 3 else ELF_PADRAO, sys.argv[2])
-    elif len(sys.argv) == 4 and sys.argv[1] == "nova":
-        nova(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) in (4, 5) and sys.argv[1] == "nova":
+        nova(*sys.argv[2:])
     elif len(sys.argv) == 5 and sys.argv[1] == "recovery":
         recovery(sys.argv[2], sys.argv[3], sys.argv[4])
     else:
