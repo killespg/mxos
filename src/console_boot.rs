@@ -155,7 +155,7 @@ pub fn vigiar_travamento() {
             unsafe {
                 core::ptr::write_volatile(reg as *mut u32, retorno);
             }
-            let _ = reg;
+            let _ = (reg, retorno);
             fp = anterior as usize;
         }
         #[cfg(feature = "rk322x")]
