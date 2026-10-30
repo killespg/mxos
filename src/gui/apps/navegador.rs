@@ -104,7 +104,9 @@ const SUJO_FERRAMENTAS: u8 = 1 << 0;
 const SUJO_PAGINA: u8 = 1 << 1;
 const SUJO_ROLAGEM: u8 = 1 << 2;
 const SUJO_STATUS: u8 = 1 << 3;
-const SUJO_TUDO: u8 = SUJO_FERRAMENTAS | SUJO_PAGINA | SUJO_ROLAGEM | SUJO_STATUS;
+/// So o quadro do video da pagina.
+const SUJO_VIDEO: u8 = 1 << 4;
+const SUJO_TUDO: u8 = SUJO_FERRAMENTAS | SUJO_PAGINA | SUJO_ROLAGEM | SUJO_STATUS | SUJO_VIDEO;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Comando {
@@ -684,6 +686,9 @@ impl Navegador {
             && let Some(pagina) = &mut self.pagina
         {
             let mudou = web::tique(pagina);
+            if web::tique_video(pagina) {
+                self.sujo |= SUJO_VIDEO;
+            }
             let navegar = web::navegacao(pagina);
             if mudou {
                 self.pagina_mudou();
@@ -802,6 +807,10 @@ impl App for Navegador {
         }
         if self.sujo & SUJO_STATUS != 0 {
             self.desenhar_status(s, &t);
+        }
+        // o video vai por cima da pagina (que pinta o lugar dele de preto)
+        if let Some(p) = &self.pagina {
+            web::desenhar_video(p, s, AREA_PAGINA, self.rolagem);
         }
         self.sujo = 0;
         self.tema_desenhado = Some(t);

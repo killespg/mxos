@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 pub mod web;
+pub mod youtube;
 
 use alloc::format;
 use alloc::string::String;

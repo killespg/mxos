@@ -75,6 +75,8 @@ static ULTIMO_INT: AtomicU32 = AtomicU32::new(0);
 /// Falhas seguidas (3 = desliga) e quantas no total.
 static FALHAS: AtomicU8 = AtomicU8::new(0);
 static FALHAS_TOTAL: AtomicU32 = AtomicU32::new(0);
+/// Tentativas do autoteste que falharam (e onde parou a ultima): passo << 24 | n.
+static FALHAS_TESTE: AtomicU32 = AtomicU32::new(0);
 /// O ultimo trabalho que nao terminou (para o comando "rga").
 static mut TRABALHO_RUIM: [u32; 32] = [0; 32];
 
@@ -151,10 +153,29 @@ pub fn iniciar() -> bool {
         ESTADO.store(DESLIGADO, Ordering::Relaxed);
         return false;
     }
-    ESTADO.store(LIGADO, Ordering::Relaxed);
-    let ok = autoteste();
-    ESTADO.store(if ok { LIGADO } else { DESLIGADO }, Ordering::Relaxed);
-    ok
+    // o primeiro trabalho depois de ligar os relogios as vezes trava: ate
+    // 3 tentativas (cada falha ja leva um reset em `executar`)
+    for _ in 0..3 {
+        ESTADO.store(LIGADO, Ordering::Relaxed);
+        FALHAS.store(0, Ordering::Relaxed);
+        if autoteste() {
+            return true;
+        }
+        let n = (FALHAS_TESTE.load(Ordering::Relaxed) & 0xFF_FFFF) + 1;
+        FALHAS_TESTE.store((PASSO.load(Ordering::Relaxed) as u32) << 24 | n, Ordering::Relaxed);
+    }
+    ESTADO.store(DESLIGADO, Ordering::Relaxed);
+    false
+}
+
+/// Pronto para usar? Se desligou (teste do boot ou falhas), tenta ligar
+/// de novo (no maximo uma vez a cada chamada de quem vai usar de verdade).
+pub fn garantir() -> bool {
+    if ESTADO.load(Ordering::Relaxed) == DESLIGADO {
+        ESTADO.store(DESCONHECIDO, Ordering::Relaxed);
+        return iniciar();
+    }
+    disponivel() || iniciar()
 }
 
 /// Versao do RGA (0 = desligado), para o "info".
@@ -237,6 +258,10 @@ pub fn relatorio() -> String {
         s += &format!("  parou em: {} (lido {:08x})
 ", PASSOS.get(p).unwrap_or(&"?"), LIDO.load(Ordering::Relaxed));
     }
+    let teste = FALHAS_TESTE.load(Ordering::Relaxed);
+    if teste != 0 {
+        s += &format!("  autoteste falhou {} vez(es); a ultima parou em: {}\n", teste & 0xFF_FFFF, PASSOS.get((teste >> 24) as usize).unwrap_or(&"?"));
+    }
     if falhas > 0 {
         s += &format!("  {falhas} trabalho(s) nao terminaram; o ultimo:\n ");
         for (i, v) in ruim.iter().enumerate().filter(|(_, v)| **v != 0) {
@@ -251,10 +276,11 @@ pub fn relatorio() -> String {
     s
 }
 
-/// Reset do RGA pela CRU (SOFTRST_CON6 bits 11..14: RGA, NOC, aclk, hclk).
+/// Reset do RGA pela CRU (SOFTRST_CON6 bits 11, 13 e 14: RGA, aclk, hclk).
+/// O do NOC (bit 12) fica de fora: com ele o RGA nao termina mais nada.
 fn resetar() {
     unsafe {
-        write_volatile((CRU + 0x128) as *mut u32, 0x7800 << 16 | 0x7800);
+        write_volatile((CRU + 0x128) as *mut u32, 0x6800 << 16 | 0x6800);
     }
     crate::cpu::barreira();
     for _ in 0..1000 {

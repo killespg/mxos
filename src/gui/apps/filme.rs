@@ -10,6 +10,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
 
+use alloc::boxed::Box;
+
 use super::visualizador::FonteDisco;
 use crate::gui::grafico::{Retangulo, Superficie};
 use crate::midia::Fonte;
@@ -18,7 +20,7 @@ use crate::video::rga;
 use crate::video::rkvdec::{Decodificador, QuadroPronto};
 
 pub struct Filme {
-    fonte: FonteDisco,
+    fonte: Box<dyn Fonte>,
     amostras: Vec<Amostra>,
     escala: u64,
     dec: Decodificador,
@@ -48,11 +50,15 @@ fn agora_us() -> u64 {
 
 impl Filme {
     pub fn abrir(caminho: &str) -> Result<Filme, &'static str> {
-        if !rga::disponivel() {
-            return Err("o RGA (conversão de cor) não está ligado");
+        Filme::de_fonte(Box::new(FonteDisco::abrir(caminho)?))
+    }
+
+    /// Um MP4 de qualquer lugar (disco, rede).
+    pub fn de_fonte(mut fonte: Box<dyn Fonte>) -> Result<Filme, &'static str> {
+        if !rga::garantir() {
+            return Err("o RGA (conversão de cor) não respondeu");
         }
-        let mut fonte = FonteDisco::abrir(caminho)?;
-        let mp4 = Mp4::abrir(&mut fonte)?;
+        let mp4 = Mp4::abrir(&mut *fonte)?;
         let v = mp4.video().ok_or("MP4 sem vídeo")?;
         if &v.codec != b"avc1" && &v.codec != b"avc3" {
             return Err("só vídeo H.264 por enquanto");
@@ -176,6 +182,12 @@ impl Filme {
 
     /// O quadro atual em `area` da janela, mantendo a proporcao.
     pub fn desenhar(&self, s: &mut Superficie, area: Retangulo) {
+        self.desenhar_recortado(s, area, area);
+    }
+
+    /// Como `desenhar`, mas so a parte dentro de `visivel` (o resto da
+    /// area esta fora da tela: a origem e cortada na mesma proporcao).
+    pub fn desenhar_recortado(&self, s: &mut Superficie, area: Retangulo, visivel: Retangulo) {
         let Some((q, _)) = &self.atual else { return };
         let (ql, qa) = (q.largura.max(2) as i64, q.altura.max(2) as i64);
         let (al, aa) = (area.largura as i64, area.altura as i64);
@@ -185,10 +197,22 @@ impl Filme {
         a &= !1;
         let x = area.x as i64 + (al - l) / 2;
         let y = area.y as i64 + (aa - a) / 2;
+        // a parte visivel do retangulo do video, e o pedaco da origem que cai nela
+        let v = Retangulo::novo(x as i32, y as i32, l as i32, a as i32).intersecao(&visivel).intersecao(&s.area());
+        if v.vazio() || v.largura < 2 || v.altura < 2 {
+            return;
+        }
+        let (dx, dy) = (v.x as i64 - x, v.y as i64 - y);
+        let sx = (q.x as i64 + dx * ql / l) as usize & !1;
+        let sy = (q.y0 as i64 + dy * qa / a) as usize & !1;
+        let sl_ = ((v.largura as i64 * ql / l) as usize & !1).max(2);
+        let sa_ = ((v.altura as i64 * qa / a) as usize & !1).max(2);
         let origem = rga::Imagem { endereco: q.y, passo: q.passo, largura: q.x + q.largura, altura: q.y0 + q.altura, formato: rga::Formato::Nv12 { uv: q.uv, bt709: q.bt709 } };
         let (sl, sa) = (s.largura(), s.altura());
         let destino = rga::Imagem::xrgb(s.pixels_mut().as_mut_ptr() as usize, sl * 4, sl, sa);
-        rga::copiar(&origem, (q.x & !1, q.y0 & !1, q.largura & !1, q.altura & !1), &destino, (x as usize, y as usize, l as usize, a as usize));
+        let sl_ = sl_.min(q.x + q.largura - sx);
+        let sa_ = sa_.min(q.y0 + q.altura - sy);
+        rga::copiar(&origem, (sx, sy, sl_, sa_), &destino, (v.x as usize, v.y as usize, v.largura as usize, v.altura as usize));
     }
 }
 

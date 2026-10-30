@@ -97,6 +97,10 @@ pub struct PaginaWeb {
     pub altura: i32,
     /// Por que virou pagina de erro (None = deu certo).
     pub erro: Option<&'static str>,
+    /// Video tocando na pagina (YouTube), desenhado no elemento ID_VIDEO.
+    #[cfg(feature = "rk322x")]
+    video: Option<alloc::boxed::Box<crate::gui::apps::filme::Filme>>,
+    video_aviso: Option<String>,
 }
 
 /// (bytes, content-type, url final) de um endereco do disco ou da rede.
@@ -195,9 +199,15 @@ fn buscar_imagens(doc: &crate::web::dom::Documento, base: &str, imgs: &mut Imgs)
 /// Abre um endereco (nunca falha: erro vira uma pagina explicando).
 pub fn abrir(endereco: &str, largura: i32, altura: i32) -> PaginaWeb {
     unsafe { crate::web::js::embutidos::RELOGIO = Some(relogio_unix) };
-    let (html_bytes, tipo, final_, erro) = match buscar(endereco, TEMPO_PAGINA_MS) {
-        Ok((b, t, f)) => (b, t, f, None),
-        Err(motivo) => (super::pagina_de_erro(endereco, motivo).into_bytes(), None, String::from(endereco), Some(motivo)),
+    // YouTube: a pagina vem da API (o site oficial e pesado demais) e o
+    // video toca nela pelo hardware
+    let rota_yt = super::youtube::rota(endereco);
+    let (html_bytes, tipo, final_, erro) = match &rota_yt {
+        Some(r) => (super::youtube::pagina(r).into_bytes(), Some(String::from("text/html; charset=utf-8")), String::from(endereco), None),
+        None => match buscar(endereco, TEMPO_PAGINA_MS) {
+            Ok((b, t, f)) => (b, t, f, None),
+            Err(motivo) => (super::pagina_de_erro(endereco, motivo).into_bytes(), None, String::from(endereco), Some(motivo)),
+        },
     };
     let doc = Rc::new(RefCell::new(html::analisar_bytes(&html_bytes, tipo.as_deref())));
     let base = final_.clone();
@@ -258,7 +268,101 @@ pub fn abrir(endereco: &str, largura: i32, altura: i32) -> PaginaWeb {
     }
     let titulo = pag.titulo.clone();
     let altura_total = pag.altura;
-    PaginaWeb { pag, imgs, url: final_, titulo, altura: altura_total, erro, scripts, inicio }
+    let mut p = PaginaWeb {
+        pag,
+        imgs,
+        url: final_,
+        titulo,
+        altura: altura_total,
+        erro,
+        scripts,
+        inicio,
+        #[cfg(feature = "rk322x")]
+        video: None,
+        video_aviso: None,
+    };
+    if let Some(super::youtube::Rota::Assistir(id)) = rota_yt {
+        abrir_video(&mut p, &id);
+    }
+    p
+}
+
+/// Liga o video do YouTube na pagina.
+fn abrir_video(p: &mut PaginaWeb, id: &str) {
+    #[cfg(feature = "rk322x")]
+    {
+        use super::youtube;
+        let r = youtube::fluxo(id).and_then(|(u, t)| crate::gui::apps::filme::Filme::de_fonte(alloc::boxed::Box::new(youtube::FonteRede::nova(u, t))));
+        match r {
+            Ok(f) => p.video = Some(alloc::boxed::Box::new(f)),
+            Err(e) => p.video_aviso = Some(String::from(e)),
+        }
+    }
+    #[cfg(not(feature = "rk322x"))]
+    {
+        let _ = id;
+        p.video_aviso = Some(String::from("o vídeo toca só na TV box (decodificador por hardware)"));
+    }
+}
+
+/// Anda o video da pagina. true = trocou o quadro.
+pub fn tique_video(p: &mut PaginaWeb) -> bool {
+    #[cfg(feature = "rk322x")]
+    if let Some(v) = &mut p.video {
+        let mudou = v.tique();
+        if let Some(e) = v.erro.take() {
+            p.video_aviso = Some(String::from(e));
+        }
+        return mudou;
+    }
+    let _ = p;
+    false
+}
+
+/// Pausa/continua o video da pagina. false = nao tem video.
+pub fn pausar_video(p: &mut PaginaWeb) -> bool {
+    #[cfg(feature = "rk322x")]
+    if let Some(v) = &mut p.video {
+        v.pausar();
+        return true;
+    }
+    let _ = p;
+    false
+}
+
+/// Onde o elemento do video esta na tela (se a pagina tem um).
+pub fn retangulo_video(p: &PaginaWeb, area: Retangulo, rolagem: i32) -> Option<Retangulo> {
+    use crate::web::css::valores::UM;
+    let id = p.pag.doc.borrow().por_id(super::youtube::ID_VIDEO)?;
+    let c = p.pag.arvore.caixas.iter().find(|c| c.no == id)?;
+    Some(Retangulo::novo(area.x + c.x / UM, area.y + c.y / UM - rolagem, c.l / UM, c.a / UM))
+}
+
+/// O quadro do video (e o aviso, se deu erro) no lugar dele na pagina,
+/// recortado pela parte visivel.
+pub fn desenhar_video(p: &PaginaWeb, s: &mut Superficie, area: Retangulo, rolagem: i32) {
+    let Some(r) = retangulo_video(p, area, rolagem) else { return };
+    let visivel = r.intersecao(&area);
+    if r.vazio() || visivel.vazio() {
+        return;
+    }
+    #[cfg(feature = "rk322x")]
+    if let Some(v) = &p.video {
+        v.desenhar_recortado(s, r, visivel);
+    }
+    let y = r.y.max(visivel.y) + 16;
+    if y + 16 < visivel.y + visivel.altura {
+        let aviso = match &p.video_aviso {
+            Some(a) => Some(alloc::format!("Vídeo: {a}")),
+            #[cfg(feature = "rk322x")]
+            None if p.video.as_ref().is_some_and(|v| v.mostrados == 0) => Some(String::from("Carregando o vídeo...")),
+            _ => None,
+        };
+        if let Some(a) = aviso {
+            s.retangulo(Retangulo::novo(r.x + 8, y - 6, (a.chars().count() as i32 * 8 + 20).min(r.largura - 16), 26), 0x0020_2020);
+            s.texto(r.x + 16, y, &a, 0x00FF_FFFF, 1);
+        }
+    }
 }
 
 /// JavaScript ligado? (configuracao "javascript", padrao sim)
