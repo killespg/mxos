@@ -1,6 +1,10 @@
 //! HTTP/1.1, so GET, em http:// e https:// (TLS 1.3 proprio, rede/tls.rs).
 //!
-//! Pedido: "GET caminho HTTP/1.1" + Host + User-Agent + Connection: close.
+//! Pedido: "GET caminho HTTP/1.1" + Host + User-Agent + Connection: keep-alive.
+//! A conexao (e a sessao TLS) fica aberta depois de uma resposta com
+//! tamanho definido, e o proximo pedido ao mesmo servidor a reaproveita: sem
+//! outro aperto de mao TLS, que no Cortex-A7 custa centenas de ms. Se o
+//! servidor fechou nesse meio tempo, abre outra e repete o pedido.
 //! Resposta: linha de status, cabecalhos ate a linha vazia e o corpo, que
 //! termina de um destes jeitos:
 //!   - Content-Length: N bytes
@@ -22,6 +26,47 @@ const MAX_REDIRECIONAMENTOS: usize = 5;
 const MAX_RESPOSTA: usize = 32 << 20;
 
 const INCOMPLETA: ErroRede = ErroRede::Protocolo("resposta HTTP incompleta");
+
+/// A conexao que ficou aberta depois da ultima resposta.
+struct Viva {
+    host: String,
+    porta: u16,
+    sessao: Option<tls::Sessao>,
+}
+
+struct GlobalViva(core::cell::UnsafeCell<Option<Viva>>);
+// So o laco principal faz HTTP.
+unsafe impl Sync for GlobalViva {}
+
+static VIVA: GlobalViva = GlobalViva(core::cell::UnsafeCell::new(None));
+
+fn tirar_viva() -> Option<Viva> {
+    unsafe { (*VIVA.0.get()).take() }
+}
+
+fn guardar_viva(v: Viva) {
+    unsafe { *VIVA.0.get() = Some(v) };
+}
+
+/// Fecha a conexao guardada (outro servidor, ou ela morreu).
+fn fechar_viva(v: Viva, limite_ms: u64) {
+    if let Some(mut s) = v.sessao {
+        s.fechar(&mut Tcp { limite_ms });
+    }
+    let _ = com(|p| p.tcp_fechar());
+}
+
+/// A resposta deixa a conexao reaproveitavel? (o servidor nao pediu para
+/// fechar e o corpo tinha tamanho, entao nada mais vem nela)
+fn reaproveitavel(r: &Resposta, envio: &[u8]) -> bool {
+    let fecha = r.cabecalho("connection").is_some_and(|v| v.to_ascii_lowercase().contains("close"));
+    let pedimos_fechar = achar(envio, b"Connection: close").is_some();
+    let com_tamanho = r.cabecalho("content-length").is_some()
+        || r.cabecalho("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"))
+        || r.status == 204
+        || r.status == 304;
+    !fecha && !pedimos_fechar && com_tamanho
+}
 
 /// URL ja separada.
 pub struct Url {
@@ -106,7 +151,7 @@ fn juntar(base: &Url, local: &str) -> String {
 
 fn pedido(url: &Url) -> String {
     format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux armv7l) MXOS/0.12\r\nAccept: */*\r\nAccept-Encoding: gzip\r\nAccept-Language: pt-BR,pt;q=0.9,en;q=0.5\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (X11; Linux armv7l) MXOS/0.12\r\nAccept: */*\r\nAccept-Encoding: gzip\r\nAccept-Language: pt-BR,pt;q=0.9,en;q=0.5\r\nConnection: keep-alive\r\n\r\n",
         url.caminho,
         url.autoridade()
     )
@@ -266,16 +311,50 @@ fn receber_resposta(mut chegar: impl FnMut(&mut Vec<u8>) -> Result<bool, ErroRed
     }
 }
 
-/// Pedido por https://: TLS 1.3 sobre a conexao ja aberta.
-fn buscar_seguro(url: &Url, envio: &[u8], limite_ms: u64) -> Result<Resposta, ErroRede> {
+/// Pedido por https://: TLS 1.3 sobre a conexao ja aberta (sessao nova
+/// ou a guardada). Se a resposta deixa, a sessao fica guardada.
+fn buscar_seguro(url: &Url, envio: &[u8], limite_ms: u64, sessao: Option<tls::Sessao>) -> Result<Resposta, ErroRede> {
     let mut t = Tcp { limite_ms };
-    let agora = crate::plataforma::segundos_rtc() as i64;
-    let mut sessao = tls::conectar(&mut t, &url.host, agora).map_err(erro_tls)?;
+    let mut sessao = match sessao {
+        Some(s) => s,
+        None => {
+            let agora = crate::plataforma::segundos_rtc() as i64;
+            tls::conectar(&mut t, &url.host, agora).map_err(erro_tls)?
+        }
+    };
     sessao.enviar(&mut t, envio).map_err(erro_tls)?;
     let resposta = receber_resposta(|bruto| Ok(!sessao.receber(&mut t, bruto).map_err(erro_tls)?))?;
-    sessao.fechar(&mut t);
-    let _ = com(|p| p.tcp_fechar());
+    if reaproveitavel(&resposta, envio) && com(|p| p.tcp.aberta()).unwrap_or(false) {
+        guardar_viva(Viva { host: url.host.clone(), porta: url.porta, sessao: Some(sessao) });
+    } else {
+        sessao.fechar(&mut t);
+        let _ = com(|p| p.tcp_fechar());
+    }
     Ok(resposta)
+}
+
+/// Tenta o pedido na conexao guardada, se for do mesmo servidor. None =
+/// nao havia (ou morreu): o chamador abre outra.
+fn pela_viva(url: &Url, envio: &[u8], limite_ms: u64) -> Option<Resposta> {
+    let v = tirar_viva()?;
+    let mesma = v.host == url.host && v.porta == url.porta && v.sessao.is_some() == url.seguro;
+    if !mesma || !com(|p| p.tcp.aberta()).unwrap_or(false) {
+        fechar_viva(v, limite_ms);
+        return None;
+    }
+    let r = if url.seguro {
+        buscar_seguro(url, envio, limite_ms, v.sessao)
+    } else {
+        pedido_aberto(url, envio, limite_ms)
+    };
+    match r {
+        Ok(r) => Some(r),
+        Err(_) => {
+            // o servidor fechou enquanto estava parada: derruba e abre outra
+            let _ = com(|p| p.tcp_abortar());
+            None
+        }
+    }
 }
 
 /// Um GET sem seguir redirecionamento.
@@ -285,6 +364,9 @@ fn buscar(url: &Url, limite_ms: u64) -> Result<Resposta, ErroRede> {
 
 /// Manda `envio` (o pedido HTTP inteiro) e le a resposta.
 fn enviar_pedido(url: &Url, envio: &[u8], limite_ms: u64) -> Result<Resposta, ErroRede> {
+    if let Some(r) = pela_viva(url, envio, limite_ms) {
+        return Ok(r);
+    }
     let ip = super::resolver(&url.host)?;
     com(|p| p.tcp_conectar(ip, url.porta))?;
     let conectou = esperar(limite_ms, |p| match p.tcp.estado {
@@ -298,8 +380,13 @@ fn enviar_pedido(url: &Url, envio: &[u8], limite_ms: u64) -> Result<Resposta, Er
         Ok(Ok(())) => {}
     }
     if url.seguro {
-        return buscar_seguro(url, envio, limite_ms).or_else(abortar);
+        return buscar_seguro(url, envio, limite_ms, None).or_else(abortar);
     }
+    pedido_aberto(url, envio, limite_ms)
+}
+
+/// Pedido em http:// na conexao TCP ja aberta.
+fn pedido_aberto(url: &Url, envio: &[u8], limite_ms: u64) -> Result<Resposta, ErroRede> {
     if !com(|p| p.tcp_enviar(envio))? {
         return abortar(ErroRede::Protocolo("conexão fechou antes do pedido"));
     }
@@ -320,7 +407,11 @@ fn enviar_pedido(url: &Url, envio: &[u8], limite_ms: u64) -> Result<Resposta, Er
         }
         match completa(&mut bruto, fechou) {
             Ok(Some(resposta)) => {
-                let _ = com(|p| p.tcp_fechar());
+                if !fechou && reaproveitavel(&resposta, envio) {
+                    guardar_viva(Viva { host: url.host.clone(), porta: url.porta, sessao: None });
+                } else {
+                    let _ = com(|p| p.tcp_fechar());
+                }
                 return Ok(resposta);
             }
             Ok(None) => {}
