@@ -2,30 +2,159 @@
 //! exibicao, o relogio escolhe o quadro e o RGA converte NV12 -> RGB ja
 //! escalado na janela. A CPU nao toca em pixel nenhum.
 //!
-//! Por enquanto sem som (o AAC ainda nao tem decodificador).
+//! As amostras vem de uma `Origem`: um MP4 inteiro (disco, ou a rede aos
+//! pedacos) ou um MP4 fragmentado (DASH do YouTube), que baixa o proximo
+//! segmento em paralelo enquanto o video toca.
 
-use alloc::collections::BinaryHeap;
+use alloc::boxed::Box;
+use alloc::collections::{BinaryHeap, VecDeque};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
 
-use alloc::boxed::Box;
-
 use super::visualizador::FonteDisco;
 use crate::gui::grafico::{Retangulo, Superficie};
 use crate::midia::Fonte;
-use crate::midia::mp4::{Amostra, Mp4};
+use crate::midia::mp4::{self, Amostra, Mp4, Segmento};
+use crate::rede::fluxo::Baixador;
 use crate::video::rga;
 use crate::video::rkvdec::{Decodificador, QuadroPronto};
 
-pub struct Filme {
+/// A proxima amostra de video.
+pub enum Proxima {
+    /// Bytes e tempo de apresentacao (na escala da trilha).
+    Amostra(Vec<u8>, i64),
+    /// Ainda baixando: tentar no proximo tique.
+    Esperando,
+    Fim,
+}
+
+/// De onde vem as amostras.
+pub trait Origem {
+    /// avcC.
+    fn config(&self) -> &[u8];
+    fn escala(&self) -> u64;
+    fn duracao_ms(&self) -> u64;
+    /// Rede em segundo plano (sem esperar).
+    fn andar(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+    fn proxima(&mut self) -> Result<Proxima, &'static str>;
+}
+
+/// Um MP4 com o indice no moov: o arquivo do disco ou da rede.
+struct OrigemArquivo {
     fonte: Box<dyn Fonte>,
     amostras: Vec<Amostra>,
+    i: usize,
+    config: Vec<u8>,
+    escala: u64,
+    duracao_ms: u64,
+}
+
+impl Origem for OrigemArquivo {
+    fn config(&self) -> &[u8] {
+        &self.config
+    }
+    fn escala(&self) -> u64 {
+        self.escala
+    }
+    fn duracao_ms(&self) -> u64 {
+        self.duracao_ms
+    }
+    fn proxima(&mut self) -> Result<Proxima, &'static str> {
+        let Some(a) = self.amostras.get(self.i).copied() else { return Ok(Proxima::Fim) };
+        self.i += 1;
+        let mut b = alloc::vec![0u8; a.tamanho as usize];
+        if self.fonte.ler(a.pos as usize, &mut b) < b.len() {
+            return Err("o arquivo acabou antes do fim do vídeo");
+        }
+        Ok(Proxima::Amostra(b, a.dts as i64 + a.desvio as i64))
+    }
+}
+
+/// MP4 fragmentado pela rede (DASH): init + indice no comeco, depois os
+/// segmentos um atras do outro, sempre um ou dois na frente.
+pub struct OrigemDash {
+    dl: Baixador,
+    segs: Vec<Segmento>,
+    /// Proximo segmento a pedir.
+    pedir: usize,
+    prontos: VecDeque<Vec<u8>>,
+    amostras: VecDeque<(Vec<u8>, i64)>,
+    padrao: (u32, u32, u32),
+    config: Vec<u8>,
+    escala: u64,
+    duracao_ms: u64,
+}
+
+/// Quantos segmentos baixados ficam esperando (cada um tem alguns segundos).
+const SEGMENTOS_NA_FRENTE: usize = 2;
+
+impl OrigemDash {
+    /// `fim_indice`: o ultimo byte do sidx (indexRange.end da API).
+    pub fn abrir(url: &str, fim_indice: u64) -> Result<OrigemDash, &'static str> {
+        let mut dl = Baixador::novo(url)?;
+        let init = dl.baixar(0, fim_indice)?;
+        let mut f = init.clone();
+        let mp4 = Mp4::abrir(&mut f)?;
+        let v = mp4.video().ok_or("o fluxo não tem vídeo")?;
+        let padrao = mp4::padroes(mp4::moov_de(&init).ok_or("init sem moov")?);
+        let segs = mp4::indice(&init, 0);
+        if segs.is_empty() {
+            return Err("o fluxo não tem índice de segmentos");
+        }
+        let escala = v.escala.max(1) as u64;
+        let total: u64 = segs.iter().map(|s| s.duracao as u64).sum();
+        Ok(OrigemDash { dl, segs, pedir: 0, prontos: VecDeque::new(), amostras: VecDeque::new(), padrao, config: v.config.clone(), escala, duracao_ms: total * 1000 / escala })
+    }
+}
+
+impl Origem for OrigemDash {
+    fn config(&self) -> &[u8] {
+        &self.config
+    }
+    fn escala(&self) -> u64 {
+        self.escala
+    }
+    fn duracao_ms(&self) -> u64 {
+        self.duracao_ms
+    }
+    fn andar(&mut self) -> Result<(), &'static str> {
+        if let Some(r) = self.dl.andar() {
+            self.prontos.push_back(r?);
+        }
+        if !self.dl.ocupado() && self.prontos.len() < SEGMENTOS_NA_FRENTE && self.pedir < self.segs.len() {
+            let s = self.segs[self.pedir];
+            self.pedir += 1;
+            self.dl.pedir(s.pos, s.pos + s.tamanho as u64 - 1)?;
+        }
+        Ok(())
+    }
+    fn proxima(&mut self) -> Result<Proxima, &'static str> {
+        if self.amostras.is_empty() {
+            if let Some(seg) = self.prontos.pop_front() {
+                for a in mp4::fragmento(&seg, self.padrao) {
+                    let b = seg[a.inicio..a.inicio + a.tamanho as usize].to_vec();
+                    self.amostras.push_back((b, a.dts as i64 + a.desvio as i64));
+                }
+            }
+        }
+        if let Some((b, t)) = self.amostras.pop_front() {
+            return Ok(Proxima::Amostra(b, t));
+        }
+        if self.pedir >= self.segs.len() && !self.dl.ocupado() && self.prontos.is_empty() {
+            return Ok(Proxima::Fim);
+        }
+        Ok(Proxima::Esperando)
+    }
+}
+
+pub struct Filme {
+    origem: Box<dyn Origem>,
     escala: u64,
     dec: Decodificador,
-    /// Proxima amostra a decodificar.
-    proxima: usize,
     /// Tempos de apresentacao dos quadros decodificados e ainda nao
     /// mostrados: o DPB entrega na ordem de exibicao = ordem desses tempos.
     tempos: BinaryHeap<Reverse<i64>>,
@@ -35,14 +164,22 @@ pub struct Filme {
     /// Quando (em us do relogio) o tempo 0 do video passou.
     inicio: i64,
     pausado_em: Option<u64>,
+    /// Sem dados no ultimo tique (baixando): o relogio para.
+    esperando: bool,
+    ultimo_tique: u64,
     acabou: bool,
-    buf: Vec<u8>,
     pub mostrados: u32,
     pub erro: Option<&'static str>,
     duracao_ms: u64,
     largura: u32,
     altura: u32,
 }
+
+/// Estado do ultimo filme (para o INFO da depuracao): posicao em ms,
+/// quadros mostrados, tiques esperando a rede.
+pub static POSICAO_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+pub static MOSTRADOS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+pub static ESPERAS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 fn agora_us() -> u64 {
     crate::cpu::contador() * 1_000_000 / crate::cpu::frequencia_timer().max(1)
@@ -55,32 +192,36 @@ impl Filme {
 
     /// Um MP4 de qualquer lugar (disco, rede).
     pub fn de_fonte(mut fonte: Box<dyn Fonte>) -> Result<Filme, &'static str> {
-        if !rga::garantir() {
-            return Err("o RGA (conversão de cor) não respondeu");
-        }
         let mp4 = Mp4::abrir(&mut *fonte)?;
         let v = mp4.video().ok_or("MP4 sem vídeo")?;
         if &v.codec != b"avc1" && &v.codec != b"avc3" {
             return Err("só vídeo H.264 por enquanto");
         }
-        let dec = Decodificador::novo(&v.config)?;
+        let origem = OrigemArquivo { amostras: v.amostras.clone(), i: 0, config: v.config.clone(), escala: v.escala.max(1) as u64, duracao_ms: v.duracao_ms(), fonte };
+        Filme::de_origem(Box::new(origem))
+    }
+
+    pub fn de_origem(origem: Box<dyn Origem>) -> Result<Filme, &'static str> {
+        if !rga::garantir() {
+            return Err("o RGA (conversão de cor) não respondeu");
+        }
+        let dec = Decodificador::novo(origem.config())?;
         let (largura, altura) = dec.tamanho();
         Ok(Filme {
-            fonte,
-            amostras: v.amostras.clone(),
-            escala: v.escala.max(1) as u64,
+            escala: origem.escala(),
+            duracao_ms: origem.duracao_ms(),
+            origem,
             dec,
-            proxima: 0,
             tempos: BinaryHeap::new(),
             atual: None,
             seguinte: None,
             inicio: agora_us() as i64,
             pausado_em: None,
+            esperando: false,
+            ultimo_tique: agora_us(),
             acabou: false,
-            buf: Vec::new(),
             mostrados: 0,
             erro: None,
-            duracao_ms: v.duracao_ms(),
             largura,
             altura,
         })
@@ -106,6 +247,11 @@ impl Filme {
         self.acabou
     }
 
+    /// Esperando a rede (para mostrar "carregando").
+    pub fn esperando(&self) -> bool {
+        self.esperando
+    }
+
     pub fn pausar(&mut self) {
         match self.pausado_em.take() {
             Some(p) => self.inicio += (agora_us() - p) as i64,
@@ -113,35 +259,36 @@ impl Filme {
         }
     }
 
-    /// Decodifica ate sair um quadro (ou o arquivo acabar).
+    /// Decodifica ate sair um quadro. None = acabou ou esperando a rede.
     fn puxar(&mut self) -> Option<(QuadroPronto, i64)> {
         loop {
             if let Some(q) = self.dec.proximo() {
                 let t = self.tempos.pop().map(|Reverse(t)| t).unwrap_or(0);
                 return Some((q, t));
             }
-            if self.proxima >= self.amostras.len() {
-                if self.acabou {
+            if self.acabou {
+                return None;
+            }
+            match self.origem.proxima() {
+                Ok(Proxima::Amostra(b, t)) => {
+                    // com defeito ou nao, o tempo entra (um por quadro)
+                    if let Err(e) = self.dec.decodificar(&b) {
+                        self.erro = Some(e);
+                    }
+                    self.tempos.push(Reverse(t));
+                }
+                Ok(Proxima::Esperando) => {
+                    self.esperando = true;
                     return None;
                 }
-                self.dec.esvaziar();
-                self.acabou = true;
-                continue;
-            }
-            let a = self.amostras[self.proxima];
-            self.proxima += 1;
-            self.buf.resize(a.tamanho as usize, 0);
-            if self.fonte.ler(a.pos as usize, &mut self.buf) < self.buf.len() {
-                self.erro = Some("o arquivo acabou antes do fim do vídeo");
-                continue;
-            }
-            match self.dec.decodificar(&self.buf) {
-                Ok(()) => self.tempos.push(Reverse(a.dts as i64 + a.desvio as i64)),
+                Ok(Proxima::Fim) => {
+                    self.dec.esvaziar();
+                    self.acabou = true;
+                }
                 Err(e) => {
-                    // o quadro (com defeito) entra assim mesmo: mantem a
-                    // contagem de tempos igual a de quadros
-                    self.tempos.push(Reverse(a.dts as i64 + a.desvio as i64));
                     self.erro = Some(e);
+                    self.dec.esvaziar();
+                    self.acabou = true;
                 }
             }
         }
@@ -149,10 +296,20 @@ impl Filme {
 
     /// Anda o relogio. true = trocou o quadro (redesenhar).
     pub fn tique(&mut self) -> bool {
+        if let Err(e) = self.origem.andar() {
+            self.erro = Some(e);
+        }
+        let agora_real = agora_us();
+        // esperando a rede no tique anterior: o video nao andou nesse tempo
+        if self.esperando {
+            self.inicio += (agora_real - self.ultimo_tique) as i64;
+        }
+        self.ultimo_tique = agora_real;
+        self.esperando = false;
         if self.pausado_em.is_some() {
             return false;
         }
-        let agora = (agora_us() as i64 - self.inicio) * self.escala as i64 / 1_000_000;
+        let agora = (agora_real as i64 - self.inicio) * self.escala as i64 / 1_000_000;
         let mut mudou = false;
         loop {
             if self.seguinte.is_none() {
@@ -177,6 +334,13 @@ impl Filme {
             self.mostrados += 1;
             mudou = true;
         }
+        // o proximo quadro ja passou da hora e nao chegou: esperando a rede
+        if self.seguinte.is_none() && !self.acabou {
+            self.esperando = true;
+            ESPERAS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+        POSICAO_MS.store(self.posicao_ms() as u32, core::sync::atomic::Ordering::Relaxed);
+        MOSTRADOS.store(self.mostrados, core::sync::atomic::Ordering::Relaxed);
         mudou
     }
 

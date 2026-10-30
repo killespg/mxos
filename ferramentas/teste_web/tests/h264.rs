@@ -105,3 +105,74 @@ fn bbb_ordem_de_exibicao() {
     let erros = ordem.iter().zip(&certa).filter(|(a, b)| a != b).count();
     assert_eq!(erros, 0, "ordem de exibicao diferente em {erros} quadros; primeiros: {:?} vs {:?}", &ordem[..20.min(ordem.len())], &certa[..20.min(certa.len())]);
 }
+
+/// MP4 fragmentado do YouTube (DASH 720p): sidx, moof/trun e o DPB com os
+/// quadros de varios segmentos. DASH=caminho (padrao: o baixado pelo yt_dash.py).
+#[test]
+fn dash_youtube() {
+    let caminho = std::env::var("DASH").unwrap_or_else(|_| String::from("C:/dev/mxos-tmp/videos/dash_XMPVhbO2YaE_136.mp4"));
+    let Ok(arquivo) = std::fs::read(&caminho) else {
+        eprintln!("sem {caminho}: pulando");
+        return;
+    };
+    let mut fonte = arquivo.clone();
+    let mp4 = Mp4::abrir(&mut fonte).expect("moov");
+    let v = mp4.video().expect("video");
+    let padrao = mp4::padroes(mp4::moov_de(&arquivo).unwrap());
+    let segs = mp4::indice(&arquivo, 0);
+    println!("dash: escala {}, padrao {:?}, {} segmentos, primeiro {:?}", v.escala, padrao, segs.len(), segs.first());
+    assert!(!segs.is_empty());
+    let (tam, spss_b, ppss_b) = mp4::avcc(&v.config).expect("avcC");
+    let mut spss: Vec<Option<Sps>> = vec![None; 32];
+    let mut ppss: Vec<Option<Pps>> = vec![None; 256];
+    for s in spss_b {
+        let sps = h264::ler_sps(s).unwrap();
+        let id = sps.id as usize;
+        spss[id] = Some(sps);
+    }
+    for p in ppss_b {
+        let pps = h264::ler_pps(p, &spss).unwrap();
+        let id = pps.id as usize;
+        ppss[id] = Some(pps);
+    }
+    let sps0 = spss.iter().flatten().next().unwrap().clone();
+    println!("SPS: perfil {} {}x{} visivel {:?} refs {} reordenar {:?}", sps0.perfil, sps0.largura(), sps0.altura(), sps0.visivel(), sps0.max_refs, sps0.reordenar);
+    let n = Dpb::buffers_para(&sps0);
+    let mut dpb = Dpb::novo(&sps0, n);
+    let mut tempos: Vec<i64> = Vec::new();
+    let mut por_buffer = vec![0i64; n];
+    let mut saida: Vec<i64> = Vec::new();
+    let mut quadros = 0;
+    for s in &segs {
+        let (a, b) = (s.pos as usize, s.pos as usize + s.tamanho as usize);
+        if b > arquivo.len() {
+            break;
+        }
+        let dados = &arquivo[a..b];
+        let amostras = mp4::fragmento(dados, padrao);
+        assert!(!amostras.is_empty(), "segmento sem amostras");
+        assert!(amostras[0].chave, "segmento nao comeca em quadro-chave");
+        assert_eq!(amostras[0].dts, s.tempo, "tfdt diferente do sidx");
+        for am in amostras {
+            let d = &dados[am.inicio..am.inicio + am.tamanho as usize];
+            let f = h264::nals_com_tamanho(d, tam).into_iter().filter(|n| matches!(n[0] & 0x1F, 1 | 5)).map(|n| h264::ler_fatia(n, &spss, &ppss).unwrap()).next().unwrap();
+            let q = dpb.comecar(&sps0, &f).unwrap();
+            let t = am.dts as i64 + am.desvio as i64;
+            tempos.push(t);
+            por_buffer[q.buffer] = t;
+            dpb.terminar(&sps0, &f, &q);
+            while let Some((b, _)) = dpb.saida.pop_front() {
+                saida.push(por_buffer[b]);
+            }
+            quadros += 1;
+        }
+    }
+    dpb.esvaziar();
+    while let Some((b, _)) = dpb.saida.pop_front() {
+        saida.push(por_buffer[b]);
+    }
+    let mut certo = tempos.clone();
+    certo.sort();
+    println!("{quadros} quadros de {} segmentos completos", saida.len());
+    assert_eq!(saida, certo, "ordem de exibicao errada");
+}

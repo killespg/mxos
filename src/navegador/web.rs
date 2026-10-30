@@ -292,7 +292,11 @@ fn abrir_video(p: &mut PaginaWeb, id: &str) {
     #[cfg(feature = "rk322x")]
     {
         use super::youtube;
-        let r = youtube::fluxo(id).and_then(|(u, t)| crate::gui::apps::filme::Filme::de_fonte(alloc::boxed::Box::new(youtube::FonteRede::nova(u, t))));
+        use crate::gui::apps::filme::{Filme, OrigemDash};
+        let r = youtube::fluxo(id).and_then(|f| match f {
+            youtube::Fluxo::Progressivo { url, tamanho } => Filme::de_fonte(alloc::boxed::Box::new(youtube::FonteRede::nova(url, tamanho))),
+            youtube::Fluxo::Dash { url, fim_indice, .. } => Filme::de_origem(alloc::boxed::Box::new(OrigemDash::abrir(&url, fim_indice)?)),
+        });
         match r {
             Ok(f) => p.video = Some(alloc::boxed::Box::new(f)),
             Err(e) => p.video_aviso = Some(String::from(e)),

@@ -376,8 +376,37 @@ pub fn pagina(r: &Rota) -> String {
 
 const ANDROID_VERSAO: &str = "20.10.38";
 
-/// URL e tamanho do MP4 360p (formato 18) do video.
-pub fn fluxo(id: &str) -> Result<(String, usize), &'static str> {
+/// Como baixar o video.
+pub enum Fluxo {
+    /// MP4 inteiro (formato 18: 360p com som junto), lido aos blocos.
+    Progressivo { url: String, tamanho: usize },
+    /// MP4 fragmentado so de video (DASH): ate o byte `fim_indice` vem o
+    /// init e o indice dos segmentos.
+    Dash { url: String, fim_indice: u64, altura: u32 },
+}
+
+/// Formatos H.264 em ordem de preferencia para a qualidade pedida
+/// (config youtube_qualidade: 360, 480, 720 ou 1080; padrao 720).
+fn preferidos() -> &'static [u32] {
+    let q = crate::config::Config::carregar().obter("youtube_qualidade").and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(720);
+    match q {
+        0..=360 => &[18],
+        361..=480 => &[135, 18],
+        481..=720 => &[136, 135, 18],
+        _ => &[137, 136, 135, 18],
+    }
+}
+
+fn numero(j: Option<&Json>) -> Option<u64> {
+    match j? {
+        Json::Num(n) => Some(*n as u64),
+        Json::Texto(t) => t.parse().ok(),
+        _ => None,
+    }
+}
+
+/// O melhor jeito de baixar o video (ver `preferidos`).
+pub fn fluxo(id: &str) -> Result<Fluxo, &'static str> {
     let corpo = format!(
         "{{\"context\":{{\"client\":{{\"clientName\":\"ANDROID\",\"clientVersion\":\"{ANDROID_VERSAO}\",\"androidSdkVersion\":30,\"osName\":\"Android\",\"osVersion\":\"11\",\"hl\":\"pt\",\"gl\":\"BR\"}}}},\"videoId\":\"{id}\",\"contentCheckOk\":true,\"racyCheckOk\":true}}"
     );
@@ -392,11 +421,25 @@ pub fn fluxo(id: &str) -> Result<(String, usize), &'static str> {
             _ => "o YouTube recusou este vídeo",
         });
     }
-    let formatos = j.campo("streamingData").and_then(|s| s.campo("formats")).map(Json::lista).unwrap_or(&[]);
-    let f = formatos.iter().find(|f| matches!(f.campo("itag"), Some(Json::Num(n)) if *n == 18.0)).ok_or("o vídeo não tem a versão 360p com som (formato 18)")?;
-    let url = f.campo("url").and_then(Json::texto).ok_or("o formato veio cifrado")?;
-    let tamanho = f.campo("contentLength").and_then(Json::texto).and_then(|t| t.parse().ok()).ok_or("o YouTube não disse o tamanho do vídeo")?;
-    Ok((String::from(url), tamanho))
+    let dados = j.campo("streamingData");
+    let formatos = dados.and_then(|s| s.campo("formats")).map(Json::lista).unwrap_or(&[]);
+    let adaptativos = dados.and_then(|s| s.campo("adaptiveFormats")).map(Json::lista).unwrap_or(&[]);
+    let itag = |f: &&Json| numero(f.campo("itag")).unwrap_or(0) as u32;
+    for &quero in preferidos() {
+        if quero == 18 {
+            if let Some(f) = formatos.iter().find(|f| itag(f) == 18) {
+                let url = f.campo("url").and_then(Json::texto).ok_or("o formato veio cifrado")?;
+                let tamanho = numero(f.campo("contentLength")).ok_or("o YouTube não disse o tamanho do vídeo")?;
+                return Ok(Fluxo::Progressivo { url: String::from(url), tamanho: tamanho as usize });
+            }
+            continue;
+        }
+        let Some(f) = adaptativos.iter().find(|f| itag(f) == quero) else { continue };
+        let (Some(url), Some(fim)) = (f.campo("url").and_then(Json::texto), numero(f.campo("indexRange").and_then(|r| r.campo("end")))) else { continue };
+        let altura = numero(f.campo("height")).unwrap_or(0) as u32;
+        return Ok(Fluxo::Dash { url: String::from(url), fim_indice: fim, altura });
+    }
+    Err("o vídeo não tem formato H.264 que a box toque")
 }
 
 /// O video lido pela rede aos blocos (`&range=`), guardando os ultimos.

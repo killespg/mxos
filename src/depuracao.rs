@@ -160,6 +160,13 @@ fn comando(c: &mut Cliente, linha: &str) {
                 h.total >> 20,
                 crate::cpu::contador() / crate::cpu::frequencia_timer().max(1)
             );
+            #[cfg(feature = "rk322x")]
+            let s = {
+                use core::sync::atomic::Ordering::Relaxed;
+                use crate::gui::apps::filme as f;
+                s + &format!("video {} ms, {} quadros, {} esperas
+", f::POSICAO_MS.load(Relaxed), f::MOSTRADOS.load(Relaxed), f::ESPERAS.load(Relaxed))
+            };
             texto(c, &s);
         }
         "SH" => {

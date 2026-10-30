@@ -384,3 +384,181 @@ pub fn avcc(c: &[u8]) -> Option<(usize, Vec<&[u8]>, Vec<&[u8]>)> {
     let pps = lista(npps, &mut i)?;
     Some((tam, sps, pps))
 }
+
+// ---------------------------------------------------- MP4 fragmentado
+
+/// Um segmento do indice (sidx): onde fica no arquivo e quando comeca.
+#[derive(Clone, Copy, Debug)]
+pub struct Segmento {
+    pub pos: u64,
+    pub tamanho: u32,
+    /// Inicio na escala da trilha.
+    pub tempo: u64,
+    pub duracao: u32,
+}
+
+/// Valores padrao das amostras (trex do mvex), para quando o fragmento
+/// nao diz: (duracao, tamanho, flags).
+pub fn padroes(moov: &[u8]) -> (u32, u32, u32) {
+    let trex = achar(moov, b"mvex").and_then(|m| achar(m, b"trex"));
+    match trex {
+        Some(t) if t.len() >= 24 => (u32_(t, 12), u32_(t, 16), u32_(t, 20)),
+        _ => (0, 0, 0),
+    }
+}
+
+/// O moov de um arquivo de inicializacao (ftyp + moov [+ sidx]) ja na memoria.
+pub fn moov_de(b: &[u8]) -> Option<&[u8]> {
+    achar(b, b"moov")
+}
+
+/// O indice de segmentos: a caixa sidx dentro de `b`, que comeca em `pos`
+/// do arquivo.
+pub fn indice(b: &[u8], pos: u64) -> Vec<Segmento> {
+    let mut i = 0usize;
+    for (t, c) in caixas(b) {
+        let fim_caixa = (c.as_ptr() as usize - b.as_ptr() as usize) + c.len();
+        if &t == b"sidx" {
+            return sidx(c, pos + fim_caixa as u64);
+        }
+        i = fim_caixa;
+    }
+    let _ = i;
+    Vec::new()
+}
+
+/// `fim` = posicao no arquivo logo depois da caixa sidx.
+fn sidx(c: &[u8], fim: u64) -> Vec<Segmento> {
+    let mut v = Vec::new();
+    if c.len() < 12 {
+        return v;
+    }
+    let versao = c[0];
+    let (mut tempo, primeiro, mut i) = if versao == 0 {
+        if c.len() < 24 {
+            return v;
+        }
+        (u32_(c, 12) as u64, u32_(c, 16) as u64, 20)
+    } else {
+        if c.len() < 32 {
+            return v;
+        }
+        (u64_(c, 12), u64_(c, 20), 28)
+    };
+    let n = u16_(c, i + 2) as usize;
+    i += 4;
+    let mut pos = fim + primeiro;
+    for _ in 0..n {
+        if i + 12 > c.len() {
+            break;
+        }
+        let tamanho = u32_(c, i) & 0x7FFF_FFFF;
+        let duracao = u32_(c, i + 4);
+        v.push(Segmento { pos, tamanho, tempo, duracao });
+        pos += tamanho as u64;
+        tempo += duracao as u64;
+        i += 12;
+    }
+    v
+}
+
+/// Uma amostra de um fragmento: onde esta dentro dos bytes do segmento.
+#[derive(Clone, Copy, Debug)]
+pub struct AmostraFragmento {
+    pub inicio: usize,
+    pub tamanho: u32,
+    pub dts: u64,
+    pub desvio: i32,
+    pub chave: bool,
+}
+
+/// As amostras de um segmento (moof + mdat), com `padrao` do trex.
+pub fn fragmento(seg: &[u8], padrao: (u32, u32, u32)) -> Vec<AmostraFragmento> {
+    let mut v = Vec::new();
+    let base_seg = seg.as_ptr() as usize;
+    for (t, moof) in caixas(seg) {
+        if &t != b"moof" {
+            continue;
+        }
+        // o comeco da caixa moof (o conteudo menos o cabecalho de 8 bytes)
+        let inicio_moof = moof.as_ptr() as usize - base_seg - 8;
+        for (t2, traf) in caixas(moof) {
+            if &t2 != b"traf" {
+                continue;
+            }
+            let (mut dur_p, mut tam_p, mut flags_p) = padrao;
+            let mut base = inicio_moof as u64;
+            if let Some(tfhd) = achar(traf, b"tfhd") {
+                if tfhd.len() >= 8 {
+                    let f = u32_(tfhd, 0) & 0xFF_FFFF;
+                    let mut i = 8;
+                    if f & 1 != 0 && tfhd.len() >= i + 8 {
+                        base = u64_(tfhd, i);
+                        i += 8;
+                    }
+                    if f & 2 != 0 {
+                        i += 4;
+                    }
+                    if f & 8 != 0 && tfhd.len() >= i + 4 {
+                        dur_p = u32_(tfhd, i);
+                        i += 4;
+                    }
+                    if f & 0x10 != 0 && tfhd.len() >= i + 4 {
+                        tam_p = u32_(tfhd, i);
+                        i += 4;
+                    }
+                    if f & 0x20 != 0 && tfhd.len() >= i + 4 {
+                        flags_p = u32_(tfhd, i);
+                    }
+                }
+            }
+            let mut dts = match achar(traf, b"tfdt") {
+                Some(d) if d.first() == Some(&1) && d.len() >= 12 => u64_(d, 4),
+                Some(d) if d.len() >= 8 => u32_(d, 4) as u64,
+                _ => 0,
+            };
+            for (t3, trun) in caixas(traf) {
+                if &t3 != b"trun" || trun.len() < 8 {
+                    continue;
+                }
+                let versao = trun[0];
+                let f = u32_(trun, 0) & 0xFF_FFFF;
+                let n = u32_(trun, 4) as usize;
+                let mut i = 8;
+                let mut pos = base;
+                if f & 1 != 0 && trun.len() >= i + 4 {
+                    pos = (base as i64 + u32_(trun, i) as i32 as i64) as u64;
+                    i += 4;
+                }
+                let mut primeiro_flags = None;
+                if f & 4 != 0 && trun.len() >= i + 4 {
+                    primeiro_flags = Some(u32_(trun, i));
+                    i += 4;
+                }
+                for k in 0..n {
+                    let mut ler = |presente: bool, padrao: u32| -> u32 {
+                        if presente && trun.len() >= i + 4 {
+                            let x = u32_(trun, i);
+                            i += 4;
+                            x
+                        } else {
+                            padrao
+                        }
+                    };
+                    let dur = ler(f & 0x100 != 0, dur_p);
+                    let tam = ler(f & 0x200 != 0, tam_p);
+                    let fl = ler(f & 0x400 != 0, flags_p);
+                    let cto = ler(f & 0x800 != 0, 0);
+                    let flags = if k == 0 { primeiro_flags.unwrap_or(fl) } else { fl };
+                    let desvio = if versao == 0 { cto as i32 } else { cto as i32 };
+                    // sample_is_non_sync_sample = bit 16 das flags
+                    v.push(AmostraFragmento { inicio: pos as usize, tamanho: tam, dts, desvio, chave: flags & 0x1_0000 == 0 });
+                    pos += tam as u64;
+                    dts += dur as u64;
+                }
+            }
+        }
+    }
+    v.retain(|a| a.inicio + a.tamanho as usize <= seg.len());
+    v
+}
