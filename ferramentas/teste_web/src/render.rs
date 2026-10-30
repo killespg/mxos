@@ -179,3 +179,14 @@ pub fn montar(u: &str, largura: i32) -> Pagina {
     let (tipo, bytes) = crate::rede::pagina(u).unwrap();
     carregar(&bytes, Some(&tipo), u, largura).pag
 }
+
+/// As fontes de CSS da pagina: (Some(href), "") externa ou (None, texto) embutida.
+pub fn fontes_css_pub(doc: &crate::web::dom::Documento) -> Vec<(Option<String>, String)> {
+    fontes_css(doc)
+        .into_iter()
+        .map(|f| match f {
+            FonteCss::Embutida(t) => (None, t),
+            FonteCss::Externa(h) => (Some(h), String::new()),
+        })
+        .collect()
+}

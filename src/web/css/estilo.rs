@@ -3,7 +3,6 @@
 //! nele. Abreviacoes (margin, border, font, flex, grid-area...) sao
 //! expandidas aqui mesmo.
 
-use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -339,7 +338,7 @@ pub struct Estilo {
     pub borda_colapsada: bool,
     pub espaco_borda: Fixo,
     pub cursor_mao: bool,
-    pub variaveis: Rc<BTreeMap<Atomo, Rc<[Token]>>>,
+    pub variaveis: Rc<Variaveis>,
     // nao herdados
     pub decoracao: u8, // 1 sublinhado, 2 sobrelinha, 4 riscado
     pub cor_decoracao: Option<Cor>,
@@ -431,7 +430,7 @@ impl Estilo {
             borda_colapsada: false,
             espaco_borda: 2 * UM,
             cursor_mao: false,
-            variaveis: Rc::new(BTreeMap::new()),
+            variaveis: Rc::new(Variaveis::default()),
             decoracao: 0,
             cor_decoracao: None,
             alinhamento_vertical: AlinhamentoVertical::Base,
@@ -538,7 +537,50 @@ impl Estilo {
     }
 
     pub fn variavel(&self, nome: Atomo) -> Option<&Rc<[Token]>> {
-        self.variaveis.get(&nome)
+        self.variaveis.achar(nome)
+    }
+}
+
+/// Variaveis CSS (--x) em camadas: cada elemento que define alguma ganha
+/// uma camada so com as dele, apontando para a do pai. Antes era um mapa
+/// inteiro copiado a cada elemento que definia uma variavel (no GitHub,
+/// centenas de entradas copiadas milhares de vezes).
+#[derive(Clone, Debug, Default)]
+pub struct Variaveis {
+    proprias: Vec<(Atomo, Rc<[Token]>)>,
+    pai: Option<Rc<Variaveis>>,
+}
+
+impl PartialEq for Variaveis {
+    fn eq(&self, outro: &Variaveis) -> bool {
+        let pais = match (&self.pai, &outro.pai) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Rc::ptr_eq(a, b) || **a == **b,
+            _ => false,
+        };
+        pais && self.proprias.len() == outro.proprias.len() && self.proprias.iter().zip(&outro.proprias).all(|(a, b)| a.0 == b.0 && a.1 == b.1)
+    }
+}
+
+impl Variaveis {
+    /// Uma camada vazia em cima de `pai`.
+    pub fn sobre(pai: &Rc<Variaveis>) -> Variaveis {
+        Variaveis { proprias: Vec::new(), pai: Some(pai.clone()) }
+    }
+
+    /// Define (a ultima definicao vale).
+    pub fn definir(&mut self, nome: Atomo, valor: Rc<[Token]>) {
+        self.proprias.push((nome, valor));
+    }
+
+    pub fn achar(&self, nome: Atomo) -> Option<&Rc<[Token]>> {
+        let mut camada = self;
+        loop {
+            if let Some((_, v)) = camada.proprias.iter().rev().find(|(n, _)| *n == nome) {
+                return Some(v);
+            }
+            camada = camada.pai.as_deref()?;
+        }
     }
 }
 

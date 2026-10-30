@@ -44,3 +44,40 @@ fn perfil_props() {
     println!("{} amostras", a.len());
     teste_web::perfil::gravar("props", &a);
 }
+
+#[test]
+fn perfil_pagina() {
+    use teste_web::web::css::folha::{Folha, Midia};
+    use teste_web::web::html::{self, codificacao};
+    let url = std::env::var("URL").unwrap_or("https://github.com/".into());
+    let (tipo, bytes) = teste_web::rede::pagina(&url).unwrap();
+    // os CSS externos, baixados uma vez so (fora da medicao)
+    let doc = html::analisar_bytes(&bytes, Some(&tipo));
+    let mut css: Vec<(String, String)> = Vec::new();
+    for f in teste_web::render::fontes_css_pub(&doc) {
+        match f {
+            (None, t) => css.push((url.clone(), t)),
+            (Some(h), _) => {
+                let u = teste_web::web::url::resolver(&url, &h);
+                if let Ok((t, b)) = teste_web::rede::pagina(&u) {
+                    css.push((u, codificacao::texto(&b, Some(&t))));
+                }
+            }
+        }
+    }
+    println!("{} folhas", css.len());
+    let a = teste_web::perfil::amostrar(move || {
+        let fontes = teste_web::fontes();
+        for _ in 0..4 {
+            let t = std::time::Instant::now();
+            let doc = html::analisar_bytes(&bytes, Some(&tipo));
+            let m = Midia { largura: 1280.0, altura: 800.0 };
+            let folhas: Vec<Folha> = css.iter().map(|(u, t)| Folha::ler_com_base(t, &m, u)).collect();
+            let t1 = t.elapsed().as_secs_f64() * 1000.0;
+            let pag = teste_web::web::pagina::Pagina::montar(doc, folhas, 1280, 800, &fontes, &|_| None);
+            println!("html+css {t1:.0} ms, montar {:.0} ms, altura {}", t.elapsed().as_secs_f64() * 1000.0 - t1, pag.altura);
+        }
+    });
+    println!("{} amostras", a.len());
+    teste_web::perfil::gravar("pagina", &a);
+}

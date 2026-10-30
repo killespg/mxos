@@ -51,6 +51,11 @@ pub struct Fonte {
     cmap_formato: u16,
     kern: usize,
     kern_pares: usize,
+    /// Glifo de cada caractere abaixo de 512 (ASCII, Latin-1 e os acentos):
+    /// medir texto era uma busca binaria na cmap por letra.
+    rapido: alloc::boxed::Box<[u16; 512]>,
+    /// Kerning dos pares de glifos abaixo de 256 (sem busca binaria por par).
+    kern256: Option<alloc::boxed::Box<[i16]>>,
 }
 
 impl Fonte {
@@ -135,11 +140,40 @@ impl Fonte {
             kern: kern_off,
             kern_pares,
             dados,
+            rapido: alloc::boxed::Box::new([0; 512]),
+            kern256: None,
+        })
+        .map(|mut f| {
+            let mut rapido = alloc::boxed::Box::new([0u16; 512]);
+            for (c, g) in rapido.iter_mut().enumerate() {
+                *g = char::from_u32(c as u32).map_or(0, |c| f.glifo_lento(c));
+            }
+            f.rapido = rapido;
+            if f.kern_pares > 0 {
+                let mut t = alloc::vec![0i16; 256 * 256].into_boxed_slice();
+                for i in 0..f.kern_pares {
+                    let r = f.kern + 6 * i;
+                    let par = u32_em(&f.dados, r);
+                    let (a, b) = ((par >> 16) as usize, (par & 0xFFFF) as usize);
+                    if a < 256 && b < 256 {
+                        t[a * 256 + b] = i16_em(&f.dados, r + 4);
+                    }
+                }
+                f.kern256 = Some(t);
+            }
+            f
         })
     }
 
     /// Glifo de um caractere (0 = .notdef, nao tem).
     pub fn glifo(&self, c: char) -> u16 {
+        match self.rapido.get(c as usize) {
+            Some(&g) => g,
+            None => self.glifo_lento(c),
+        }
+    }
+
+    fn glifo_lento(&self, c: char) -> u16 {
         let d = &self.dados;
         let c = c as u32;
         let t = self.cmap;
@@ -210,6 +244,11 @@ impl Fonte {
     pub fn kerning(&self, a: u16, b: u16) -> i16 {
         if self.kern_pares == 0 {
             return 0;
+        }
+        if let Some(t) = &self.kern256 {
+            if a < 256 && b < 256 {
+                return t[a as usize * 256 + b as usize];
+            }
         }
         let alvo = ((a as u32) << 16) | b as u32;
         let (mut lo, mut hi) = (0usize, self.kern_pares);

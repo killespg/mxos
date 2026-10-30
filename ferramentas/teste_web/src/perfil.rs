@@ -23,7 +23,9 @@ pub fn amostrar<F: FnOnce() + Send + 'static>(f: F) -> Vec<u64> {
     let base = unsafe { GetModuleHandleW(core::ptr::null()) } as u64;
     let t = std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap();
     let h = t.as_raw_handle() as *mut core::ffi::c_void;
-    let mut amostras = Vec::new();
+    // tudo reservado antes: alocar com a outra thread suspensa (talvez
+    // segurando a trava do heap do Windows) trava as duas para sempre
+    let mut amostras: Vec<u64> = Vec::with_capacity(1 << 21);
     while !t.is_finished() {
         std::thread::sleep(std::time::Duration::from_micros(500));
         unsafe {
@@ -34,7 +36,9 @@ pub fn amostrar<F: FnOnce() + Send + 'static>(f: F) -> Vec<u64> {
             c.0[DESLOC_FLAGS..DESLOC_FLAGS + 4].copy_from_slice(&CONTEXT_CONTROL.to_le_bytes());
             if GetThreadContext(h, &mut c) != 0 {
                 let rip = u64::from_le_bytes(c.0[DESLOC_RIP..DESLOC_RIP + 8].try_into().unwrap());
-                amostras.push(rip.wrapping_sub(base));
+                if amostras.len() < amostras.capacity() {
+                    amostras.push(rip.wrapping_sub(base));
+                }
             }
             ResumeThread(h);
         }

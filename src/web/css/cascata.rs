@@ -188,7 +188,11 @@ fn precoce(nome: &str) -> bool {
 fn aplicar(e: &mut Estilo, pai: &Estilo, d: &Declaracao, calc: &Calculo) {
     if d.nome.starts_with("--") {
         let v: Rc<[Token]> = Rc::from(d.valor.as_slice());
-        Rc::make_mut(&mut e.variaveis).insert(Atomo::de(&d.nome), v);
+        // a primeira deste elemento abre a camada dele (sem copiar as do pai)
+        if Rc::ptr_eq(&e.variaveis, &pai.variaveis) {
+            e.variaveis = Rc::new(super::estilo::Variaveis::sobre(&pai.variaveis));
+        }
+        Rc::make_mut(&mut e.variaveis).definir(Atomo::de(&d.nome), v);
         return;
     }
     if let [Token::Ident(p)] = d.valor.as_slice() {
