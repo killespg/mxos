@@ -75,7 +75,7 @@ struct Heap {
 
 unsafe impl Sync for Heap {}
 
-#[global_allocator]
+#[cfg_attr(not(test), global_allocator)]
 static HEAP: Heap = Heap {
     trava: AtomicBool::new(false),
     estado: UnsafeCell::new(Estado {
@@ -310,4 +310,20 @@ pub fn estatisticas() -> Estatisticas {
             maior_bloco,
         }
     })
+}
+
+/// So para o teste de estresse no PC (ferramentas/teste_heap).
+#[cfg(test)]
+pub fn alocar_teste(l: Layout) -> *mut u8 {
+    unsafe { HEAP.alloc(l) }
+}
+
+#[cfg(test)]
+pub fn liberar_teste(p: *mut u8, l: Layout) {
+    unsafe { HEAP.dealloc(p, l) }
+}
+
+#[cfg(test)]
+pub fn realocar_teste(p: *mut u8, l: Layout, novo: usize) -> *mut u8 {
+    unsafe { HEAP.realloc(p, l, novo) }
 }

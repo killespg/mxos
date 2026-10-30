@@ -81,3 +81,40 @@ fn perfil_pagina() {
     println!("{} amostras", a.len());
     teste_web::perfil::gravar("pagina", &a);
 }
+
+#[test]
+fn perfil_imagens() {
+    use teste_web::web::{dom, html, url};
+    let pagina = std::env::var("URL").unwrap_or("https://www.uol.com.br/".into());
+    let (tipo, bytes) = teste_web::rede::pagina(&pagina).unwrap();
+    let doc = html::analisar_bytes(&bytes, Some(&tipo));
+    let mut imagens: Vec<Vec<u8>> = Vec::new();
+    for id in doc.descendentes(0) {
+        let Some(e) = doc.elemento(id) else { continue };
+        if !e.eh(teste_web::web::atomo::a::IMG) {
+            continue;
+        }
+        let Some(s) = e.atributo(teste_web::web::atomo::a::SRC) else { continue };
+        if let Ok((_, b)) = teste_web::rede::pagina(&url::resolver(&pagina, s)) {
+            imagens.push(b);
+        }
+        if imagens.len() >= 30 {
+            break;
+        }
+    }
+    let _ = dom::RAIZ;
+    println!("{} imagens, {} KB", imagens.len(), imagens.iter().map(|b| b.len()).sum::<usize>() / 1024);
+    let a = teste_web::perfil::amostrar(move || {
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            let mut px = 0;
+            for b in &imagens {
+                if let Some(i) = teste_web::web::imagem::decodificar_max(b, 1280, 1280) {
+                    px += i.px.len();
+                }
+            }
+            println!("decodificar {:.0} ms, {} Mpx", t.elapsed().as_secs_f64() * 1000.0, px / 1_000_000);
+        }
+    });
+    teste_web::perfil::gravar("imagens", &a);
+}

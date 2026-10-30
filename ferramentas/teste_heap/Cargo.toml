@@ -1,0 +1,9 @@
+# Teste de estresse do alocador do kernel (src/heap.rs) no PC.
+#   cd ferramentas/teste_heap && cargo +stable-x86_64-pc-windows-gnu test --release
+[package]
+name = "teste_heap"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
