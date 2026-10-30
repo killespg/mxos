@@ -146,7 +146,19 @@ pub fn vigiar_travamento() {
             }
         }
     }
-    if ultimo != 0 && agora.wrapping_sub(ultimo) as u64 > TRAVADO_S * crate::timer::HZ {
+    let travado = ultimo != 0 && agora.wrapping_sub(ultimo) as u64 > TRAVADO_S * crate::timer::HZ;
+    if !travado {
+        // o watchdog de hardware (~14-28 s) e alimentado aqui tambem: uma
+        // pagina pesada segura o laco principal por mais que isso, e ai a
+        // placa reiniciava sem deixar rastro. Travamento de verdade fica com
+        // este detector (60 s, grava onde parou); o watchdog so pega o caso
+        // de a propria IRQ do timer morrer
+        #[cfg(feature = "rk322x")]
+        unsafe {
+            core::ptr::write_volatile(0x110A_000C as *mut u32, 0x76);
+        }
+    }
+    if travado {
         rastro(0xB0B0_0000, ULTIMO_PC_IRQ.load(Ordering::Relaxed));
         // OS_REG5/6: o laco JS (posicao no fonte, FNV do nome da funcao);
         // OS_REG7: o chamador pela cadeia de frame pointers

@@ -89,9 +89,9 @@ comeco:
 .endif
     faixa   1
 
-    @ watchdog da RK322x (0x110A0000, livre: o Android nao usa): ~28 s
-    @ (TORR 15 = 2^31 ciclos do pclk). O Rust alimenta a cada linha do boot
-    @ e no laco principal; se o boot travar, a placa reinicia quente e o
+    @ watchdog da RK322x (0x110A0000, livre: o Android nao usa): ~14-28 s
+    @ (TORR 15 = 2^31 ciclos do pclk). O Rust alimenta a cada linha do boot,
+    @ no laco principal e na IRQ do timer; se o boot travar, reinicia quente e o
     @ rastro no GRF_OS_REG1 continua la para o Android ler.
     ldr     r0, =0x110A0000
     mov     r1, #0xFF
