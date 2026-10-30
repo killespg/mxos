@@ -480,6 +480,11 @@ pub fn aplicar_config() -> Option<String> {
             Some(p) => erro = definir(p.mhz, Some(p.uv)).err(),
             None => erro = Some("cpu_perfil desconhecido"),
         },
+        // sem escolha: o "fabrica" do Android (1200 MHz), se da para subir a
+        // tensao junto; o U-Boot pode ter deixado a CPU bem mais lenta
+        None if hw::regulador_ok(VDD_ARM) && mhz() < PERFIS[1].mhz => {
+            erro = definir(PERFIS[1].mhz, Some(PERFIS[1].uv)).err();
+        }
         None => {}
     }
     if cfg.obter("gpu_turbo").is_some_and(|v| v.trim() == "sim") {
