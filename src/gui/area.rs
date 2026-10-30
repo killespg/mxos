@@ -26,20 +26,20 @@ use super::widgets::{self, DuploClique, Icone};
 const VERSAO: &str = concat!(env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"));
 
 // Medidas da barra de tarefas (em pixels, relativas a barra).
-const MARGEM_BARRA: i32 = 3;
-const LARGURA_INICIAR: i32 = 84;
+const MARGEM_BARRA: i32 = 6;
+const LARGURA_INICIAR: i32 = 96;
 /// Hora em cima e data embaixo, encostadas na direita.
 const LARGURA_RELOGIO: i32 = 104;
 /// Raio dos cantos dos botoes da barra.
-const RAIO_BARRA: i32 = 4;
+const RAIO_BARRA: i32 = 8;
 const LARGURA_MAX_BOTAO: i32 = 170;
 const LARGURA_MIN_BOTAO: i32 = 28;
-const ESPACO_BOTOES: i32 = 4;
+const ESPACO_BOTOES: i32 = 6;
 
 // Medidas do menu iniciar.
 const LARGURA_MENU: i32 = 224;
 const ALTURA_CABECALHO: i32 = 40;
-const ALTURA_ITEM: i32 = 28;
+const ALTURA_ITEM: i32 = 34;
 
 // Desenhos do papel de parede (em pixels da tela).
 const LADO_XADREZ: i32 = 32;
@@ -49,10 +49,12 @@ const PASSO_PONTOS: i32 = 24;
 // Atalhos da area de trabalho: uma coluna de celulas a esquerda.
 const MARGEM_ATALHOS: i32 = 12;
 const LARGURA_ATALHO: i32 = 112;
-const ALTURA_ATALHO: i32 = 64;
+const ALTURA_ATALHO: i32 = 78;
 const ESPACO_ATALHOS: i32 = 8;
 const ESCALA_ATALHO: i32 = 2;
 const TOPO_ICONE_ATALHO: i32 = 6;
+/// Lado do azulejo do icone na area de trabalho.
+const LADO_ICONE_ATALHO: i32 = 42;
 const COR_NOME_ATALHO: Cor = 0x00FF_FFFF;
 const SOMBRA_NOME_ATALHO: Cor = 0x0010_1418;
 
@@ -222,6 +224,90 @@ fn pintar_imagem(s: &mut Superficie, area: Retangulo, origem: (i32, i32), altura
     true
 }
 
+/// O "Gradiente" no estilo atual: degrade diagonal escuro com tres manchas
+/// de luz suaves (violeta, ciano e azul puxados da cor do papel),
+/// calculado uma vez para a tela e guardado.
+struct Aurora(core::cell::UnsafeCell<Option<(i32, i32, Cor, Vec<Cor>)>>);
+unsafe impl Sync for Aurora {}
+static AURORA: Aurora = Aurora(core::cell::UnsafeCell::new(None));
+
+fn canais(c: Cor) -> [f32; 3] {
+    [(c >> 16 & 0xFF) as f32, (c >> 8 & 0xFF) as f32, (c & 0xFF) as f32]
+}
+
+fn juntar_canais(a: [f32; 3], b: [f32; 3], f: f32) -> [f32; 3] {
+    [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f]
+}
+
+fn gerar_aurora(l: i32, a: i32, cor: Cor) -> Vec<Cor> {
+    let base = canais(cor);
+    let escuro = [base[0] * 0.35, base[1] * 0.35, base[2] * 0.40];
+    let meio = [base[0] * 0.9, base[1] * 0.9, base[2] * 1.0];
+    let violeta = juntar_canais(base, canais(0x007C_3AED), 0.55);
+    let ciano = juntar_canais(base, canais(0x0006_B6D4), 0.50);
+    let azul = juntar_canais(base, canais(0x003B_82F6), 0.45);
+    let (lf, af) = (l as f32, a as f32);
+    // (centro x, centro y, raio, forca, cor)
+    let manchas = [
+        (0.16 * lf, 0.12 * af, 0.55 * lf, 0.75, violeta),
+        (0.90 * lf, 0.88 * af, 0.50 * lf, 0.65, ciano),
+        (0.62 * lf, 0.30 * af, 0.32 * lf, 0.40, azul),
+    ];
+    let mut px = Vec::with_capacity((l * a) as usize);
+    for y in 0..a {
+        for x in 0..l {
+            let t = (x as f32 / lf) * 0.35 + (y as f32 / af) * 0.65;
+            let mut c = juntar_canais(meio, escuro, t);
+            for &(cx, cy, r, forca, m) in &manchas {
+                let (dx, dy) = (x as f32 - cx, y as f32 - cy);
+                let d2 = (dx * dx + dy * dy) / (r * r);
+                // Cauchy: cai devagar, sem borda
+                let f = forca / (1.0 + 3.0 * d2);
+                c = juntar_canais(c, m, f * f.min(1.0));
+            }
+            // pontilhado de +-1 contra faixas no degrade
+            let ruido = ((x * 7 + y * 13) & 3) as f32 - 1.5;
+            let canal = |v: f32| (v + ruido).clamp(0.0, 255.0) as u32;
+            px.push(canal(c[0]) << 16 | canal(c[1]) << 8 | canal(c[2]));
+        }
+    }
+    px
+}
+
+/// Copia as linhas da aurora (gera se a tela ou a cor mudou). false = a
+/// tela ainda nao tem tamanho.
+fn pintar_aurora(s: &mut Superficie, area: Retangulo, origem: (i32, i32), altura_area: i32, cor: Cor) -> bool {
+    let (l, a) = tema::tamanho_da_tela();
+    if l <= 0 || altura_area <= 0 {
+        return false;
+    }
+    let cache = unsafe { &mut *AURORA.0.get() };
+    if !matches!(cache, Some((cl, ca, cc, _)) if *cl == l && *ca == altura_area && *cc == cor) {
+        *cache = Some((l, altura_area, cor, gerar_aurora(l, altura_area, cor)));
+    }
+    let Some((l, a, _, px)) = cache else { return false };
+    let largura_s = s.largura() as i32;
+    let destino = s.pixels_mut();
+    for y in area.y..area.baixo() {
+        let y_tela = y + origem.1;
+        if y_tela >= *a {
+            break;
+        }
+        if y_tela < 0 {
+            continue;
+        }
+        let x0 = (area.x + origem.0).max(0);
+        let x1 = (area.direita() + origem.0).min(*l);
+        if x1 <= x0 {
+            continue;
+        }
+        let linha = &px[(y_tela * *l + x0) as usize..(y_tela * *l + x1) as usize];
+        let d = (y * largura_s + x0 - origem.0) as usize;
+        destino[d..d + linha.len()].copy_from_slice(linha);
+    }
+    true
+}
+
 /// Papel de parede (da aparencia atual) dentro de `area`, so nas linhas
 /// acima de `altura_area` (o resto e da barra de tarefas). As cores vem da
 /// Aparencia, nao do tema `_t` (o parametro ficou da versao 0.6).
@@ -238,6 +324,9 @@ pub fn pintar_papel(s: &mut Superficie, area: Retangulo, origem: (i32, i32), alt
         return;
     }
     if pintar_imagem(s, area, origem, altura_area) {
+        return;
+    }
+    if ap.papel == PapelDeParede::Gradiente && pintar_aurora(s, area, origem, altura_area, ap.cor_papel) {
         return;
     }
     // degrade da propria cor: mais escura em cima, mais clara embaixo
@@ -372,16 +461,13 @@ impl BarraTarefas {
         Retangulo::novo(x, MARGEM_BARRA, LARGURA_RELOGIO, ALTURA_BARRA_TAREFAS - 2 * MARGEM_BARRA)
     }
 
-    /// Fundo da barra (um degrade bem leve) na parte `r` dela.
+    /// Fundo da barra (chapado, com um fio claro em cima) na parte `r` dela.
     fn pintar_fundo(&mut self, r: Retangulo, t: &Tema) {
         let area = self.superficie.area();
-        let (cima, baixo) = (clarear(t.barra_tarefas, 14), t.barra_tarefas);
-        for y in r.y.max(0)..r.baixo().min(area.altura) {
-            let cor = grafico::misturar(cima, baixo, (y * 255 / area.altura.max(1)) as u32);
-            self.superficie.retangulo(Retangulo::novo(r.x, y, r.largura, 1), cor);
-        }
+        let r = r.intersecao(&area);
+        self.superficie.retangulo(r, t.barra_tarefas);
         if r.y == 0 {
-            self.superficie.retangulo(Retangulo::novo(r.x, 0, r.largura, 1), clarear(t.barra_tarefas, 50));
+            self.superficie.retangulo(Retangulo::novo(r.x, 0, r.largura, 1), grafico::misturar(t.barra_tarefas, t.barra_texto, 30));
         }
     }
 
@@ -392,14 +478,14 @@ impl BarraTarefas {
 
         let iniciar = self.iniciar();
         if menu_aberto {
-            self.superficie.retangulo_arredondado(iniciar, RAIO_BARRA, clarear(t.barra_tarefas, 40));
+            self.superficie.retangulo_arredondado(iniciar, RAIO_BARRA, grafico::misturar(t.barra_tarefas, t.barra_texto, 36));
         }
         desenhar_logo(&mut self.superficie, iniciar, t.barra_texto, t);
 
         self.pintar_relogio(hora, data, t);
         let caixa = self.caixa_relogio();
         // risquinho separando os botoes do relogio
-        self.superficie.retangulo(Retangulo::novo(caixa.x - 8, 10, 1, area.altura - 20), clarear(t.barra_tarefas, 30));
+        self.superficie.retangulo(Retangulo::novo(caixa.x - 8, 14, 1, area.altura - 28), grafico::misturar(t.barra_tarefas, t.barra_texto, 40));
         self.desenhar_botoes(itens, iniciar.direita() + 8, caixa.x - 16, t);
         self.suja = false;
     }
@@ -440,26 +526,22 @@ impl BarraTarefas {
                 break; // janelas demais: as ultimas ficam sem botao
             }
             let r = Retangulo::novo(x, MARGEM_BARRA, largura, altura);
-            // botao plano: so a janela ativa tem fundo; o tracinho embaixo
-            // diz quem esta aberta (comprido = ativa, curto = aberta)
+            // pilula: so a janela ativa tem fundo; o traco embaixo diz quem
+            // esta aberta (comprido e na cor de destaque = ativa)
             let fundo = match (item.focada, item.minimizada) {
-                (true, _) => Some(clarear(t.barra_tarefas, 34)),
-                (false, false) => Some(clarear(t.barra_tarefas, 14)),
+                (true, _) => Some(grafico::misturar(t.barra_tarefas, t.barra_texto, 30)),
+                (false, false) => Some(grafico::misturar(t.barra_tarefas, t.barra_texto, 12)),
                 (false, true) => None,
             };
             if let Some(cor) = fundo {
                 self.superficie.retangulo_arredondado(r, RAIO_BARRA, cor);
             }
-            let (traco, cor_traco) = if item.focada {
-                (r.largura - 2 * RAIO_BARRA - 4, t.destaque)
-            } else {
-                (14, clarear(t.barra_tarefas, 90))
-            };
-            self.superficie.retangulo_arredondado(Retangulo::novo(r.x + (r.largura - traco) / 2, r.baixo() - 3, traco, 3), 1, cor_traco);
+            let (traco, cor_traco) = if item.focada { (18, t.destaque) } else { (6, grafico::misturar(t.barra_tarefas, t.barra_texto, 110)) };
+            self.superficie.retangulo_arredondado(Retangulo::novo(r.x + (r.largura - traco) / 2, r.baixo() - 4, traco, 3), 1, cor_traco);
             let cor_texto = if item.minimizada { grafico::misturar(t.barra_texto, t.barra_tarefas, 110) } else { t.barra_texto };
-            let texto = fonte::encurtar(item.titulo, r.largura - 18, &INTER);
-            let faixa = Retangulo::novo(r.x, r.y, r.largura, r.altura - 3);
-            widgets::texto_na_faixa(&mut self.superficie, r.x + 9, faixa, &texto, cor_texto, &INTER);
+            let texto = fonte::encurtar(item.titulo, r.largura - 24, &INTER);
+            let faixa = Retangulo::novo(r.x, r.y, r.largura, r.altura - 4);
+            widgets::texto_na_faixa(&mut self.superficie, r.x + 12, faixa, &texto, cor_texto, &INTER);
             self.botoes.push((r.deslocado(0, self.y), item.id));
         }
     }
@@ -478,16 +560,16 @@ impl BarraTarefas {
     }
 }
 
-/// Botao Iniciar: um quadradinho na cor de destaque e "MXOS" em
-/// seminegrito, os dois juntos no meio do botao.
+/// Botao Iniciar: quatro quadradinhos arredondados na cor de destaque e
+/// "MXOS" em seminegrito, juntos no meio do botao.
 fn desenhar_logo(s: &mut Superficie, r: Retangulo, cor: Cor, t: &Tema) {
-    const LADO: i32 = 10;
-    const ESPACO: i32 = 7;
+    const LADO: i32 = 16;
+    const ESPACO: i32 = 9;
     let largura = LADO + ESPACO + INTER_NEGRITO.largura("MXOS");
     let x = r.x + (r.largura - largura) / 2;
     let y = r.y + (r.altura - LADO) / 2;
-    for (dx, dy) in [(0, 0), (6, 0), (0, 6), (6, 6)] {
-        s.retangulo(Retangulo::novo(x + dx, y + dy, 4, 4), t.destaque);
+    for (dx, dy) in [(0, 0), (9, 0), (0, 9), (9, 9)] {
+        s.retangulo_arredondado(Retangulo::novo(x + dx, y + dy, 7, 7), 2, t.destaque);
     }
     widgets::texto_na_faixa(s, x + LADO + ESPACO, r, "MXOS", cor, &INTER_NEGRITO);
 }
@@ -601,7 +683,8 @@ impl MenuIniciar {
         let area = s.area();
         s.limpar(t.fundo_janela);
         let cabecalho = Retangulo::novo(0, 0, area.largura, ALTURA_CABECALHO);
-        s.gradiente_vertical(cabecalho, clarear(t.titulo_ativo, 40), t.titulo_ativo);
+        s.retangulo(cabecalho, t.titulo_ativo);
+        s.retangulo(Retangulo::novo(0, ALTURA_CABECALHO - 1, area.largura, 1), grafico::misturar(t.titulo_ativo, t.borda, 150));
         let base = INTER_TITULO.base_centralizada(0, ALTURA_CABECALHO);
         let largura = s.texto_com(12, base, "MXOS", t.titulo_texto, &INTER_TITULO);
         let versao = format!("versão {VERSAO}");
@@ -612,17 +695,20 @@ impl MenuIniciar {
         }
         for (i, item) in self.itens.iter().enumerate() {
             let y = ALTURA_CABECALHO + 3 + i as i32 * ALTURA_ITEM;
-            let linha = Retangulo::novo(3, y, area.largura - 6, ALTURA_ITEM);
+            let linha = Retangulo::novo(6, y, area.largura - 12, ALTURA_ITEM);
             let destacado = self.destacado == Some(i);
             let (fundo, frente) = if destacado { (t.destaque, 0x00FF_FFFF) } else { (t.fundo_janela, t.texto) };
-            s.retangulo(linha, fundo);
+            s.retangulo(linha, t.fundo_janela);
+            if destacado {
+                s.retangulo_arredondado(linha, 6, fundo);
+            }
             match item.icone {
-                Some(icone) => widgets::icone(s, linha.x + 6, y + (ALTURA_ITEM - 16) / 2, icone, 1),
+                Some(icone) => super::icones::icone_app(s, linha.x + 6, y + (ALTURA_ITEM - 22) / 2, icone, 22),
                 // sem icone: um quadradinho no lugar
                 None => s.retangulo(Retangulo::novo(linha.x + 10, y + (ALTURA_ITEM - 8) / 2, 8, 8), if destacado { frente } else { t.destaque }),
             }
             let nome = fonte::encurtar(item.nome, linha.largura - 38, &INTER);
-            widgets::texto_na_faixa(s, linha.x + 32, linha, &nome, frente, &INTER);
+            widgets::texto_na_faixa(s, linha.x + 38, linha, &nome, frente, &INTER);
         }
         s.contorno(area, t.borda, 1);
     }
@@ -779,13 +865,13 @@ fn desenhar_atalho(a: &mut Atalho, r: Retangulo, escolhido: bool, sob: bool, alt
     let area = s.area();
     pintar_papel(s, area, (r.x, r.y), altura_area, ap);
     if escolhido {
-        tingir(s, area, t.destaque, 130);
-        s.contorno(area, clarear(t.destaque, 90), 1);
+        tingir(s, area, t.destaque, 110);
     } else if sob {
-        tingir(s, area, 0x00FF_FFFF, 40);
+        tingir(s, area, 0x00FF_FFFF, 30);
     }
-    let lado = 16 * ESCALA_ATALHO;
-    widgets::icone(s, (LARGURA_ATALHO - lado) / 2, TOPO_ICONE_ATALHO, a.icone, ESCALA_ATALHO);
+    let lado = LADO_ICONE_ATALHO;
+    super::icones::icone_app(s, (LARGURA_ATALHO - lado) / 2, TOPO_ICONE_ATALHO, a.icone, lado);
+    let _ = ESCALA_ATALHO;
     let nome = fonte::encurtar(a.nome, LARGURA_ATALHO - 8, &INTER);
     let x = (LARGURA_ATALHO - INTER.largura(&nome)) / 2;
     let base = TOPO_ICONE_ATALHO + lado + 5 + INTER.ascendente;

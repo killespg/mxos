@@ -4,9 +4,9 @@
 //! e as que comecam com '#' sao ignoradas. Exemplo:
 //!
 //!   # MXOS: configuracoes (chave=valor)
-//!   tema=Azul
+//!   tema=Grafite
 //!   papel=gradiente
-//!   cor_papel=204060
+//!   cor_papel=182448
 //!   relogio_segundos=sim
 //!   icones=sim
 //!   arrastar_contorno=sim
@@ -38,9 +38,9 @@ const TAMANHO_MAXIMO: usize = 16 * 1024;
 
 /// Chaves conhecidas e os valores de fabrica, na ordem em que sao gravadas.
 const PADROES: [(&str, &str); 9] = [
-    ("tema", "Azul"),
+    ("tema", "Grafite"),
     ("papel", "gradiente"),
-    ("cor_papel", "204060"),
+    ("cor_papel", "182448"),
     ("relogio_segundos", "sim"),
     ("icones", "sim"),
     ("arrastar_contorno", "sim"),

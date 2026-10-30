@@ -134,9 +134,14 @@ const SOMBRA: i32 = 6;
 /// Opacidade da sombra no miolo (0 a 255).
 const SOMBRA_ALFA: u32 = 120;
 /// Botoes [_] e [x] da barra de titulo.
-const LADO_BOTAO: i32 = 20;
+const LADO_BOTAO: i32 = 22;
+/// Sombra das janelas: espalha SOMBRA_RAIO pixels em volta e desce
+/// SOMBRA_DESCE (a janela "flutua"), com a forca de SOMBRA_FORCA.
+const SOMBRA_RAIO: i32 = 18;
+const SOMBRA_DESCE: i32 = 6;
+const SOMBRA_FORCA: u32 = 110;
 /// Raio dos cantos das janelas.
-const RAIO_JANELA: i32 = 8;
+const RAIO_JANELA: i32 = 10;
 /// Onde abrem as janelas do menu: uma escada a partir daqui.
 const CASCATA_X: i32 = 48;
 const CASCATA_Y: i32 = 32;
@@ -224,7 +229,8 @@ impl Janela {
 
     /// Moldura mais a sombra: tudo que a janela pinta na cena.
     fn limites(&self) -> Retangulo {
-        Retangulo::novo(self.x, self.y, self.largura() + SOMBRA, self.altura() + SOMBRA)
+        let topo = self.y - SOMBRA_RAIO + SOMBRA_DESCE;
+        Retangulo::novo(self.x - SOMBRA_RAIO, topo, self.largura() + 2 * SOMBRA_RAIO, self.altura() + 2 * SOMBRA_RAIO)
     }
 
     fn barra_titulo(&self) -> Retangulo {
@@ -278,35 +284,37 @@ impl Janela {
         self.conteudo_sujo = false;
     }
 
-    /// Desenha a barra de titulo no cache: degrade leve, titulo em
-    /// seminegrito e os botoes [_] e [x] arredondados. A janela que nao
-    /// esta em foco fica apagada (titulo e botoes mais fracos).
+    /// Desenha a barra de titulo no cache: cor chapada da familia da
+    /// janela, titulo a esquerda e os botoes redondos [-] e [x] (o de
+    /// fechar fica vermelho so na janela em foco). Fora de foco, tudo mais
+    /// apagado; uma linha fina separa a barra do conteudo.
     fn desenhar_barra(&mut self, focada: bool, t: &Tema) {
         let s = &mut self.barra;
         let area = s.area();
         let base = if focada { t.titulo_ativo } else { t.titulo_inativo };
-        s.gradiente_vertical(area, area::clarear(base, 18), base);
-        // brilho de 1 px no alto, como luz batendo na borda
-        s.retangulo(Retangulo::novo(0, 0, area.largura, 1), area::clarear(base, 60));
+        s.retangulo(area, base);
+        s.retangulo(Retangulo::novo(0, area.altura - 1, area.largura, 1), grafico::misturar(base, t.borda, 150));
 
-        let espaco = area.largura - 2 * (LADO_BOTAO + 6) - 24;
+        let espaco = area.largura - 2 * (LADO_BOTAO + 8) - 32;
         let texto = fonte::encurtar(&self.titulo, espaco, &INTER_NEGRITO);
         let linha = INTER_NEGRITO.base_centralizada(0, ALTURA_TITULO);
-        let cor_texto = if focada { t.titulo_texto } else { grafico::misturar(t.titulo_texto, base, 80) };
-        s.texto_com(12, linha, &texto, cor_texto, &INTER_NEGRITO);
+        let cor_texto = if focada { t.titulo_texto } else { grafico::misturar(t.titulo_texto, base, 110) };
+        s.texto_com(16, linha, &texto, cor_texto, &INTER_NEGRITO);
 
-        let simbolo = if focada { 0x00FF_FFFF } else { grafico::misturar(0x00FF_FFFF, base, 90) };
+        let simbolo = if focada { t.titulo_texto } else { grafico::misturar(t.titulo_texto, base, 120) };
         let m = botao_minimizar_local(area.largura);
-        s.retangulo_arredondado(m, 4, area::clarear(base, 28));
-        s.retangulo(Retangulo::novo(m.x + 6, m.y + m.altura / 2, m.largura - 12, 2), simbolo);
+        disco_suave(s, m, grafico::misturar(base, t.titulo_texto, if focada { 34 } else { 18 }), base);
+        let (cx, cy) = (m.x + m.largura / 2, m.y + m.altura / 2);
+        s.retangulo(Retangulo::novo(cx - 5, cy, 10, 2), simbolo);
 
         let f = botao_fechar_local(area.largura);
-        let vermelho = if focada { t.fechar } else { grafico::misturar(t.fechar, base, 110) };
-        s.retangulo_arredondado(f, 4, vermelho);
-        // X de 2 px, um pouco menor que o botao
+        let (fundo_x, cor_x) = if focada { (t.fechar, 0x00FF_FFFF) } else { (grafico::misturar(base, t.titulo_texto, 18), simbolo) };
+        disco_suave(s, f, fundo_x, base);
+        // X de 2 px no meio do disco
+        let (cx, cy) = (f.x + f.largura / 2, f.y + f.altura / 2);
         for d in 0..2 {
-            s.linha(f.x + 6 + d, f.y + 6, f.direita() - 7 + d, f.baixo() - 7, simbolo);
-            s.linha(f.direita() - 7 + d, f.y + 6, f.x + 6 + d, f.baixo() - 7, simbolo);
+            s.linha(cx - 4 + d, cy - 4, cx + 3 + d, cy + 3, cor_x);
+            s.linha(cx + 3 + d, cy - 4, cx - 4 + d, cy + 3, cor_x);
         }
         self.barra_suja = false;
     }
@@ -316,7 +324,7 @@ impl Janela {
     /// cantos e guardado antes e volta, suavizado, depois.
     fn pintar(&self, cena: &mut Superficie, area: Retangulo, t: &Tema) {
         let m = self.moldura();
-        pintar_sombra(cena, m, area, t.sombra);
+        pintar_sombra_suave(cena, m, area, t.sombra);
         let cantos = guardar_cantos(cena, m, area);
         self.pintar_retangular(cena, area, t);
         arredondar_cantos(cena, m, area, &cantos, t.borda);
@@ -415,6 +423,64 @@ fn botao_fechar_local(largura: i32) -> Retangulo {
 /// Botao [_], a esquerda do [x].
 fn botao_minimizar_local(largura: i32) -> Retangulo {
     botao_fechar_local(largura).deslocado(-(LADO_BOTAO + 6), 0)
+}
+
+/// Disco antialiasado que preenche `r` (quadrado), sobre o fundo `fundo`.
+fn disco_suave(s: &mut Superficie, r: Retangulo, cor: Cor, fundo: Cor) {
+    // raio e centro em quartos de pixel; 4 x 4 amostras por pixel
+    let raio = r.largura * 2;
+    let (cx, cy) = (r.x * 4 + raio, r.y * 4 + raio);
+    for y in r.y..r.baixo() {
+        for x in r.x..r.direita() {
+            let mut dentro = 0u32;
+            for sy in 0..4 {
+                for sx in 0..4 {
+                    let (dx, dy) = (x * 4 + sx - cx, y * 4 + sy - cy);
+                    if dx * dx + dy * dy <= raio * raio {
+                        dentro += 1;
+                    }
+                }
+            }
+            if dentro > 0 {
+                s.pixel(x, y, grafico::misturar(fundo, cor, dentro * 255 / 16));
+            }
+        }
+    }
+}
+
+/// Sombra macia em volta da moldura, descida SOMBRA_DESCE: escurece o que
+/// ja esta na cena com forca que cai como 1 - (d / raio)^2 da borda para
+/// fora. Dentro da moldura so os cantos (a janela pinta o resto).
+fn pintar_sombra_suave(cena: &mut Superficie, moldura: Retangulo, area: Retangulo, cor: Cor) {
+    let base = moldura.deslocado(0, SOMBRA_DESCE);
+    let r = SOMBRA_RAIO;
+    let toda = Retangulo::novo(base.x - r, base.y - r, base.largura + 2 * r, base.altura + 2 * r);
+    let alvo = toda.intersecao(&area).intersecao(&cena.area());
+    if alvo.vazio() {
+        return;
+    }
+    let miolo = Retangulo::novo(moldura.x, moldura.y + RAIO_JANELA, moldura.largura, moldura.altura - 2 * RAIO_JANELA);
+    let miolo2 = Retangulo::novo(moldura.x + RAIO_JANELA, moldura.y, moldura.largura - 2 * RAIO_JANELA, moldura.altura);
+    let largura = cena.largura();
+    let pixels = cena.pixels_mut();
+    let r2 = (r * r) as u32;
+    for y in alvo.y..alvo.baixo() {
+        let dy = (base.y - y).max(y - (base.baixo() - 1)).max(0);
+        let linha = y as usize * largura;
+        for x in alvo.x..alvo.direita() {
+            if miolo.contem(x, y) || miolo2.contem(x, y) {
+                continue;
+            }
+            let dx = (base.x - x).max(x - (base.direita() - 1)).max(0);
+            let d2 = (dx * dx + dy * dy) as u32;
+            if d2 >= r2 {
+                continue;
+            }
+            let alfa = SOMBRA_FORCA * (r2 - d2) / r2 * (r2 - d2) / r2;
+            let p = &mut pixels[linha + x as usize];
+            *p = grafico::misturar(*p, cor, alfa);
+        }
+    }
 }
 
 /// Sombra suave embaixo e a direita da moldura: escurece o que ja esta

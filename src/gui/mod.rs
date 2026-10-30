@@ -21,6 +21,7 @@ pub mod realce;
 pub mod area;
 pub mod cursor;
 pub mod grafico;
+pub mod icones;
 pub mod janelas;
 pub mod tema;
 pub mod transferencia;

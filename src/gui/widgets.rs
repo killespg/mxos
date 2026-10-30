@@ -85,10 +85,9 @@ pub fn botao(s: &mut Superficie, r: Retangulo, texto: &str, destaque: bool) {
     }
     let t = tema::atual();
     let (fundo, frente) = if destaque { (t.destaque, BRANCO) } else { (t.botao, t.botao_texto) };
-    s.retangulo(r, fundo);
-    // a linha de baixo um pouco mais escura da volume sem sair do chapado
-    s.retangulo(Retangulo::novo(r.x + 1, r.baixo() - 2, r.largura - 2, 1), area::escurecer(fundo, 22));
-    s.contorno(r, grafico::misturar(fundo, t.borda, 110), 1);
+    // chapado e arredondado, com um contorno fino do proprio tom
+    s.retangulo_arredondado(r, 6, grafico::misturar(fundo, t.borda, 90));
+    s.retangulo_arredondado(Retangulo::novo(r.x + 1, r.y + 1, r.largura - 2, r.altura - 2), 5, fundo);
     let texto = fonte::encurtar(texto, r.largura - 8, &INTER);
     texto_centrado(s, r, &texto, frente, &INTER);
 }
@@ -110,9 +109,9 @@ pub fn painel(s: &mut Superficie, r: Retangulo) {
         return;
     }
     let t = tema::atual();
-    let fundo = if tema_escuro(&t) { area::clarear(t.fundo_janela, 10) } else { BRANCO };
-    s.retangulo(r, fundo);
-    s.contorno(r, cor_linha(&t), 1);
+    let fundo = if tema_escuro(&t) { area::clarear(t.fundo_janela, 10) } else { grafico::misturar(BRANCO, t.fundo_janela, 40) };
+    s.retangulo_arredondado(r, 8, cor_linha(&t));
+    s.retangulo_arredondado(Retangulo::novo(r.x + 1, r.y + 1, r.largura - 2, r.altura - 2), 7, fundo);
 }
 
 /// Texto simples (Inter 13 px). As maiusculas ocupam a faixa de 8 px a
