@@ -82,7 +82,7 @@ impl Shell {
     pub fn nova(terminal: Terminal, el_boot: u64) -> Shell {
         // Quem entrega o kernel em EL2 (U-Boot, QEMU com virtualization=on)
         // atende o PSCI por SMC; o QEMU em EL1 atende por HVC.
-        let psci = if cfg!(feature = "mxq") || el_boot >= 2 { Via::Smc } else { Via::Hvc };
+        let psci = if cfg!(any(feature = "mxq", feature = "rk322x")) || el_boot >= 2 { Via::Smc } else { Via::Hvc };
         // as configuracoes reiniciam e desligam sem passar pelo shell
         psci::definir_via(psci);
         anotar_video(&terminal);
@@ -94,7 +94,7 @@ impl Shell {
     #[cfg_attr(feature = "mxq", allow(dead_code))]
     pub fn painel(console: crate::video::tela::Console) -> Shell {
         let el_boot = EL_BOOT.load(Ordering::Relaxed) as u64;
-        let psci = if cfg!(feature = "mxq") || el_boot >= 2 { Via::Smc } else { Via::Hvc };
+        let psci = if cfg!(any(feature = "mxq", feature = "rk322x")) || el_boot >= 2 { Via::Smc } else { Via::Hvc };
         Shell::montar(Terminal::so_console(console), el_boot, psci)
     }
 
@@ -224,7 +224,7 @@ impl Shell {
 
     pub fn banner(&mut self) {
         diga!(self, "");
-        diga!(self, "MXOS {VERSAO} — kernel ARM64 escrito do zero em Rust");
+        diga!(self, "MXOS {VERSAO} — {}", crate::plataforma::DESCRICAO_KERNEL.to_lowercase());
         diga!(
             self,
             "Plataforma: {}  |  MMU ligada  |  heap de {}  |  timer a {} Hz",
@@ -868,12 +868,12 @@ fn separar_argumentos(linha: &str) -> Vec<String> {
 }
 
 /// O painel de drivers (so no QEMU) mostra o video que o terminal ligou.
-#[cfg(not(feature = "mxq"))]
+#[cfg(not(any(feature = "mxq", feature = "rk322x")))]
 fn anotar_video(terminal: &Terminal) {
     crate::drivers::definir_video(terminal.video().ok());
 }
 
-#[cfg(feature = "mxq")]
+#[cfg(any(feature = "mxq", feature = "rk322x"))]
 fn anotar_video(_terminal: &Terminal) {}
 
 /// Cada chamada ocupa ~1 KB de pilha; com 64 KB, logo bate na pagina de guarda.

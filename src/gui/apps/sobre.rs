@@ -52,7 +52,7 @@ impl Sobre {
         let x = 18 + s.texto_com(18, base, "MXOS", BRANCO, &INTER_GRANDE) + 16;
         s.texto_com(x, base - 12, &format!("Versão {VERSAO}"), BRANCO, &INTER_TITULO);
         let suave = grafico::misturar(BRANCO, t.destaque, 50);
-        s.texto_com(x, base + 5, "Kernel ARM64 escrito do zero em Rust", suave, &INTER);
+        s.texto_com(x, base + 5, crate::plataforma::DESCRICAO_KERNEL, suave, &INTER);
     }
 
     /// Barra de uso do heap embaixo do texto.

@@ -70,6 +70,12 @@ mod atual {
 
 pub use atual::*;
 
+/// "Kernel ARM64 ..." no QEMU e na Amlogic, "Kernel ARMv7 ..." na RK322x.
+#[cfg(target_arch = "arm")]
+pub const DESCRICAO_KERNEL: &str = "Kernel ARMv7 (32 bits) escrito do zero em Rust";
+#[cfg(not(target_arch = "arm"))]
+pub const DESCRICAO_KERNEL: &str = "Kernel ARM64 escrito do zero em Rust";
+
 /// Segundos desde 1970 (UTC). QEMU: o RTC PL031. TV box: ela nao tem
 /// relogio com bateria; ate a rede acertar a hora (rede::ntp) vale uma data
 /// fixa de 2026, para os certificados do HTTPS nao parecerem do futuro.

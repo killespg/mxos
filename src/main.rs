@@ -212,5 +212,6 @@ fn panic(info: &PanicInfo) -> ! {
     let _ = writeln!(console_boot::Erro, "\n*** PÂNICO no kernel: {info}");
     // com a area de trabalho ligada o erro tambem aparece na tela
     excecao::tela_de_erro("PÂNICO NO KERNEL", |painel| write!(painel, "{info}"));
+    console_boot::reiniciar_depois_de_erro();
     cpu::parar()
 }

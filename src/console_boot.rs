@@ -97,6 +97,20 @@ pub fn rastro(valor: u32, endereco: u32) {
     let _ = (valor, endereco);
 }
 
+/// Fim de um erro fatal na TV box: deixa a mensagem uns segundos na tela e
+/// reinicia quente pela CRU. O rastro fica no GRF e a box volta sozinha
+/// para o Android, onde da para ler o que aconteceu (sem cabo serial).
+pub fn reiniciar_depois_de_erro() {
+    #[cfg(feature = "rk322x")]
+    {
+        let fim = crate::cpu::contador() + crate::cpu::frequencia_timer() * 8;
+        while crate::cpu::contador() < fim {
+            core::hint::spin_loop();
+        }
+        unsafe { core::ptr::write_volatile(0x110E_01F0 as *mut u32, 0xFDB9) };
+    }
+}
+
 /// Alimenta o watchdog que o boot_arm.s ligou (~28 s): cada linha do boot e
 /// cada volta do laco principal. Travou, a placa reinicia sozinha.
 pub fn alimentar() {
@@ -108,7 +122,12 @@ pub fn alimentar() {
 
 /// Primeira coisa do kernel_main: acha o framebuffer do U-Boot e limpa.
 pub fn iniciar() -> bool {
-    let Some((base, passo, largura, altura, bpp, espelho)) = janela_do_uboot() else { return false };
+    rastro(0x10, 0); // entrou no Rust
+    let Some((base, passo, largura, altura, bpp, espelho)) = janela_do_uboot() else {
+        rastro(0x12, 0); // sem tela do U-Boot
+        return false;
+    };
+    rastro(0x11, base as u32);
     BASE.store(base, Ordering::Relaxed);
     PASSO.store(passo, Ordering::Relaxed);
     LARGURA.store(largura, Ordering::Relaxed);
@@ -220,7 +239,11 @@ fn nova_linha() {
 }
 
 fn escrever_com(texto: &str, cor: u32) {
-    let n = ESCRITAS.fetch_add(1, Ordering::Relaxed) + 1;
+    // load + store, nunca fetch_add: antes da MMU toda a memoria e
+    // "strongly-ordered" e o LDREX/STREX do ARMv7 pode falhar para sempre
+    // (so o nucleo 0 roda no boot, entao nao ha corrida)
+    let n = ESCRITAS.load(Ordering::Relaxed) + 1;
+    ESCRITAS.store(n, Ordering::Relaxed);
     if cor == COR {
         rastro(0x100 + n as u32, 0);
     }
@@ -237,7 +260,8 @@ fn escrever_com(texto: &str, cor: u32) {
                 if COLUNA.load(Ordering::Relaxed) >= colunas {
                     nova_linha();
                 }
-                let coluna = COLUNA.fetch_add(1, Ordering::Relaxed);
+                let coluna = COLUNA.load(Ordering::Relaxed);
+                COLUNA.store(coluna + 1, Ordering::Relaxed);
                 caractere(c, coluna, LINHA.load(Ordering::Relaxed), cor);
             }
         }

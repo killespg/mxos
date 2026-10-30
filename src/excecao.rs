@@ -89,6 +89,7 @@ extern "C" fn tratar_excecao(tipo: u64, esr: u64, elr: u64, far: u64) -> ! {
     let _ = descrever(&mut tela, tipo, esr, elr, far);
     let _ = writeln!(tela, "Sistema parado.");
     tela_de_erro("EXCEÇÃO DA CPU", |painel| descrever(painel, tipo, esr, elr, far));
+    crate::console_boot::reiniciar_depois_de_erro();
     cpu::parar()
 }
 

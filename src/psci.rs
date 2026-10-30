@@ -89,7 +89,8 @@ pub fn via() -> Via {
     match VIA.load(Ordering::Relaxed) {
         1 => Via::Hvc,
         2 => Via::Smc,
-        _ if cfg!(feature = "mxq") => Via::Smc,
+        // TV boxes: firmware seguro por SMC (sem hipervisor, HVC e instrucao invalida)
+        _ if cfg!(any(feature = "mxq", feature = "rk322x")) => Via::Smc,
         _ => Via::Hvc,
     }
 }

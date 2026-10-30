@@ -341,7 +341,7 @@ fn linha_driver(saida: &mut dyn Write, dispositivo: &str, driver: &str, endereco
 }
 
 /// O que so existe no QEMU virt: RTC, ramfb, os 32 slots virtio e as janelas.
-#[cfg(not(feature = "mxq"))]
+#[cfg(not(any(feature = "mxq", feature = "rk322x")))]
 mod maquina {
     use alloc::format;
     use alloc::string::String;
@@ -744,7 +744,7 @@ mod maquina {
 
 /// Na TV box (ainda sem testar) so existe o que e de todo ARM: CPU, GIC,
 /// timer e serial. Sem virtio, disco, rede nem area de trabalho.
-#[cfg(feature = "mxq")]
+#[cfg(any(feature = "mxq", feature = "rk322x"))]
 mod maquina {
     use alloc::string::String;
     use alloc::vec::Vec;

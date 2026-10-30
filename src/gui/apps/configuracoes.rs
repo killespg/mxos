@@ -758,7 +758,7 @@ impl Configuracoes {
         // a versao na mesma linha de base do nome, logo depois dele
         let x = MARGEM + 64 + INTER_GRANDE.largura("MXOS") + 10;
         s.texto(x, TOPO + 10, VERSAO, cor_escolha(t), 2);
-        widgets::rotulo(s, MARGEM + 64, TOPO + 36, "Kernel ARM64 escrito do zero em Rust", cor_fraca(t));
+        widgets::rotulo(s, MARGEM + 64, TOPO + 36, crate::plataforma::DESCRICAO_KERNEL, cor_fraca(t));
 
         let painel = Retangulo::novo(MARGEM, Y_PAINEL_SISTEMA, LARGURA_UTIL, LINHAS_SISTEMA * ALTURA_LINHA + 12);
         widgets::painel(s, painel);
