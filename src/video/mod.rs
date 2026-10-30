@@ -20,4 +20,6 @@ pub mod ramfb;
 pub mod rga;
 #[cfg(feature = "rk322x")]
 pub mod rk322x;
+#[cfg(feature = "rk322x")]
+pub mod rkvdec;
 pub mod tela;

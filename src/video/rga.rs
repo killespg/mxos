@@ -72,6 +72,11 @@ static COR_TROCADA: AtomicU8 = AtomicU8::new(0);
 static PASSO: AtomicU8 = AtomicU8::new(0);
 static LIDO: AtomicU32 = AtomicU32::new(0);
 static ULTIMO_INT: AtomicU32 = AtomicU32::new(0);
+/// Falhas seguidas (3 = desliga) e quantas no total.
+static FALHAS: AtomicU8 = AtomicU8::new(0);
+static FALHAS_TOTAL: AtomicU32 = AtomicU32::new(0);
+/// O ultimo trabalho que nao terminou (para o comando "rga").
+static mut TRABALHO_RUIM: [u32; 32] = [0; 32];
 
 const PASSOS: [&str; 7] = ["nao testado", "versao 0 (relogio desligado?)", "preencher nao terminou", "cor errada no preenchimento", "preencheu fora do retangulo", "copiar nao terminou", "copia errada"];
 
@@ -210,7 +215,10 @@ fn autoteste() -> bool {
 /// Testa de novo (mesmo depois de falhar) e conta o que viu: o comando
 /// "rga" do shell.
 pub fn relatorio() -> String {
+    let falhas = FALHAS_TOTAL.load(Ordering::Relaxed);
+    let ruim = unsafe { TRABALHO_RUIM };
     ESTADO.store(DESCONHECIDO, Ordering::Relaxed);
+    FALHAS.store(0, Ordering::Relaxed);
     let ok = iniciar();
     let cru_ = |r: usize| unsafe { read_volatile((CRU + r) as *const u32) };
     let mut s = format!(
@@ -228,15 +236,38 @@ pub fn relatorio() -> String {
         let p = PASSO.load(Ordering::Relaxed) as usize;
         s += &format!("  parou em: {} (lido {:08x})
 ", PASSOS.get(p).unwrap_or(&"?"), LIDO.load(Ordering::Relaxed));
-    } else if COR_TROCADA.load(Ordering::Relaxed) != 0 {
+    }
+    if falhas > 0 {
+        s += &format!("  {falhas} trabalho(s) nao terminaram; o ultimo:\n ");
+        for (i, v) in ruim.iter().enumerate().filter(|(_, v)| **v != 0) {
+            s += &format!(" {:03x}={v:08x}", 0x100 + 4 * i);
+        }
+        s += "\n";
+    }
+    if ok && COR_TROCADA.load(Ordering::Relaxed) != 0 {
         s += "  (cor do preenchimento com R e B trocados: corrigido)
 ";
     }
     s
 }
 
-/// Manda o trabalho e espera (ate 100 ms). false = o RGA nao respondeu (e
-/// fica desligado dai em diante).
+/// Reset do RGA pela CRU (SOFTRST_CON6 bits 11..14: RGA, NOC, aclk, hclk).
+fn resetar() {
+    unsafe {
+        write_volatile((CRU + 0x128) as *mut u32, 0x7800 << 16 | 0x7800);
+    }
+    crate::cpu::barreira();
+    for _ in 0..1000 {
+        core::hint::spin_loop();
+    }
+    unsafe {
+        write_volatile((CRU + 0x128) as *mut u32, 0x7800 << 16);
+    }
+    crate::cpu::barreira();
+}
+
+/// Manda o trabalho e espera (ate 100 ms). false = o RGA nao respondeu:
+/// leva um reset, e depois de 3 falhas seguidas fica desligado.
 fn executar(t: &[u32; 32]) -> bool {
     if !disponivel() {
         return false;
@@ -258,10 +289,16 @@ fn executar(t: &[u32; 32]) -> bool {
         if int & INT_TERMINOU != 0 {
             // limpa os pedidos (bits 4..7 = os mesmos de 0..3)
             escrever(INT, (int & !0xF0) | (int & 0xF) << 4);
+            FALHAS.store(0, Ordering::Relaxed);
             return true;
         }
         if crate::cpu::contador() > fim {
-            ESTADO.store(DESLIGADO, Ordering::Relaxed);
+            unsafe { TRABALHO_RUIM = *t };
+            FALHAS_TOTAL.fetch_add(1, Ordering::Relaxed);
+            resetar();
+            if FALHAS.fetch_add(1, Ordering::Relaxed) >= 2 {
+                ESTADO.store(DESLIGADO, Ordering::Relaxed);
+            }
             return false;
         }
         core::hint::spin_loop();

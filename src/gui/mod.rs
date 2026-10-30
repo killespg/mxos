@@ -101,7 +101,12 @@ pub fn rodar(mut shell: Shell, mut entrada: Entrada, framebuffer: Tela) -> ! {
         crate::nas::atender();
         crate::depuracao::atender();
         for url in crate::depuracao::paginas_para_abrir() {
-            gerenciador.abrir(apps::navegador::abrir_em(&url), 40, 30);
+            // arquivo de midia do disco abre no visualizador; o resto, no navegador
+            if !url.contains("://") && apps::visualizador::eh_midia(&url) {
+                gerenciador.abrir(apps::visualizador::abrir(&url), 40, 30);
+            } else {
+                gerenciador.abrir(apps::navegador::abrir_em(&url), 40, 30);
+            }
         }
         if timer::tiques() >= proximo_tique {
             proximo_tique = timer::tiques() + TIQUES_POR_TIQUE_APP;

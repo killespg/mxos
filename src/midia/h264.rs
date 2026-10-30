@@ -948,9 +948,18 @@ impl Dpb {
     }
 
     /// Quantos buffers o player deve criar para esse SPS: as referencias,
-    /// os que esperam a vez, o atual e um de folga.
+    /// os que esperam a vez, o que esta sendo decodificado e dois que o
+    /// player segura (o quadro na tela e o proximo).
     pub fn buffers_para(sps: &Sps) -> usize {
-        sps.max_refs.max(1) as usize + Dpb::atraso(sps) + 2
+        sps.max_refs.max(1) as usize + Dpb::atraso(sps) + 3
+    }
+
+    /// O player tirou esse buffer da saida e vai mostrar: nao reusar ate
+    /// `devolver`.
+    pub fn segurar(&mut self, buffer: usize) {
+        if buffer < self.usados.len() {
+            self.usados[buffer] = true;
+        }
     }
 
     /// Manda para a saida o de menor POC entre os que esperam.
@@ -987,8 +996,7 @@ impl Dpb {
         while self.mostrar_um() {}
     }
 
-    /// O player largou esse buffer sem passar por `terminar` (erro do
-    /// hardware): pode ser reusado.
+    /// O player largou esse buffer (ja mostrou): pode ser reusado.
     pub fn devolver(&mut self, buffer: usize) {
         if buffer < self.usados.len() {
             self.usados[buffer] = false;

@@ -1,5 +1,5 @@
-//! Visualizador de midia: imagens (PNG, JPEG, GIF), video AVI/MJPEG e
-//! audio (WAV, MOD). Os arquivos de audio e video sao lidos do disco aos
+//! Visualizador de midia: imagens (PNG, JPEG, GIF), video AVI/MJPEG, MP4
+//! H.264 (na TV box, pelo hardware: ver filme.rs) e audio (WAV, MOD). Os arquivos de audio e video sao lidos do disco aos
 //! pedacos (crate::midia); o som vai pela fila do /dev/dsp (audio::dsp),
 //! que o laco principal passa para a placa.
 //!
@@ -65,7 +65,7 @@ impl Fonte for FonteDisco {
 
 pub fn eh_midia(caminho: &str) -> bool {
     let m = caminho.to_ascii_lowercase();
-    [".png", ".jpg", ".jpeg", ".gif", ".avi", ".wav", ".mod", ".mp3"].iter().any(|e| m.ends_with(e))
+    [".png", ".jpg", ".jpeg", ".gif", ".avi", ".mp4", ".m4v", ".wav", ".mod", ".mp3"].iter().any(|e| m.ends_with(e))
 }
 
 /// Som tocando: decodificador, conversao de taxa e a fila do dsp.
@@ -116,6 +116,8 @@ impl Som {
 enum Conteudo {
     Imagem(Imagem),
     Video { avi: midia::avi::Avi, quadro: Option<Imagem>, indice: usize, inicio: u64, pausado_em: Option<u64> },
+    #[cfg(feature = "rk322x")]
+    Filme(Box<super::filme::Filme>),
     Audio,
     Erro(String),
 }
@@ -187,6 +189,21 @@ impl Visualizador {
             }
             return;
         }
+        if m.ends_with(".mp4") || m.ends_with(".m4v") {
+            #[cfg(feature = "rk322x")]
+            match super::filme::Filme::abrir(&self.caminho) {
+                Ok(f) => {
+                    self.descricao = f.descricao();
+                    self.conteudo = Conteudo::Filme(Box::new(f));
+                }
+                Err(e) => self.conteudo = Conteudo::Erro(String::from(e)),
+            }
+            #[cfg(not(feature = "rk322x"))]
+            {
+                self.conteudo = Conteudo::Erro(String::from("vídeo H.264 só na TV box (decodificador por hardware)"));
+            }
+            return;
+        }
         if m.ends_with(".wav") || m.ends_with(".mod") || m.ends_with(".mp3") {
             let taxa = self.ligar_placa();
             let taxa_dec = if taxa > 0 { taxa } else { 48000 };
@@ -231,6 +248,10 @@ impl Visualizador {
                 None => *pausado_em = Some(agora_us()),
             }
         }
+        #[cfg(feature = "rk322x")]
+        if let Conteudo::Filme(f) = &mut self.conteudo {
+            f.pausar();
+        }
     }
 
     fn pular(&mut self, ms: i64) {
@@ -255,6 +276,13 @@ impl Visualizador {
                     }
                     mudou = true;
                 }
+            }
+        }
+        #[cfg(feature = "rk322x")]
+        if let Conteudo::Filme(f) = &mut self.conteudo {
+            mudou |= f.tique();
+            if let Some(e) = f.erro.take() {
+                self.descricao = format!("{} - {e}", f.descricao());
             }
         }
         mudou
@@ -321,6 +349,8 @@ impl App for Visualizador {
             Conteudo::Imagem(img) => Self::desenhar_imagem(s, img, area, self.zoom),
             Conteudo::Video { quadro: Some(img), .. } => Self::desenhar_imagem(s, img, area, 0),
             Conteudo::Video { .. } => {}
+            #[cfg(feature = "rk322x")]
+            Conteudo::Filme(f) => f.desenhar(s, area),
             Conteudo::Audio => {
                 s.texto(24, 24, nome_do_caminho(&self.caminho), TEXTO, 2);
                 let r = Retangulo::novo(24, 90, LARGURA - 48, area.altura - 130);
@@ -338,10 +368,16 @@ impl App for Visualizador {
             (Conteudo::Video { avi, indice, pausado_em, .. }, _) => {
                 (*indice as u64 * avi.us_por_quadro as u64 / 1000, Some(avi.duracao_ms()), pausado_em.is_some())
             }
+            #[cfg(feature = "rk322x")]
+            (Conteudo::Filme(f), _) => (f.posicao_ms(), Some(f.duracao_ms()), f.pausado()),
             (_, Some(som)) => (som.audio.posicao_ms(), som.audio.duracao_ms(), !som.tocando),
             _ => (0, None, false),
         };
-        if matches!(self.conteudo, Conteudo::Video { .. } | Conteudo::Audio) {
+        #[cfg(feature = "rk322x")]
+        let filme = matches!(self.conteudo, Conteudo::Filme(_));
+        #[cfg(not(feature = "rk322x"))]
+        let filme = false;
+        if filme || matches!(self.conteudo, Conteudo::Video { .. } | Conteudo::Audio) {
             let estado = if pausado { "pausado" } else if self.som.as_ref().is_some_and(|s| s.acabou) { "fim" } else { "tocando" };
             let t = match total {
                 Some(t) => format!("{} / {}  ({estado})  espaço pausa, setas pulam", tempo(pos), tempo(t)),

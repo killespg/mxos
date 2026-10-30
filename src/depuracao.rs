@@ -8,7 +8,8 @@
 //!   INFO              -> frequencia, temperatura, memoria, rede
 //!   SH <comando>      -> roda no shell e devolve a saida
 //!   TELA              -> OK <largura> <altura>\n + XRGB8888 linha a linha
-//!   ABRIR <url>       -> abre o navegador nessa pagina
+//!   ABRIR <url>       -> abre o navegador nessa pagina (ou o visualizador,
+//!                        se for um arquivo de midia do disco)
 //!   ANDROID           -> reinicia no Android (TV box)
 //!   TCHAU
 //! Toda resposta de texto termina com uma linha "." sozinha.
