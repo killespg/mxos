@@ -58,6 +58,13 @@ const BUFFER: usize = 1536;
 /// sua linha de cache.
 const TX_ENCADEADO: u32 = 1 << 20;
 const RX_ENCADEADO: u32 = 1 << 14;
+/// Descritores "normais" (sem o modo enhanced): os controles vao na 2a
+/// palavra. TDES1: IC 31, LS 30, FS 29, TCH 24; RDES1: RCH 24.
+const N_TX_ULTIMO: u32 = 1 << 30;
+const N_TX_PRIMEIRO: u32 = 1 << 29;
+const N_ENCADEADO: u32 = 1 << 24;
+/// DMA_HW_FEATURE: bit 24 = tem descritores enhanced.
+const DMA_RECURSOS: usize = 0x1058;
 
 #[repr(C, align(64))]
 #[derive(Clone, Copy, Default)]
@@ -81,6 +88,8 @@ pub struct Dwmac {
     buffers_tx: Vec<Box<Buf>>,
     proximo_rx: usize,
     proximo_tx: usize,
+    /// Formato normal dos descritores (o chip nao tem o enhanced).
+    normal: bool,
 }
 
 fn ler(r: usize) -> u32 {
@@ -277,9 +286,12 @@ mod plataforma {
 /// sairam e chegaram de verdade, erros e onde o DMA esta.
 pub fn diagnostico() -> alloc::string::String {
     alloc::format!(
-        "MAC config 0x{:08x}  DMA bus 0x{:08x} modo 0x{:08x} status 0x{:08x}\n\
+        "recursos 0x{:08x} (descritores {})\n\
+         MAC config 0x{:08x}  DMA bus 0x{:08x} modo 0x{:08x} status 0x{:08x}\n\
          saiu: {} quadros   chegou: {} quadros ({} com CRC errado)\n\
          descritor atual TX 0x{:08x}  RX 0x{:08x}",
+        ler(DMA_RECURSOS),
+        if ler(DMA_RECURSOS) & 1 << 24 != 0 { "enhanced" } else { "normais" },
         ler(MAC_CONFIG),
         ler(DMA_BUS),
         ler(DMA_MODO),
@@ -347,13 +359,17 @@ impl Dwmac {
             buffers_tx: (0..DESCRITORES).map(|_| Box::new(Buf([0u8; BUFFER]))).collect(),
             proximo_rx: 0,
             proximo_tx: 0,
+            // o envio com descritores enhanced nao saia na RK322x (0 quadros
+            // enviados): o chip diz no HW_FEATURE qual formato tem
+            normal: ler(DMA_RECURSOS) & 1 << 24 == 0,
         };
         for k in 0..DESCRITORES {
             let seguinte = (k + 1) % DESCRITORES;
             let prox_rx = &placa.rx[seguinte] as *const Descritor as u32;
             let prox_tx = &placa.tx[seguinte] as *const Descritor as u32;
-            placa.rx[k] = Descritor { d0: DONO, d1: RX_ENCADEADO | BUFFER as u32, buffer: placa.buffers_rx[k].0.as_ptr() as u32, proximo: prox_rx, ..Default::default() };
-            placa.tx[k] = Descritor { d0: TX_ENCADEADO, buffer: placa.buffers_tx[k].0.as_ptr() as u32, proximo: prox_tx, ..Default::default() };
+            let (rx_d1, tx_d0) = if placa.normal { (N_ENCADEADO, 0) } else { (RX_ENCADEADO, TX_ENCADEADO) };
+            placa.rx[k] = Descritor { d0: DONO, d1: rx_d1 | BUFFER as u32, buffer: placa.buffers_rx[k].0.as_ptr() as u32, proximo: prox_rx, ..Default::default() };
+            placa.tx[k] = Descritor { d0: tx_d0, buffer: placa.buffers_tx[k].0.as_ptr() as u32, proximo: prox_tx, ..Default::default() };
             mmu::limpar_cache(placa.buffers_rx[k].0.as_ptr() as usize, BUFFER);
         }
         limpar(&*placa.rx);
@@ -419,9 +435,15 @@ impl Placa for Dwmac {
         }
         let n = n.max(60);
         mmu::limpar_cache(self.buffers_tx[k].0.as_ptr() as usize, BUFFER);
-        self.tx[k].d1 = n as u32;
-        // dono, primeiro e ultimo pedaco do quadro, encadeado
-        self.tx[k].d0 = DONO | 1 << 29 | 1 << 28 | TX_ENCADEADO;
+        if self.normal {
+            // primeiro e ultimo pedaco e encadeado na 2a palavra; a 1a so o dono
+            self.tx[k].d1 = N_TX_ULTIMO | N_TX_PRIMEIRO | N_ENCADEADO | n as u32;
+            self.tx[k].d0 = DONO;
+        } else {
+            self.tx[k].d1 = n as u32;
+            // dono, primeiro e ultimo pedaco do quadro, encadeado
+            self.tx[k].d0 = DONO | 1 << 29 | 1 << 28 | TX_ENCADEADO;
+        }
         limpar(&self.tx[k]);
         escrever(DMA_TX_POLL, 1);
         let _ = ler(DMA_STATUS);
